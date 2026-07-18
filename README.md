@@ -1,6 +1,6 @@
 # Astral Arena
 
-Astral Arena es un prototipo de *arena shooter* 3D para navegador, inspirado en el ritmo de combate, los escudos recargables, el control de armas del mapa y los modos competitivos de los shooters de consola de principios de los 2000. Su identidad propia combina astronautas estilizados con una dirección visual *low-poly* de paisajes fríos, minerales y luminosos: una referencia al lenguaje gráfico de *Firewatch*, pero sin depender de su paleta otoñal ni reproducir sus recursos.
+Astral Arena es un prototipo de *arena shooter* 3D para navegador, inspirado en el ritmo de combate, los escudos recargables, el control de armas del mapa y los modos competitivos de los shooters de consola de principios de los 2000. Su identidad propia, **Arctic Orbital Dusk**, combina astronautas estilizados, arquitectura orbital y grandes siluetas de paisaje frío: toma del lenguaje gráfico de *Firewatch* la composición y la perspectiva atmosférica, pero no su paleta otoñal ni sus recursos.
 
 El diseño se concentra en dos formatos:
 
@@ -16,7 +16,7 @@ El repositorio contiene una **primera vertical jugable completa**, no una versi�
 - simulación determinista del combate, movimiento, colisiones, escudos, reapariciones, proyectiles, granadas, cuerpo a cuerpo, puntuación y objetivos;
 - un mapa inicial, **Cresta del Cráter**, con bases, torre central, coberturas, plataformas, puntos de aparición y armas recogibles;
 - seis armas, bots con tres dificultades, controles de teclado/ratón y mando, y audio procedural;
-- una capa de presentación Three.js para escenario, astronautas, armas, objetivos, proyectiles, efectos y cámara en primera persona;
+- una capa de presentación Three.js con iluminación PBR, entorno procedural, sombras, bloom moderado, color grading, arquitectura biselada, astronautas articulados, seis modelos de arma diferenciados, paisaje atmosférico y cámara en primera persona;
 - menús, configuración 1v1/4v4, lobby manual P2P, HUD, marcador, kill feed, audio y pantalla de resultado integrados;
 - transporte WebRTC P2P nativo con señalización manual, mensajes tipados y un host con hasta siete invitados;
 - 20 pruebas automatizadas para combate, balance inicial, objetivos, bots, regresiones, acceso a la torre, puntuación y determinismo básico.
@@ -220,7 +220,10 @@ Para convertir la vertical en un lanzamiento público, el orden recomendado es: 
     ├── network
     │   └── P2PNetwork.ts      # WebRTC, señalización base64 y DataChannels
     ├── render
-    │   └── ArenaRenderer.ts   # Escena Three.js, astronautas, cámara y efectos
+    │   ├── ArenaRenderer.ts   # Escena Three.js, iluminación, cámara y efectos
+    │   ├── landscapeGeometry.ts # Crestas y vegetación procedural
+    │   ├── visualTextures.ts  # Entorno, terreno y máscaras procedurales
+    │   └── weaponModels.ts    # Modelos PBR y poses de las seis armas
     ├── main.ts                # Entrada de la aplicación
     ├── styles.css             # Dirección visual, menús y HUD responsive
     └── vite-env.d.ts          # Tipos de Vite
