@@ -7,7 +7,7 @@ import { SMAAPass } from 'three/addons/postprocessing/SMAAPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 
-import { isJumpPad } from '../game/map';
+import { isJumpPad, JUMP_PAD_ZONES } from '../game/map';
 import type {
   FlagState,
   GameEvent,
@@ -37,6 +37,7 @@ import { createColdAlienPlant, createLayeredRidge } from './landscapeGeometry';
 import {
   createFacilityEnvironment,
   createUnderstoryField,
+  createWetRockField,
   type FacilityEnvironmentBundle,
   type ScatterExclusion,
 } from './facilityEnvironment';
@@ -303,8 +304,16 @@ export class ArenaRenderer {
     this.scene.fog = new THREE.FogExp2(0x9dbdb8, 0.0086);
     this.scene.environmentIntensity = 0.92;
     this.camera.rotation.order = 'YXZ';
-    this.camera.position.set(44, 24, 42);
-    this.camera.lookAt(0, 4, 0);
+    const mapWidth = this.map.bounds.maxX - this.map.bounds.minX;
+    const mapDepth = this.map.bounds.maxZ - this.map.bounds.minZ;
+    const mapCenterX = (this.map.bounds.minX + this.map.bounds.maxX) * 0.5;
+    const mapCenterZ = (this.map.bounds.minZ + this.map.bounds.maxZ) * 0.5;
+    this.camera.position.set(
+      mapCenterX + mapWidth * 0.61,
+      Math.max(24, Math.max(mapWidth, mapDepth) * 0.27),
+      mapCenterZ + mapDepth * 0.66,
+    );
+    this.camera.lookAt(mapCenterX, 4, mapCenterZ);
     this.scene.add(this.camera);
 
     this.createEnvironmentMap();
@@ -606,6 +615,11 @@ export class ArenaRenderer {
   }
 
   private createLighting(): void {
+    const width = this.map.bounds.maxX - this.map.bounds.minX;
+    const depth = this.map.bounds.maxZ - this.map.bounds.minZ;
+    // Cover the full arena diagonal so the sun's rotated shadow camera cannot
+    // clip casters in the outer corners of the expanded map.
+    const shadowExtent = Math.hypot(width * 0.5, depth * 0.5) + 5;
     const hemisphere = new THREE.HemisphereLight(0xb9ded5, 0x07110e, 0.58);
     this.scene.add(hemisphere);
 
@@ -613,12 +627,12 @@ export class ArenaRenderer {
     sun.position.set(-46, 48, -52);
     sun.castShadow = true;
     sun.shadow.mapSize.set(2048, 2048);
-    sun.shadow.camera.left = -48;
-    sun.shadow.camera.right = 48;
-    sun.shadow.camera.top = 42;
-    sun.shadow.camera.bottom = -42;
+    sun.shadow.camera.left = -shadowExtent;
+    sun.shadow.camera.right = shadowExtent;
+    sun.shadow.camera.top = shadowExtent;
+    sun.shadow.camera.bottom = -shadowExtent;
     sun.shadow.camera.near = 4;
-    sun.shadow.camera.far = 132;
+    sun.shadow.camera.far = 180;
     sun.shadow.bias = -0.00035;
     sun.shadow.normalBias = 0.032;
     this.scene.add(sun);
@@ -632,23 +646,38 @@ export class ArenaRenderer {
     this.scene.add(towerKey);
 
     const auroraBase = new THREE.PointLight(TEAM_COLORS.aurora.glow, 15, 14, 2);
-    auroraBase.position.set(-29, 3.4, 0);
+    auroraBase.position.set(
+      this.map.flagBases.aurora.x,
+      this.map.flagBases.aurora.y + 2.25,
+      this.map.flagBases.aurora.z,
+    );
     this.scene.add(auroraBase);
 
     const novaBase = new THREE.PointLight(TEAM_COLORS.nova.glow, 15, 14, 2);
-    novaBase.position.set(29, 3.4, 0);
+    novaBase.position.set(
+      this.map.flagBases.nova.x,
+      this.map.flagBases.nova.y + 2.25,
+      this.map.flagBases.nova.z,
+    );
     this.scene.add(novaBase);
   }
 
   private createLandscape(): void {
+    const width = this.map.bounds.maxX - this.map.bounds.minX;
+    const depth = this.map.bounds.maxZ - this.map.bounds.minZ;
+    const halfWidth = width * 0.5;
+    const halfDepth = depth * 0.5;
+    const arenaRadius = Math.hypot(halfWidth, halfDepth);
+    const centerX = (this.map.bounds.minX + this.map.bounds.maxX) * 0.5;
+    const centerZ = (this.map.bounds.minZ + this.map.bounds.maxZ) * 0.5;
     const forestGround = createForestGroundTextures(512);
     this.groundTexture = forestGround.albedo;
     this.groundNormalTexture = forestGround.normal;
     this.groundRoughnessTexture = forestGround.roughness;
     this.facilityPanelTexture = createFacilityPanelTexture(512);
-    this.groundTexture.repeat.set(7, 7);
-    this.groundNormalTexture.repeat.set(7, 7);
-    this.groundRoughnessTexture.repeat.set(7, 7);
+    this.groundTexture.repeat.set(Math.max(7, width / 10), Math.max(7, depth / 10));
+    this.groundNormalTexture.repeat.copy(this.groundTexture.repeat);
+    this.groundRoughnessTexture.repeat.copy(this.groundTexture.repeat);
     this.facilityPanelTexture.repeat.set(4, 1);
     this.groundTexture.anisotropy = Math.min(8, this.renderer.capabilities.getMaxAnisotropy());
     this.groundNormalTexture.anisotropy = Math.min(4, this.renderer.capabilities.getMaxAnisotropy());
@@ -658,7 +687,7 @@ export class ArenaRenderer {
     this.ownedTextures.add(this.facilityPanelTexture);
 
     const outerGround = new THREE.Mesh(
-      new THREE.CircleGeometry(146, 96),
+      new THREE.CircleGeometry(Math.max(146, arenaRadius + 78), 96),
       new THREE.MeshPhysicalMaterial({
         color: 0xaab69a,
         map: this.groundTexture,
@@ -673,7 +702,9 @@ export class ArenaRenderer {
       }),
     );
     outerGround.rotation.x = -Math.PI / 2;
+    outerGround.position.x = centerX;
     outerGround.position.y = this.map.bounds.floorY - 0.22;
+    outerGround.position.z = centerZ;
     outerGround.receiveShadow = true;
     this.scene.add(outerGround);
 
@@ -685,9 +716,9 @@ export class ArenaRenderer {
     ];
 
     const ridgeBands = [
-      { count: 9, distance: 60, spread: 18, radius: 9, height: 14 },
-      { count: 9, distance: 82, spread: 22, radius: 13, height: 22 },
-      { count: 8, distance: 110, spread: 25, radius: 18, height: 31 },
+      { count: 11, distance: arenaRadius + 14, spread: 18, radius: 9, height: 14 },
+      { count: 10, distance: arenaRadius + 38, spread: 22, radius: 13, height: 22 },
+      { count: 9, distance: arenaRadius + 70, spread: 25, radius: 18, height: 31 },
     ];
     let ridgeSeed = 0x7100;
     for (let band = ridgeBands.length - 1; band >= 0; band -= 1) {
@@ -711,9 +742,9 @@ export class ArenaRenderer {
         });
         ridgeSeed += 1;
         ridge.position.set(
-          Math.cos(angle) * distance,
+          centerX + Math.cos(angle) * distance,
           this.map.bounds.floorY - 0.34,
-          Math.sin(angle) * distance,
+          centerZ + Math.sin(angle) * distance,
         );
         ridge.rotation.y = angle + Math.PI * 0.5 + (random() - 0.5) * 0.45;
         this.scene.add(ridge);
@@ -732,12 +763,12 @@ export class ArenaRenderer {
       const transform = new THREE.Object3D();
       for (let index = 0; index < rockCounts[materialIndex]!; index += 1) {
         const angle = random() * Math.PI * 2;
-        const distance = 39 + random() * 43;
+        const distance = arenaRadius + 4 + random() * 43;
         const scale = 0.42 + random() * 2.15;
         transform.position.set(
-          Math.cos(angle) * distance,
+          centerX + Math.cos(angle) * distance,
           this.map.bounds.floorY + scale * 0.35 - 0.15,
-          Math.sin(angle) * distance,
+          centerZ + Math.sin(angle) * distance,
         );
         transform.scale.set(scale * (0.72 + random() * 0.66), scale * (0.58 + random() * 0.48), scale);
         transform.rotation.set(random() * 0.5, random() * Math.PI, random() * 0.35);
@@ -766,7 +797,7 @@ export class ArenaRenderer {
     };
     for (let index = 0; index < 16; index += 1) {
       const angle = random() * Math.PI * 2;
-      const distance = 39 + random() * 31;
+      const distance = arenaRadius + 3 + random() * 31;
       const plant = createColdAlienPlant({
         seed: 0xa11e + index,
         materials: plantMaterials,
@@ -775,7 +806,11 @@ export class ArenaRenderer {
         blades: 4 + Math.floor(random() * 2),
         castShadow: index < 8,
       });
-      plant.position.set(Math.cos(angle) * distance, this.map.bounds.floorY, Math.sin(angle) * distance);
+      plant.position.set(
+        centerX + Math.cos(angle) * distance,
+        this.map.bounds.floorY,
+        centerZ + Math.sin(angle) * distance,
+      );
       plant.rotation.y = random() * Math.PI * 2;
       this.worldDecorations.push(plant);
       this.scene.add(plant);
@@ -784,6 +819,19 @@ export class ArenaRenderer {
 
   private createEnvironmentDressing(): void {
     const floorY = this.map.bounds.floorY;
+    const width = this.map.bounds.maxX - this.map.bounds.minX;
+    const depth = this.map.bounds.maxZ - this.map.bounds.minZ;
+    const halfWidth = width * 0.5;
+    const halfDepth = depth * 0.5;
+    const centerX = (this.map.bounds.minX + this.map.bounds.maxX) * 0.5;
+    const centerZ = (this.map.bounds.minZ + this.map.bounds.maxZ) * 0.5;
+    const arenaArea = width * depth;
+    const towerDeck = this.map.obstacles.find((obstacle) => obstacle.id === 'tower-deck');
+    const deckMinX = towerDeck?.min.x ?? centerX - 7;
+    const deckMaxX = towerDeck?.max.x ?? centerX + 7;
+    const deckMinZ = towerDeck?.min.z ?? centerZ - 7;
+    const deckMaxZ = towerDeck?.max.z ?? centerZ + 7;
+    const railY = (towerDeck?.max.y ?? 5.85) + 0.81;
     const playableBounds = {
       minX: this.map.bounds.minX,
       maxX: this.map.bounds.maxX,
@@ -805,16 +853,16 @@ export class ArenaRenderer {
       heightAt: () => floorY - 0.08,
       exclusions: [{ ...playableBounds, padding: 1.25 }],
       densityAt: (x, z) => {
-        const distanceX = Math.max(0, Math.abs(x) - this.map.bounds.maxX);
-        const distanceZ = Math.max(0, Math.abs(z) - this.map.bounds.maxZ);
+        const distanceX = Math.max(0, playableBounds.minX - x, x - playableBounds.maxX);
+        const distanceZ = Math.max(0, playableBounds.minZ - z, z - playableBounds.maxZ);
         const perimeter = Math.max(distanceX, distanceZ);
         return THREE.MathUtils.clamp(0.5 + perimeter * 0.055, 0.5, 1);
       },
       blocks: [
         {
           seed: 0xb1091,
-          position: [0, floorY, -38],
-          width: 22,
+          position: [centerX, floorY, playableBounds.minZ - 8.5],
+          width: Math.min(28, width * 0.27),
           height: 8.2,
           depth: 7.5,
           label: 'BIO // 91',
@@ -822,7 +870,7 @@ export class ArenaRenderer {
         },
         {
           seed: 0xa0404,
-          position: [-43, floorY, 14],
+          position: [playableBounds.minX - 8.5, floorY, centerZ + depth * 0.2],
           rotationY: Math.PI * 0.5,
           width: 14,
           height: 7.2,
@@ -832,7 +880,7 @@ export class ArenaRenderer {
         },
         {
           seed: 0xc0505,
-          position: [43, floorY, -14],
+          position: [playableBounds.maxX + 8.5, floorY, centerZ - depth * 0.2],
           rotationY: -Math.PI * 0.5,
           width: 14,
           height: 7.2,
@@ -842,7 +890,7 @@ export class ArenaRenderer {
         },
         {
           seed: 0xd2230,
-          position: [0, floorY, 37],
+          position: [centerX, floorY, playableBounds.maxZ + 8],
           rotationY: Math.PI,
           width: 18,
           height: 6.8,
@@ -853,32 +901,69 @@ export class ArenaRenderer {
       ],
       rails: [
         {
-          start: [-6.15, 6.66, -6.82],
-          end: [6.15, 6.66, -6.82],
+          start: [deckMinX + 0.85, railY, deckMinZ + 0.18],
+          end: [deckMaxX - 0.85, railY, deckMinZ + 0.18],
           height: 0.42,
           postSpacing: 1.45,
         },
         {
-          start: [6.15, 6.66, 6.82],
-          end: [-6.15, 6.66, 6.82],
+          start: [deckMaxX - 0.85, railY, deckMaxZ - 0.18],
+          end: [deckMinX + 0.85, railY, deckMaxZ - 0.18],
           height: 0.42,
           postSpacing: 1.45,
         },
       ],
       cables: [
-        { start: [-43, 8.2, 12], end: [-7.2, 9.1, -6.8], sag: 1.4, radius: 0.035 },
-        { start: [43, 8.2, -12], end: [7.2, 9.1, 6.8], sag: 1.4, radius: 0.035 },
-        { start: [-10, 9.2, -34], end: [10, 9.2, -34], sag: 0.9, radius: 0.04 },
+        {
+          start: [playableBounds.minX - 8.5, 8.2, centerZ + depth * 0.17],
+          end: [deckMinX - 0.2, railY + 2.4, deckMinZ + 0.2],
+          sag: 1.4,
+          radius: 0.035,
+        },
+        {
+          start: [playableBounds.maxX + 8.5, 8.2, centerZ - depth * 0.17],
+          end: [deckMaxX + 0.2, railY + 2.4, deckMaxZ - 0.2],
+          sag: 1.4,
+          radius: 0.035,
+        },
+        {
+          start: [centerX - 10, 9.2, playableBounds.minZ - 4.5],
+          end: [centerX + 10, 9.2, playableBounds.minZ - 4.5],
+          sag: 0.9,
+          radius: 0.04,
+        },
       ],
     });
 
     // Ground cover can safely enter the arena, but all navigation, spawn,
     // objective, pickup and obstacle volumes remain deliberately clear.
     const exclusions: ScatterExclusion[] = [
-      { minX: this.map.bounds.minX, maxX: this.map.bounds.maxX, minZ: -3.8, maxZ: 3.8 },
-      { minX: -3.6, maxX: 3.6, minZ: this.map.bounds.minZ, maxZ: this.map.bounds.maxZ },
-      { minX: -35, maxX: -22.5, minZ: -10, maxZ: 10, padding: 0.8 },
-      { minX: 22.5, maxX: 35, minZ: -10, maxZ: 10, padding: 0.8 },
+      {
+        minX: playableBounds.minX,
+        maxX: playableBounds.maxX,
+        minZ: centerZ - 3.8,
+        maxZ: centerZ + 3.8,
+      },
+      {
+        minX: centerX - 3.6,
+        maxX: centerX + 3.6,
+        minZ: playableBounds.minZ,
+        maxZ: playableBounds.maxZ,
+      },
+      {
+        minX: this.map.flagBases.aurora.x - 7,
+        maxX: this.map.flagBases.aurora.x + 7,
+        minZ: this.map.flagBases.aurora.z - 10,
+        maxZ: this.map.flagBases.aurora.z + 10,
+        padding: 0.8,
+      },
+      {
+        minX: this.map.flagBases.nova.x - 7,
+        maxX: this.map.flagBases.nova.x + 7,
+        minZ: this.map.flagBases.nova.z - 10,
+        maxZ: this.map.flagBases.nova.z + 10,
+        padding: 0.8,
+      },
       ...this.map.obstacles
         .filter((obstacle) => obstacle.kind !== 'wall')
         .map((obstacle) => ({
@@ -898,23 +983,47 @@ export class ArenaRenderer {
       seed: 0xf0e57,
       bounds: playableBounds,
       materials: environment.materials,
-      fernCount: 118,
-      grassCount: 260,
+      fernCount: Math.min(280, Math.round(arenaArea * 0.0275)),
+      grassCount: Math.min(620, Math.round(arenaArea * 0.061)),
       heightAt: () => floorY + 0.006,
       exclusions,
       castShadow: false,
       densityAt: (x, z) => {
-        const edge = Math.max(Math.abs(x) / 36, Math.abs(z) / 30);
+        const edge = Math.max(
+          Math.abs(x - centerX) / Math.max(1, halfWidth),
+          Math.abs(z - centerZ) / Math.max(1, halfDepth),
+        );
         const islands = Math.sin(x * 0.43 + z * 0.17) * Math.cos(z * 0.36 - x * 0.12) * 0.5 + 0.5;
         return THREE.MathUtils.clamp(0.22 + edge * 0.5 + islands * 0.25, 0.16, 0.92);
       },
     });
-    environment.group.add(understory);
+    const groundRocks = createWetRockField({
+      seed: 0x5a11d,
+      bounds: playableBounds,
+      materials: environment.materials,
+      count: Math.min(54, Math.round(arenaArea * 0.0046)),
+      radiusRange: [0.12, 0.42],
+      heightAt: () => floorY + 0.005,
+      exclusions,
+      castShadow: false,
+      densityAt: (x, z) => {
+        const edge = Math.max(
+          Math.abs(x - centerX) / Math.max(1, halfWidth),
+          Math.abs(z - centerZ) / Math.max(1, halfDepth),
+        );
+        return THREE.MathUtils.clamp(0.18 + edge * 0.68, 0.15, 0.9);
+      },
+    });
+    environment.group.add(understory, groundRocks);
     this.facilityEnvironment = environment;
     this.scene.add(environment.group);
   }
 
   private createAtmosphereDetails(): void {
+    const width = this.map.bounds.maxX - this.map.bounds.minX;
+    const depth = this.map.bounds.maxZ - this.map.bounds.minZ;
+    const centerX = (this.map.bounds.minX + this.map.bounds.maxX) * 0.5;
+    const centerZ = (this.map.bounds.minZ + this.map.bounds.maxZ) * 0.5;
     const random = seededRandom(0xa7f05);
     const fogTexture = createRadialTexture({ size: 192, profile: 'glow' });
     fogTexture.name = 'local-ground-haze';
@@ -934,15 +1043,15 @@ export class ArenaRenderer {
     hazeGroup.name = 'low-forest-haze';
     hazeGroup.userData.mistLayer = true;
     hazeGroup.userData.baseY = this.map.bounds.floorY + 0.22;
-    for (let index = 0; index < 9; index += 1) {
-      const haze = new THREE.Mesh(new THREE.PlaneGeometry(13 + random() * 12, 8 + random() * 7), hazeMaterial);
-      const side = index % 2 === 0 ? -1 : 1;
+    const hazeCount = Math.max(9, Math.round((width * depth) / 720));
+    for (let index = 0; index < hazeCount; index += 1) {
+      const haze = new THREE.Mesh(new THREE.PlaneGeometry(14 + random() * 14, 9 + random() * 9), hazeMaterial);
       haze.rotation.x = -Math.PI / 2;
       haze.rotation.z = random() * Math.PI;
       haze.position.set(
-        side * (7 + random() * 25),
+        centerX + (random() - 0.5) * width * 0.92,
         (random() - 0.5) * 0.16,
-        (random() - 0.5) * 52,
+        centerZ + (random() - 0.5) * depth * 0.92,
       );
       haze.renderOrder = -4;
       hazeGroup.add(haze);
@@ -966,12 +1075,13 @@ export class ArenaRenderer {
     const shaftQuaternion = new THREE.Quaternion().setFromUnitVectors(UP, shaftDirection);
     const shaftGroup = new THREE.Group();
     shaftGroup.name = 'sunlight-shafts';
-    for (let index = 0; index < 7; index += 1) {
+    const shaftCount = Math.max(7, Math.round((width * depth) / 1100));
+    for (let index = 0; index < shaftCount; index += 1) {
       const length = 29 + random() * 12;
       const groundPoint = new THREE.Vector3(
-        (random() - 0.5) * 58,
+        centerX + (random() - 0.5) * width * 0.84,
         this.map.bounds.floorY + 0.05,
-        (random() - 0.5) * 48,
+        centerZ + (random() - 0.5) * depth * 0.84,
       );
       const shaft = new THREE.Mesh(
         new THREE.CylinderGeometry(1.4 + random() * 1.6, 0.16 + random() * 0.22, length, 8, 1, true),
@@ -983,12 +1093,12 @@ export class ArenaRenderer {
     }
     this.scene.add(shaftGroup);
 
-    const moteCount = 320;
+    const moteCount = Math.min(560, Math.max(320, Math.round((width * depth) * 0.052)));
     const positions = new Float32Array(moteCount * 3);
     for (let index = 0; index < moteCount; index += 1) {
-      positions[index * 3] = (random() - 0.5) * 76;
+      positions[index * 3] = centerX + (random() - 0.5) * (width + 8);
       positions[index * 3 + 1] = 0.35 + random() * 9;
-      positions[index * 3 + 2] = (random() - 0.5) * 66;
+      positions[index * 3 + 2] = centerZ + (random() - 0.5) * (depth + 8);
     }
     const moteGeometry = new THREE.BufferGeometry();
     moteGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
@@ -1017,7 +1127,14 @@ export class ArenaRenderer {
   private createMapGeometry(): void {
     const width = this.map.bounds.maxX - this.map.bounds.minX;
     const depth = this.map.bounds.maxZ - this.map.bounds.minZ;
-    const floorGeometry = new THREE.PlaneGeometry(width, depth, 48, 40);
+    const centerX = (this.map.bounds.minX + this.map.bounds.maxX) * 0.5;
+    const centerZ = (this.map.bounds.minZ + this.map.bounds.maxZ) * 0.5;
+    const floorGeometry = new THREE.PlaneGeometry(
+      width,
+      depth,
+      Math.min(80, Math.max(48, Math.round(width / 1.35))),
+      Math.min(68, Math.max(40, Math.round(depth / 1.35))),
+    );
     const position = floorGeometry.getAttribute('position');
     for (let vertex = 0; vertex < position.count; vertex += 1) {
       const x = position.getX(vertex);
@@ -1044,14 +1161,64 @@ export class ArenaRenderer {
     );
     floor.rotation.x = -Math.PI / 2;
     floor.position.set(
-      (this.map.bounds.minX + this.map.bounds.maxX) * 0.5,
+      centerX,
       this.map.bounds.floorY - 0.035,
-      (this.map.bounds.minZ + this.map.bounds.maxZ) * 0.5,
+      centerZ,
     );
     floor.receiveShadow = true;
     this.scene.add(floor);
 
-    const facilitySurface = new THREE.MeshPhysicalMaterial({
+    const puddleMaterial = new THREE.MeshPhysicalMaterial({
+      color: 0x173a36,
+      roughness: 0.16,
+      metalness: 0.02,
+      clearcoat: 1,
+      clearcoatRoughness: 0.08,
+      envMapIntensity: 1.55,
+      transparent: true,
+      opacity: 0.72,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    const puddleCount = Math.min(42, Math.max(22, Math.round((width * depth) / 245)));
+    const puddles = new THREE.InstancedMesh(
+      new THREE.CircleGeometry(1, 24),
+      puddleMaterial,
+      puddleCount,
+    );
+    puddles.name = 'forest-floor-puddles';
+    puddles.receiveShadow = true;
+    const puddleRandom = seededRandom(0x7e771e);
+    const puddleTransform = new THREE.Object3D();
+    let puddleIndex = 0;
+    for (let attempt = 0; attempt < puddleCount * 24 && puddleIndex < puddleCount; attempt += 1) {
+      const x = THREE.MathUtils.lerp(this.map.bounds.minX + 2, this.map.bounds.maxX - 2, puddleRandom());
+      const z = THREE.MathUtils.lerp(this.map.bounds.minZ + 2, this.map.bounds.maxZ - 2, puddleRandom());
+      const onMainPath = Math.abs(z - centerZ) < 4.2 || Math.abs(x - centerX) < 4;
+      const insideObstacle = this.map.obstacles.some((obstacle) =>
+        obstacle.kind !== 'wall'
+        && x > obstacle.min.x - 0.8
+        && x < obstacle.max.x + 0.8
+        && z > obstacle.min.z - 0.8
+        && z < obstacle.max.z + 0.8);
+      const nearObjective = Object.values(this.map.flagBases).some((base) =>
+        Math.hypot(x - base.x, z - base.z) < 5.5);
+      if (onMainPath || insideObstacle || nearObjective) continue;
+      const radius = 0.55 + puddleRandom() * 1.75;
+      puddleTransform.position.set(x, this.map.bounds.floorY + 0.008, z);
+      puddleTransform.rotation.set(-Math.PI / 2, 0, puddleRandom() * Math.PI);
+      puddleTransform.scale.set(radius * (0.65 + puddleRandom() * 0.75), radius, 1);
+      puddleTransform.updateMatrix();
+      puddles.setMatrixAt(puddleIndex, puddleTransform.matrix);
+      puddleIndex += 1;
+    }
+    puddles.count = puddleIndex;
+    puddles.instanceMatrix.needsUpdate = true;
+    puddles.computeBoundingBox();
+    puddles.computeBoundingSphere();
+    this.scene.add(puddles);
+
+    const facilitySurfaceTemplate = new THREE.MeshPhysicalMaterial({
       color: 0xe0e5e1,
       map: this.facilityPanelTexture,
       roughness: 0.38,
@@ -1081,16 +1248,31 @@ export class ArenaRenderer {
       underlay.receiveShadow = true;
       this.scene.add(underlay);
 
-      const panels = new THREE.Mesh(new THREE.PlaneGeometry(pathWidth, pathDepth), facilitySurface);
+      const surfaceMaterial = facilitySurfaceTemplate.clone();
+      if (this.facilityPanelTexture) {
+        const pathTexture = this.facilityPanelTexture.clone();
+        pathTexture.repeat.set(
+          Math.max(1, pathWidth / 7.5),
+          Math.max(1, pathDepth / 7.5),
+        );
+        pathTexture.needsUpdate = true;
+        surfaceMaterial.map = pathTexture;
+        this.ownedTextures.add(pathTexture);
+      }
+      const panels = new THREE.Mesh(new THREE.PlaneGeometry(pathWidth, pathDepth), surfaceMaterial);
       panels.rotation.x = -Math.PI / 2;
       panels.position.set(x, this.map.bounds.floorY + 0.022, z);
       panels.receiveShadow = true;
       this.scene.add(panels);
     };
-    addFacilityPath(72, 5.6, 0, 0);
-    addFacilityPath(5.2, 60, 0, 0);
-    addFacilityPath(11, 18, -29, 0);
-    addFacilityPath(11, 18, 29, 0);
+    const horizontalPathLength = width - 4;
+    addFacilityPath(horizontalPathLength, 6.2, centerX, centerZ);
+    addFacilityPath(5.8, depth - 4, centerX, centerZ);
+    addFacilityPath(13, 20, this.map.flagBases.aurora.x, this.map.flagBases.aurora.z);
+    addFacilityPath(13, 20, this.map.flagBases.nova.x, this.map.flagBases.nova.z);
+    addFacilityPath(width * 0.68, 4, centerX, centerZ - depth * 0.32);
+    addFacilityPath(width * 0.68, 4, centerX, centerZ + depth * 0.32);
+    facilitySurfaceTemplate.dispose();
 
     const routeAccentMaterial = new THREE.MeshStandardMaterial({
       color: 0xb4ef3f,
@@ -1099,13 +1281,13 @@ export class ArenaRenderer {
       roughness: 0.42,
       metalness: 0.16,
     });
-    for (const z of [-2.94, 2.94]) {
+    for (const z of [centerZ - 3.24, centerZ + 3.24]) {
       const routeAccent = new THREE.Mesh(
-        new THREE.PlaneGeometry(72, 0.13),
+        new THREE.PlaneGeometry(horizontalPathLength, 0.13),
         routeAccentMaterial,
       );
       routeAccent.rotation.x = -Math.PI / 2;
-      routeAccent.position.set(0, this.map.bounds.floorY + 0.027, z);
+      routeAccent.position.set(centerX, this.map.bounds.floorY + 0.027, z);
       this.scene.add(routeAccent);
     }
 
@@ -1116,25 +1298,28 @@ export class ArenaRenderer {
       depthWrite: false,
       side: THREE.DoubleSide,
     });
-    for (const radius of [5.9, 11.8, 23.5]) {
+    for (const radius of [5.9, 12.2, Math.min(width, depth) * 0.34]) {
       const marking = new THREE.Mesh(new THREE.RingGeometry(radius, radius + 0.065, 96), markingMaterial);
       marking.rotation.x = -Math.PI / 2;
-      marking.position.y = this.map.bounds.floorY + 0.018;
+      marking.position.set(centerX, this.map.bounds.floorY + 0.018, centerZ);
       this.scene.add(marking);
     }
 
     for (const team of ['aurora', 'nova'] as const) {
-      const side = team === 'aurora' ? -1 : 1;
+      const base = this.map.flagBases[team];
+      const laneLength = Math.max(12, Math.hypot(base.x - centerX, base.z - centerZ) * 0.64);
+      const laneCenterX = THREE.MathUtils.lerp(centerX, base.x, 0.48);
+      const laneCenterZ = THREE.MathUtils.lerp(centerZ, base.z, 0.48);
       const laneMaterial = new THREE.MeshBasicMaterial({
         color: TEAM_COLORS[team].glow,
         transparent: true,
         opacity: 0.17,
         depthWrite: false,
       });
-      for (const z of [-3.9, 3.9]) {
-        const lane = new THREE.Mesh(new THREE.PlaneGeometry(19, 0.075), laneMaterial);
+      for (const zOffset of [-4.2, 4.2]) {
+        const lane = new THREE.Mesh(new THREE.PlaneGeometry(laneLength, 0.075), laneMaterial);
         lane.rotation.x = -Math.PI / 2;
-        lane.position.set(side * 19, this.map.bounds.floorY + 0.021, z);
+        lane.position.set(laneCenterX, this.map.bounds.floorY + 0.021, laneCenterZ + zOffset);
         this.scene.add(lane);
       }
     }
@@ -1387,14 +1572,23 @@ export class ArenaRenderer {
       }
     }
 
-    for (const x of [-9.6, 9.6]) {
-      const position: Vec3 = { x, y: this.map.bounds.floorY, z: 0 };
+    for (const jumpPad of JUMP_PAD_ZONES) {
+      const position: Vec3 = {
+        x: jumpPad.center.x,
+        y: this.map.bounds.floorY,
+        z: jumpPad.center.z,
+      };
       if (!isJumpPad(position)) continue;
+      const launchDirection = new THREE.Vector3(
+        this.map.towerCenter.x - position.x,
+        0,
+        this.map.towerCenter.z - position.z,
+      ).normalize();
       const pedestal = new THREE.Mesh(
-        new THREE.CylinderGeometry(1.28, 1.38, 0.18, 32),
+        new THREE.CylinderGeometry(1.42, 1.56, 0.2, 32),
         structureMaterial,
       );
-      pedestal.position.set(x, this.map.bounds.floorY + 0.09, 0);
+      pedestal.position.set(position.x, this.map.bounds.floorY + 0.1, position.z);
       pedestal.receiveShadow = true;
       pedestal.castShadow = true;
       this.scene.add(pedestal);
@@ -1409,27 +1603,41 @@ export class ArenaRenderer {
       });
       const pad = new THREE.Mesh(new THREE.RingGeometry(0.55, 1.12, 24, 2), material);
       pad.rotation.x = -Math.PI / 2;
-      pad.position.set(x, this.map.bounds.floorY + 0.195, 0);
-      pad.userData.spin = x < 0 ? 1 : -1;
+      pad.position.set(position.x, this.map.bounds.floorY + 0.215, position.z);
+      pad.userData.spin = position.x < this.map.towerCenter.x ? 1 : -1;
       this.worldDecorations.push(pad as unknown as THREE.Group);
       this.scene.add(pad);
 
-      const beam = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.7, 1.05, 5.5, 32, 1, true),
+      const launchGlow = new THREE.Mesh(
+        new THREE.CircleGeometry(0.92, 28),
         new THREE.MeshBasicMaterial({
           color: 0x79eee2,
           transparent: true,
-          opacity: 0.055,
-          side: THREE.DoubleSide,
+          opacity: 0.2,
           blending: THREE.AdditiveBlending,
           depthWrite: false,
         }),
       );
-      beam.position.set(x, 2.82, 0);
-      beam.userData.energyBeam = true;
-      beam.userData.swayPhase = x < 0 ? 0 : Math.PI;
-      this.worldDecorations.push(beam as unknown as THREE.Group);
-      this.scene.add(beam);
+      launchGlow.rotation.x = -Math.PI / 2;
+      launchGlow.position.set(position.x, this.map.bounds.floorY + 0.222, position.z);
+      this.scene.add(launchGlow);
+
+      for (let index = 0; index < 3; index += 1) {
+        const chevron = new THREE.Mesh(
+          new THREE.ConeGeometry(0.18 + index * 0.025, 0.52, 3),
+          new THREE.MeshStandardMaterial({
+            color: 0xbaf65c,
+            emissive: 0x70bd3b,
+            emissiveIntensity: 1.15,
+            roughness: 0.28,
+            metalness: 0.18,
+          }),
+        );
+        chevron.quaternion.setFromUnitVectors(UP, launchDirection);
+        chevron.position.set(position.x, this.map.bounds.floorY + 0.27, position.z)
+          .addScaledVector(launchDirection, -0.5 + index * 0.5);
+        this.scene.add(chevron);
+      }
     }
   }
 
@@ -3377,9 +3585,17 @@ export class ArenaRenderer {
       this.map.bounds.floorY + 4.3,
       (this.map.bounds.minZ + this.map.bounds.maxZ) * 0.5,
     );
-    const radius = 46;
+    const mapSpan = Math.max(
+      this.map.bounds.maxX - this.map.bounds.minX,
+      this.map.bounds.maxZ - this.map.bounds.minZ,
+    );
+    const radius = mapSpan * 0.68;
     const angle = this.elapsedRenderTime * 0.045 + 0.7;
-    const desired = new THREE.Vector3(center.x + Math.cos(angle) * radius, 24, center.z + Math.sin(angle) * radius);
+    const desired = new THREE.Vector3(
+      center.x + Math.cos(angle) * radius,
+      Math.max(24, mapSpan * 0.28),
+      center.z + Math.sin(angle) * radius,
+    );
     this.camera.position.lerp(desired, 1 - Math.exp(-delta * 2.4));
     this.camera.up.set(0, 1, 0);
     this.camera.lookAt(center);

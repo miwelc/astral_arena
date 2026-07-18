@@ -43,6 +43,10 @@ const AIR_ACCELERATION = 9;
 const SHIELD_RECHARGE_DELAY = 4;
 const SHIELD_RECHARGE_RATE = 25;
 const MAX_HEALTH = 70;
+const JUMP_PAD_APEX_CLEARANCE = 1.75;
+const JUMP_PAD_RETRIGGER_DELAY = 0.85;
+const GRENADE_FUSE_SECONDS = 1.7;
+const GRENADE_OWNER_GRACE_SECONDS = 0.22;
 const BOT_NAMES = ['Orion', 'Vega', 'Lyra', 'Atlas', 'Sol', 'Mira', 'Pulsar', 'Cosmo'];
 
 interface ButtonState {
@@ -52,6 +56,11 @@ interface ButtonState {
   swap: boolean;
   melee: boolean;
   grenade: boolean;
+}
+
+interface JumpPadMomentum {
+  direction: Vec3;
+  minimumSpeed: number;
 }
 
 const noButtons = (): ButtonState => ({ fire: false, jump: false, reload: false, swap: false, melee: false, grenade: false });
@@ -94,6 +103,8 @@ export class GameSimulation {
   public readonly map: MapDefinition;
   public state: MatchState;
   private readonly previousButtons = new Map<string, ButtonState>();
+  private readonly jumpPadReadyAt = new Map<string, number>();
+  private readonly jumpPadMomentum = new Map<string, JumpPadMomentum>();
   private projectileSequence = 0;
 
   public constructor(config: MatchConfig, initialHumans: Array<{ id: string; name: string; kind?: PlayerKind }> = []) {
@@ -188,6 +199,8 @@ export class GameSimulation {
         if (inheritedJuggernaut) this.state.juggernautId = null;
         delete this.state.players[replacement.id];
         this.previousButtons.delete(replacement.id);
+        this.jumpPadReadyAt.delete(replacement.id);
+        this.jumpPadMomentum.delete(replacement.id);
       }
       slot = Object.keys(this.state.players).length;
     }
@@ -204,6 +217,8 @@ export class GameSimulation {
     if (wasJuggernaut) this.state.juggernautId = null;
     delete this.state.players[id];
     this.previousButtons.delete(id);
+    this.jumpPadReadyAt.delete(id);
+    this.jumpPadMomentum.delete(id);
     if (this.state.config.botFill && this.state.phase !== 'finished') this.fillWithBots();
     if (wasJuggernaut && this.state.config.mode === 'juggernaut') {
       const successor = Object.values(this.state.players).find((candidate) => candidate.alive);
@@ -381,16 +396,18 @@ export class GameSimulation {
       player.velocity.x *= friction;
       player.velocity.z *= friction;
     }
-    if (jumpPressed && player.grounded) {
-      player.velocity.y = 6.3;
-      player.grounded = false;
+    const padMomentum = this.jumpPadMomentum.get(player.id);
+    if (padMomentum && !player.grounded) {
+      const inwardSpeed = dot(player.velocity, padMomentum.direction);
+      if (inwardSpeed < padMomentum.minimumSpeed) {
+        const correction = scale(padMomentum.direction, padMomentum.minimumSpeed - inwardSpeed);
+        player.velocity.x += correction.x;
+        player.velocity.z += correction.z;
+      }
     }
-    if (isJumpPad(player.position) && player.grounded) {
-      const side = player.position.x < 0 ? -1 : 1;
-      player.position.x = side * 5.8;
-      player.position.y = 5.92;
-      player.velocity.y = 2.8;
-      player.velocity.x = -side * 3;
+    const launchedFromPad = this.tryLaunchFromJumpPad(player);
+    if (!launchedFromPad && jumpPressed && player.grounded) {
+      player.velocity.y = 6.3;
       player.grounded = false;
     }
     player.velocity.y -= GRAVITY * dt;
@@ -398,6 +415,39 @@ export class GameSimulation {
     player.position = movement.position;
     player.velocity = movement.velocity;
     player.grounded = movement.grounded;
+    if (movement.grounded) this.jumpPadMomentum.delete(player.id);
+  }
+
+  private tryLaunchFromJumpPad(player: PlayerState): boolean {
+    const padReadyAt = this.jumpPadReadyAt.get(player.id) ?? 0;
+    if (!player.grounded || !isJumpPad(player.position) || this.state.elapsed < padReadyAt) return false;
+
+    const towerDelta = subtract(this.state.tower.center, player.position);
+    const towerDistance = Math.hypot(towerDelta.x, towerDelta.z);
+    const towardTower = towerDistance > 0.001
+      ? { x: towerDelta.x / towerDistance, y: 0, z: towerDelta.z / towerDistance }
+      : { x: 0, y: 0, z: 0 };
+    const landingRadius = Math.max(1.5, this.state.tower.radius - 1.2);
+    const landingDistance = Math.max(0, towerDistance - landingRadius);
+    const targetHeight = Math.max(this.state.tower.center.y, player.position.y + 3.5);
+    const heightDelta = targetHeight - player.position.y;
+    const launchVelocityY = Math.sqrt(2 * GRAVITY * (heightDelta + JUMP_PAD_APEX_CLEARANCE));
+    const descendingTime = (launchVelocityY + Math.sqrt(Math.max(0, launchVelocityY ** 2 - 2 * GRAVITY * heightDelta))) / GRAVITY;
+    const targetHorizontalSpeed = clamp(landingDistance / Math.max(0.1, descendingTime), 3.2, 9.5);
+    const currentHorizontal = { x: player.velocity.x, y: 0, z: player.velocity.z };
+    const targetHorizontal = scale(towardTower, targetHorizontalSpeed);
+    const blendedHorizontal = add(scale(targetHorizontal, 0.82), scale(currentHorizontal, 0.18));
+
+    player.velocity.x = blendedHorizontal.x;
+    player.velocity.z = blendedHorizontal.z;
+    player.velocity.y = Math.max(player.velocity.y, launchVelocityY);
+    player.grounded = false;
+    this.jumpPadReadyAt.set(player.id, this.state.elapsed + JUMP_PAD_RETRIGGER_DELAY);
+    this.jumpPadMomentum.set(player.id, {
+      direction: towardTower,
+      minimumSpeed: Math.max(0, dot(blendedHorizontal, towardTower)),
+    });
+    return true;
   }
 
   private startReload(player: PlayerState): void {
@@ -598,33 +648,95 @@ export class GameSimulation {
       const previous = cloneVec3(projectile.position);
       if (projectile.kind === 'grenade') projectile.velocity.y -= GRAVITY * dt;
       projectile.position = add(projectile.position, scale(projectile.velocity, dt));
-      let explode = projectile.fuse <= 0;
+      let explode = projectile.kind === 'rocket' && projectile.fuse <= 0;
 
       if (projectile.position.y <= this.map.bounds.floorY + projectile.radius) {
         if (projectile.kind === 'rocket') explode = true;
         else {
           projectile.position.y = this.map.bounds.floorY + projectile.radius;
-          projectile.velocity.y = Math.abs(projectile.velocity.y) * 0.48;
-          projectile.velocity.x *= 0.78;
-          projectile.velocity.z *= 0.78;
+          if (projectile.fuse <= 0) {
+            explode = true;
+          } else {
+            projectile.velocity.y = Math.abs(projectile.velocity.y) * 0.48;
+            projectile.velocity.x *= 0.78;
+            projectile.velocity.z *= 0.78;
+          }
         }
       }
 
       const directionDelta = subtract(projectile.position, previous);
       const travel = distance(previous, projectile.position);
       if (travel > 0.0001) {
-        const hit = raycastWorld(previous, scale(directionDelta, 1 / travel), travel + projectile.radius, this.map, Object.values(this.state.players), projectile.ownerId);
+        const ignoreOwner = projectile.kind === 'rocket'
+          || projectile.fuse > GRENADE_FUSE_SECONDS - GRENADE_OWNER_GRACE_SECONDS;
+        const hit = raycastWorld(
+          previous,
+          scale(directionDelta, 1 / travel),
+          travel + projectile.radius,
+          this.map,
+          Object.values(this.state.players),
+          ignoreOwner ? projectile.ownerId : undefined,
+        );
         if (hit) {
           if (projectile.kind === 'rocket') {
             projectile.position = hit.obstacleId
               ? add(hit.point, scale(directionDelta, -(projectile.radius + 0.04) / travel))
               : cloneVec3(hit.point);
             explode = true;
-          } else if (hit.playerId) explode = true;
-          else if (hit.obstacleId) {
-            projectile.position = previous;
-            projectile.velocity.x *= -0.42;
-            projectile.velocity.z *= -0.42;
+          } else if (hit.playerId) {
+            projectile.position = cloneVec3(hit.point);
+            explode = true;
+          } else if (hit.obstacleId) {
+            const obstacle = this.map.obstacles.find((candidate) => candidate.id === hit.obstacleId);
+            const hitTop = Boolean(
+              obstacle
+              && directionDelta.y < 0
+              && Math.abs(hit.point.y - obstacle.max.y) < 0.04,
+            );
+            if (hitTop && obstacle) {
+              projectile.position = {
+                x: hit.point.x,
+                y: obstacle.max.y + projectile.radius,
+                z: hit.point.z,
+              };
+              if (projectile.fuse <= 0) {
+                explode = true;
+              } else {
+                projectile.velocity.y = Math.abs(projectile.velocity.y) * 0.48;
+                projectile.velocity.x *= 0.78;
+                projectile.velocity.z *= 0.78;
+              }
+            } else {
+              projectile.position = previous;
+              if (!obstacle) {
+                projectile.velocity.x *= -0.42;
+                projectile.velocity.z *= -0.42;
+              } else {
+                const faceDistanceX = Math.min(
+                  Math.abs(hit.point.x - obstacle.min.x),
+                  Math.abs(hit.point.x - obstacle.max.x),
+                );
+                const faceDistanceY = Math.min(
+                  Math.abs(hit.point.y - obstacle.min.y),
+                  Math.abs(hit.point.y - obstacle.max.y),
+                );
+                const faceDistanceZ = Math.min(
+                  Math.abs(hit.point.z - obstacle.min.z),
+                  Math.abs(hit.point.z - obstacle.max.z),
+                );
+                if (faceDistanceX <= faceDistanceY && faceDistanceX <= faceDistanceZ) {
+                  projectile.velocity.x *= -0.42;
+                  projectile.velocity.z *= 0.9;
+                } else if (faceDistanceZ <= faceDistanceY) {
+                  projectile.velocity.x *= 0.9;
+                  projectile.velocity.z *= -0.42;
+                } else {
+                  projectile.velocity.y *= -0.42;
+                  projectile.velocity.x *= 0.9;
+                  projectile.velocity.z *= 0.9;
+                }
+              }
+            }
           }
         }
       }
@@ -845,6 +957,8 @@ export class GameSimulation {
     player.activeWeapon = 0;
     player.input = { ...emptyInput(), yaw: player.yaw };
     this.previousButtons.set(player.id, noButtons());
+    this.jumpPadReadyAt.delete(player.id);
+    this.jumpPadMomentum.delete(player.id);
     if (!initial) this.pushEvent({ type: 'respawn', actorId: player.id, position: cloneVec3(player.position) });
   }
 

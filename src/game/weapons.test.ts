@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { JUMP_PAD_ZONES } from './map';
 import { emptyInput } from './math';
 import { createDefaultConfig, GameSimulation } from './simulation';
 import { DEFAULT_LOADOUT, TOWER_LOADOUT, WEAPONS } from './weapons';
@@ -34,26 +35,42 @@ describe('arena weapon balance', () => {
 });
 
 describe('tower access', () => {
-  it('carries a grounded player from either grav pad onto the tower deck', () => {
-    const simulation = new GameSimulation(
-      createDefaultConfig({ mode: 'towah-of-powah', format: 'duel', botFill: false }),
-      [{ id: 'local', name: 'Local' }],
-    );
-    const local = simulation.state.players.local;
-    if (!local) throw new Error('Missing local player');
-    simulation.state.phase = 'playing';
-    simulation.state.countdown = 0;
-    local.position = { x: -9.6, y: 0, z: 0 };
-    local.velocity = { x: 0, y: 0, z: 0 };
-    local.grounded = true;
-    simulation.setInput(local.id, { ...emptyInput(), yaw: -Math.PI / 2 });
+  it('launches a grounded player from either grav pad in a visible arc onto the tower deck', () => {
+    for (const pad of JUMP_PAD_ZONES) {
+      const simulation = new GameSimulation(
+        createDefaultConfig({ mode: 'towah-of-powah', format: 'duel', botFill: false }),
+        [{ id: 'local', name: 'Local' }],
+      );
+      const local = simulation.state.players.local;
+      if (!local) throw new Error('Missing local player');
+      simulation.state.phase = 'playing';
+      simulation.state.countdown = 0;
+      local.position = { ...pad.center };
+      local.velocity = { x: 0, y: 0, z: 0 };
+      local.grounded = true;
+      simulation.setInput(local.id, { ...emptyInput(), yaw: -Math.PI / 2 });
 
-    simulation.step(0.05);
-    expect(local.position.y).toBeGreaterThan(5.85);
-    expect(local.position.x).toBeGreaterThan(-7);
+      const startX = Math.abs(local.position.x);
+      simulation.step(0.05);
+      expect(local.position.y).toBeGreaterThan(0);
+      expect(local.position.y).toBeLessThan(2);
+      expect(Math.abs(local.position.x)).toBeLessThan(startX);
+      expect(local.grounded).toBe(false);
 
-    for (let index = 0; index < 30; index += 1) simulation.step(0.05);
-    expect(local.grounded).toBe(true);
-    expect(local.position.y).toBeCloseTo(5.85, 4);
+      let apex = local.position.y;
+      let landedOnTower = false;
+      for (let index = 0; index < 70; index += 1) {
+        simulation.step(0.05);
+        apex = Math.max(apex, local.position.y);
+        if (local.grounded && local.position.y > 5.8) {
+          landedOnTower = true;
+          break;
+        }
+      }
+      expect(apex).toBeGreaterThan(7);
+      expect(landedOnTower).toBe(true);
+      expect(local.position.y).toBeCloseTo(5.95, 4);
+      expect(Math.abs(local.position.x)).toBeLessThan(8);
+    }
   });
 });

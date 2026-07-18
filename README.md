@@ -14,13 +14,13 @@ Las plazas vacías pueden llenarse con bots. El modo local significa **un humano
 El repositorio contiene una **primera vertical jugable completa**, no una versión terminada ni preparada todavía para partidas públicas. Actualmente incluye:
 
 - simulación determinista del combate, movimiento, colisiones, escudos, reapariciones, proyectiles, granadas, cuerpo a cuerpo, puntuación y objetivos;
-- un mapa inicial, **Cresta del Cráter**, con bases, torre central, coberturas, plataformas, puntos de aparición y armas recogibles;
+- un mapa inicial, **Cresta del Cráter**, de 104 × 84 m, con tres rutas, bases protegidas, torre central, galerías, observatorio, hidroponía, terrazas, coberturas y armas recogibles;
 - seis armas, bots con tres dificultades, controles de teclado/ratón y mando, y audio procedural;
-- una capa de presentación Three.js con terreno PBR húmedo, bosque instanciado, niebla local, haces solares, arquitectura modular señalizada, sombras, bloom moderado, color grading, astronautas articulados de placas cerámicas, seis armas *hard-surface* y ADS interpolado por arma;
+- una capa de presentación Three.js con terreno PBR húmedo de barro, musgo, raíces, piedras, hojarasca y charcos; bosque instanciado, niebla local, haces solares, arquitectura modular señalizada, sombras, bloom moderado, color grading, astronautas articulados de placas cerámicas, seis armas *hard-surface* y ADS interpolado por arma;
 - animación procedural compartida entre primera y tercera persona: locomoción direccional, respiración, salto, caída, aterrizaje, muerte/reaparición, retroceso, recarga, cambio de arma, cuerpo a cuerpo y lanzamiento de granada, con rodillas, pies, manos y piezas de arma móviles;
 - menús, configuración 1v1/4v4, lobby manual P2P, HUD, marcador, kill feed, audio y pantalla de resultado integrados;
 - transporte WebRTC P2P nativo con señalización manual, mensajes tipados y un host con hasta siete invitados;
-- 78 pruebas automatizadas para combate, movimiento y deslizamiento por paredes, balance inicial, objetivos, bots, regresiones, acceso a la torre, puntuación, determinismo, curvas de animación, entorno procedural y piezas móviles de armamento.
+- 92 pruebas automatizadas para combate, movimiento y deslizamiento por paredes, balance inicial, objetivos, bots, regresiones, navegación del mapa, pads de salto, acceso a la torre, puntuación, determinismo, curvas de animación, texturas procedurales y piezas móviles de armamento.
 
 El proyecto pasa `typecheck`, tests y build de producción. Aun así, el flujo WebRTC debe probarse con varios navegadores y redes reales antes de declarar soporte público 4v4; tampoco hay matchmaking, persistencia, cuentas, backend, migración de host ni anti-cheat.
 
@@ -123,7 +123,9 @@ El equipamiento inicial normal es rifle de pulso y pistola. Las armas de poder a
 | Escopeta de brecha | Doce perdigones, fuerte a corta distancia. |
 | Lanzacohetes Nova | Proyectil lento con daño explosivo de área. |
 
-También hay granadas con fusible y rebote, golpe cuerpo a cuerpo —incluido daño elevado por la espalda—, munición, sobreescudo y recarga automática de escudo tras dejar de recibir daño. Los valores son de prototipo y necesitan *playtesting* y balance competitivo.
+También hay granadas con fusible y rebote: nunca detonan suspendidas en el aire, explotan inmediatamente al impactar a un personaje y, una vez agotado el fusible, al siguiente contacto con suelo o escenario. Hay golpe cuerpo a cuerpo —incluido daño elevado por la espalda—, munición, sobreescudo y recarga automática de escudo tras dejar de recibir daño. Los valores son de prototipo y necesitan *playtesting* y balance competitivo.
+
+Los dos accesos laterales a la torre son pads de salto físicos. Al pisarlos aplican un arco balístico continuo, conservan el impulso hacia la cubierta y permiten corrección lateral en vuelo; no trasladan instantáneamente al jugador.
 
 ## Multijugador P2P con señalización manual
 
@@ -210,9 +212,11 @@ Para convertir la vertical en un lanzamiento público, el orden recomendado es: 
     │   ├── collision.ts       # Movimiento, colisiones y raycasts
     │   ├── collision.test.ts  # Deslizamiento, esquinas y límites del arena
     │   ├── map.ts             # Cresta del Cráter, spawns y pickups
+    │   ├── map.test.ts        # Simetría, rutas, escalones y pads de salto
     │   ├── math.ts            # Vectores, límites y aleatoriedad
     │   ├── regressions.test.ts # Regresiones y simulaciones largas de bots
     │   ├── simulation.ts      # Estado autoritativo y reglas de partida
+    │   ├── simulation.mechanics.test.ts # Pads físicos y fusible de granadas
     │   ├── simulation.test.ts # Pruebas de combate, modos y determinismo
     │   ├── types.ts           # Contratos de juego y mensajes de red
     │   ├── weapons.ts         # Definiciones, cargadores y equipamientos
@@ -229,6 +233,7 @@ Para convertir la vertical en un lanzamiento público, el orden recomendado es: 
     │   ├── facilityEnvironment.ts # Bosque y arquitectura modular procedural
     │   ├── landscapeGeometry.ts # Crestas y vegetación procedural
     │   ├── visualTextures.ts  # Entorno, terreno y máscaras procedurales
+    │   ├── visualTextures.test.ts # Determinismo y rangos PBR del terreno
     │   ├── weaponModels.test.ts # Contratos de piezas móviles y anclajes
     │   └── weaponModels.ts    # Modelos PBR y poses de las seis armas
     ├── main.ts                # Entrada de la aplicación

@@ -76,9 +76,11 @@ describe('gameplay regressions', () => {
     const attacker = simulation.state.players.attacker;
     const target = simulation.state.players.target;
     if (!attacker || !target) throw new Error('Missing combat fixture');
+    const wall = simulation.map.obstacles.find((obstacle) => obstacle.id === 'north-wall');
+    if (!wall) throw new Error('Missing north wall fixture');
     start(simulation);
     attacker.position = { x: 0, y: 0, z: 0 };
-    target.position = { x: -11, y: 0, z: -7.5 };
+    target.position = { x: 0, y: 0, z: wall.max.z + 3 };
     target.shield = 100;
     target.spawnProtection = 0;
     const rocket: ProjectileState = {
@@ -86,8 +88,8 @@ describe('gameplay regressions', () => {
       kind: 'rocket',
       ownerId: attacker.id,
       team: attacker.team,
-      position: { x: -12, y: 1, z: -10 },
-      velocity: { x: -28, y: 0, z: 0 },
+      position: { x: 0, y: 1, z: wall.max.z + 0.8 },
+      velocity: { x: 0, y: 0, z: -28 },
       radius: 0.22,
       damage: WEAPONS['rocket-launcher'].damage,
       blastRadius: 5.5,

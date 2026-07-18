@@ -232,7 +232,11 @@ const ctfPlan = (state: MatchState, player: PlayerState, map: MapDefinition): Ob
   }
 
   player.bot!.objective = 'flag';
-  return { goal: enemyFlag?.position ?? map.flagBases[enemyTeam], urgent: false };
+  // A flag run is the primary CTF objective. Treating it as non-urgent made
+  // attackers spend too long strafing in incidental fights on the larger map,
+  // so entire bot teams could interact with a flag without ever converting a
+  // capture. They still aim and shoot, but navigation now keeps forward intent.
+  return { goal: enemyFlag?.position ?? map.flagBases[enemyTeam], urgent: true };
 };
 
 const juggernautPlan = (state: MatchState, player: PlayerState): ObjectivePlan => {

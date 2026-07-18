@@ -242,7 +242,16 @@ export interface ForestGroundTextures {
  */
 export const createForestGroundTextures = (size = 512): ForestGroundTextures => {
   const safeSize = Math.max(128, Math.round(size));
-  const height = new Float32Array(safeSize * safeSize);
+  const pixelCount = safeSize * safeSize;
+  const height = new Float32Array(pixelCount);
+  const mossMask = new Float32Array(pixelCount);
+  const puddleMask = new Float32Array(pixelCount);
+  const rootMask = new Float32Array(pixelCount);
+  const stoneMask = new Float32Array(pixelCount);
+  const leafGreenMask = new Float32Array(pixelCount);
+  const leafOchreMask = new Float32Array(pixelCount);
+  const twigMask = new Float32Array(pixelCount);
+  const fineVariation = new Float32Array(pixelCount);
   const albedoCanvas = createCanvas(safeSize, safeSize);
   const albedoContext = getContext(albedoCanvas);
   const albedoImage = albedoContext.createImageData(safeSize, safeSize);
@@ -250,71 +259,273 @@ export const createForestGroundTextures = (size = 512): ForestGroundTextures => 
   const roughnessContext = getContext(roughnessCanvas);
   const roughnessImage = roughnessContext.createImageData(safeSize, safeSize);
 
+  const clamp01 = (value: number): number => Math.min(1, Math.max(0, value));
+  const lerp = (start: number, end: number, alpha: number): number => start + (end - start) * alpha;
+  const wrapCoordinate = (value: number): number => {
+    const wrapped = value % safeSize;
+    return wrapped < 0 ? wrapped + safeSize : wrapped;
+  };
+  const wrappedIndex = (x: number, y: number): number => (
+    Math.floor(wrapCoordinate(y)) * safeSize + Math.floor(wrapCoordinate(x))
+  );
+  const mergeMask = (mask: Float32Array, index: number, value: number): void => {
+    if (value > mask[index]!) mask[index] = value;
+  };
+
+  /**
+   * Rasterises a soft, rotated dome directly into a toroidal buffer. Using the
+   * same mask for height, colour and roughness keeps loose material physically
+   * coherent while making every feature continue cleanly across tile edges.
+   */
+  const stampEllipse = (
+    mask: Float32Array,
+    centerX: number,
+    centerY: number,
+    radiusX: number,
+    radiusY: number,
+    rotation: number,
+    edgeSoftness = 0.24,
+  ): void => {
+    const cosine = Math.cos(rotation);
+    const sine = Math.sin(rotation);
+    const extent = Math.ceil(Math.max(radiusX, radiusY) + 1);
+    const minX = Math.floor(centerX - extent);
+    const maxX = Math.ceil(centerX + extent);
+    const minY = Math.floor(centerY - extent);
+    const maxY = Math.ceil(centerY + extent);
+    for (let y = minY; y <= maxY; y += 1) {
+      const relativeY = y + 0.5 - centerY;
+      for (let x = minX; x <= maxX; x += 1) {
+        const relativeX = x + 0.5 - centerX;
+        const localX = (relativeX * cosine + relativeY * sine) / radiusX;
+        const localY = (-relativeX * sine + relativeY * cosine) / radiusY;
+        const radialDistance = Math.hypot(localX, localY);
+        if (radialDistance >= 1) continue;
+        const dome = smoothstep(clamp01(1 - radialDistance));
+        const softPlateau = smoothstep(clamp01((1 - radialDistance) / edgeSoftness));
+        const value = lerp(dome, softPlateau, 0.16);
+        mergeMask(mask, wrappedIndex(x, y), value);
+      }
+    }
+  };
+
+  /** Draws roots and twigs as soft capsules in the same toroidal buffers. */
+  const stampSegment = (
+    mask: Float32Array,
+    startX: number,
+    startY: number,
+    endX: number,
+    endY: number,
+    radius: number,
+  ): void => {
+    const deltaX = endX - startX;
+    const deltaY = endY - startY;
+    const lengthSquared = deltaX * deltaX + deltaY * deltaY;
+    const minX = Math.floor(Math.min(startX, endX) - radius - 1);
+    const maxX = Math.ceil(Math.max(startX, endX) + radius + 1);
+    const minY = Math.floor(Math.min(startY, endY) - radius - 1);
+    const maxY = Math.ceil(Math.max(startY, endY) + radius + 1);
+    for (let y = minY; y <= maxY; y += 1) {
+      for (let x = minX; x <= maxX; x += 1) {
+        const pointX = x + 0.5;
+        const pointY = y + 0.5;
+        const projection = lengthSquared > 0
+          ? clamp01(((pointX - startX) * deltaX + (pointY - startY) * deltaY) / lengthSquared)
+          : 0;
+        const nearestX = startX + deltaX * projection;
+        const nearestY = startY + deltaY * projection;
+        const distance = Math.hypot(pointX - nearestX, pointY - nearestY);
+        if (distance >= radius) continue;
+        const value = smoothstep(clamp01(1 - distance / radius));
+        mergeMask(mask, wrappedIndex(x, y), value);
+      }
+    }
+  };
+
   for (let y = 0; y < safeSize; y += 1) {
     const v = y / safeSize;
     for (let x = 0; x < safeSize; x += 1) {
       const u = x / safeSize;
-      const macro =
-        tiledNoise(u * 5, v * 5, 5, 0x51f0) * 0.5
-        + tiledNoise(u * 13, v * 13, 13, 0x8d31) * 0.32
-        + tiledNoise(u * 47, v * 47, 47, 0x2a61) * 0.18;
-      const moss = smoothstep(THREE.MathUtils.clamp((macro - 0.34) / 0.52, 0, 1));
-      const mineral = tiledNoise(u * 91, v * 91, 91, 0x771c) - 0.5;
-      const rootBand = Math.abs(Math.sin((u * 2.1 + v * 1.35) * TWO_PI + macro * 2.4));
-      const root = smoothstep(THREE.MathUtils.clamp((rootBand - 0.82) / 0.18, 0, 1));
-      const wet = smoothstep(THREE.MathUtils.clamp((0.48 - macro) / 0.22, 0, 1));
       const index = y * safeSize + x;
-      height[index] = macro * 0.72 + mineral * 0.06 + root * 0.22;
+      const broad = tiledNoise(u * 4, v * 4, 4, 0x51f0);
+      const medium = tiledNoise(u * 11, v * 11, 11, 0x8d31);
+      const granular = tiledNoise(u * 37, v * 37, 37, 0x2a61);
+      const micro = tiledNoise(u * 113, v * 113, 113, 0x771c) - 0.5;
+      const pore = tiledNoise(u * 191, v * 191, 191, 0x31af) - 0.5;
+      const terrain = broad * 0.51 + medium * 0.31 + granular * 0.18;
 
-      const mossMix = moss * 0.76;
-      const litterMix = Math.max(0, mineral) * 0.18;
-      const rootMix = root * 0.42;
-      const brightness = 0.86 + mineral * 0.15 - wet * 0.08;
-      let red = THREE.MathUtils.lerp(38, 85, mossMix);
-      let green = THREE.MathUtils.lerp(49, 117, mossMix);
-      let blue = THREE.MathUtils.lerp(40, 72, mossMix);
-      red = THREE.MathUtils.lerp(red, 113, litterMix) * brightness;
-      green = THREE.MathUtils.lerp(green, 134, litterMix) * brightness;
-      blue = THREE.MathUtils.lerp(blue, 90, litterMix) * brightness;
-      red = THREE.MathUtils.lerp(red, 56, rootMix);
-      green = THREE.MathUtils.lerp(green, 47, rootMix);
-      blue = THREE.MathUtils.lerp(blue, 36, rootMix);
+      // Moss prefers raised, stable soil while water collects in broad basins.
+      const mossDistribution = terrain * 0.72 + tiledNoise(u * 7, v * 7, 7, 0xb055) * 0.28;
+      const moss = smoothstep(clamp01((mossDistribution - 0.47) / 0.31));
+      const basin = 1 - (broad * 0.72 + medium * 0.28);
+      const puddleShape = basin * 0.72 + tiledNoise(u * 9, v * 9, 9, 0x9e71) * 0.28;
+      const puddle = smoothstep(clamp01((puddleShape - 0.61) / 0.16));
 
-      const offset = index * 4;
-      albedoImage.data[offset] = THREE.MathUtils.clamp(red, 0, 255);
-      albedoImage.data[offset + 1] = THREE.MathUtils.clamp(green, 0, 255);
-      albedoImage.data[offset + 2] = THREE.MathUtils.clamp(blue, 0, 255);
-      albedoImage.data[offset + 3] = 255;
-
-      const roughness = THREE.MathUtils.clamp(0.91 - wet * 0.3 - root * 0.08 + mineral * 0.06, 0.5, 0.98);
-      const roughnessByte = Math.round(roughness * 255);
-      roughnessImage.data[offset] = roughnessByte;
-      roughnessImage.data[offset + 1] = roughnessByte;
-      roughnessImage.data[offset + 2] = roughnessByte;
-      roughnessImage.data[offset + 3] = 255;
+      mossMask[index] = moss * (1 - puddle * 0.92);
+      puddleMask[index] = puddle;
+      fineVariation[index] = micro * 0.7 + pore * 0.3;
+      height[index] = terrain * 0.46 + micro * 0.035 + pore * 0.012 - puddle * 0.075;
     }
+  }
+
+  // Feature masks use deterministic toroidal stamps, so details crossing one
+  // edge continue at the opposite edge instead of exposing a square tile.
+  const random = seededRandom(0xf012e57);
+  const rootSystemCount = Math.max(6, Math.round(safeSize / 72));
+  for (let system = 0; system < rootSystemCount; system += 1) {
+    let currentX = random() * safeSize;
+    let currentY = random() * safeSize;
+    let angle = random() * TWO_PI;
+    const segmentCount = 7 + Math.floor(random() * 7);
+    let radius = safeSize * (0.0042 + random() * 0.0048);
+    for (let segment = 0; segment < segmentCount; segment += 1) {
+      angle += (random() - 0.5) * 0.68;
+      const length = safeSize * (0.026 + random() * 0.038);
+      const nextX = currentX + Math.cos(angle) * length;
+      const nextY = currentY + Math.sin(angle) * length;
+      stampSegment(rootMask, currentX, currentY, nextX, nextY, radius);
+
+      if (segment > 1 && random() > 0.63) {
+        const branchAngle = angle + (random() > 0.5 ? 1 : -1) * (0.42 + random() * 0.7);
+        const branchLength = length * (0.38 + random() * 0.5);
+        stampSegment(
+          rootMask,
+          currentX,
+          currentY,
+          currentX + Math.cos(branchAngle) * branchLength,
+          currentY + Math.sin(branchAngle) * branchLength,
+          radius * 0.58,
+        );
+      }
+      currentX = nextX;
+      currentY = nextY;
+      radius *= 0.9;
+    }
+  }
+
+  const stoneCount = Math.max(52, Math.round(safeSize * 0.27));
+  for (let stone = 0; stone < stoneCount; stone += 1) {
+    const radius = safeSize * (0.0028 + random() * random() * 0.0095);
+    stampEllipse(
+      stoneMask,
+      random() * safeSize,
+      random() * safeSize,
+      radius * (1.12 + random() * 0.65),
+      radius * (0.68 + random() * 0.42),
+      random() * TWO_PI,
+      0.46,
+    );
+  }
+
+  const leafCount = Math.max(280, Math.round(safeSize * 1.15));
+  for (let leaf = 0; leaf < leafCount; leaf += 1) {
+    const length = safeSize * (0.0045 + random() * 0.012);
+    const target = random() > 0.58 ? leafOchreMask : leafGreenMask;
+    stampEllipse(
+      target,
+      random() * safeSize,
+      random() * safeSize,
+      length,
+      length * (0.15 + random() * 0.19),
+      random() * TWO_PI,
+      0.32,
+    );
+  }
+
+  const twigCount = Math.max(30, Math.round(safeSize / 8));
+  for (let twig = 0; twig < twigCount; twig += 1) {
+    const startX = random() * safeSize;
+    const startY = random() * safeSize;
+    const angle = random() * TWO_PI;
+    const length = safeSize * (0.012 + random() * 0.032);
+    stampSegment(
+      twigMask,
+      startX,
+      startY,
+      startX + Math.cos(angle) * length,
+      startY + Math.sin(angle) * length,
+      Math.max(0.55, safeSize * (0.001 + random() * 0.0012)),
+    );
+  }
+
+  // Build every PBR channel from the same semantic masks. Values describe
+  // material colour only; all apparent direction and depth comes from normals.
+  for (let index = 0; index < pixelCount; index += 1) {
+    const moss = mossMask[index]!;
+    const puddle = puddleMask[index]!;
+    const root = rootMask[index]!;
+    const stone = stoneMask[index]!;
+    const greenLeaf = leafGreenMask[index]!;
+    const ochreLeaf = leafOchreMask[index]!;
+    const twig = twigMask[index]!;
+    const variation = fineVariation[index]!;
+    const leaf = Math.max(greenLeaf, ochreLeaf);
+
+    // Damp mineral soil.
+    let red = 48 + variation * 11;
+    let green = 55 + variation * 12;
+    let blue = 44 + variation * 8;
+
+    // Dense moss has several greens, avoiding a single synthetic-looking hue.
+    const mossVariation = clamp01(0.48 + variation * 1.4);
+    red = lerp(red, lerp(53, 82, mossVariation), moss * 0.9);
+    green = lerp(green, lerp(78, 112, mossVariation), moss * 0.9);
+    blue = lerp(blue, lerp(45, 61, mossVariation), moss * 0.9);
+
+    // Puddles are dark because the saturated soil absorbs more light, not
+    // because a directional highlight has been painted into the albedo.
+    red = lerp(red, 28 + variation * 4, puddle * 0.82);
+    green = lerp(green, 38 + variation * 5, puddle * 0.82);
+    blue = lerp(blue, 37 + variation * 5, puddle * 0.82);
+
+    red = lerp(red, 70 + variation * 8, root * 0.88);
+    green = lerp(green, 57 + variation * 6, root * 0.88);
+    blue = lerp(blue, 41 + variation * 5, root * 0.88);
+
+    // Quartz/slate pebbles remain neutral so real scene lights define form.
+    red = lerp(red, 91 + variation * 14, stone * 0.84);
+    green = lerp(green, 100 + variation * 13, stone * 0.84);
+    blue = lerp(blue, 94 + variation * 11, stone * 0.84);
+
+    red = lerp(red, 54 + variation * 8, greenLeaf * 0.92);
+    green = lerp(green, 75 + variation * 10, greenLeaf * 0.92);
+    blue = lerp(blue, 40 + variation * 6, greenLeaf * 0.92);
+    red = lerp(red, 119 + variation * 11, ochreLeaf * 0.92);
+    green = lerp(green, 91 + variation * 9, ochreLeaf * 0.92);
+    blue = lerp(blue, 47 + variation * 6, ochreLeaf * 0.92);
+    red = lerp(red, 52, twig * 0.9);
+    green = lerp(green, 42, twig * 0.9);
+    blue = lerp(blue, 31, twig * 0.9);
+
+    const offset = index * 4;
+    albedoImage.data[offset] = Math.round(Math.min(255, Math.max(0, red)));
+    albedoImage.data[offset + 1] = Math.round(Math.min(255, Math.max(0, green)));
+    albedoImage.data[offset + 2] = Math.round(Math.min(255, Math.max(0, blue)));
+    albedoImage.data[offset + 3] = 255;
+
+    let roughness = 0.9 + variation * 0.045;
+    roughness = lerp(roughness, 0.96, moss * 0.82);
+    roughness = lerp(roughness, 0.24 + Math.abs(variation) * 0.12, puddle * 0.94);
+    roughness = lerp(roughness, 0.72, root * 0.72);
+    roughness = lerp(roughness, puddle > 0.2 ? 0.38 : 0.64, stone * 0.82);
+    roughness = lerp(roughness, ochreLeaf > greenLeaf ? 0.78 : 0.86, leaf * 0.82);
+    roughness = lerp(roughness, 0.81, twig * 0.76);
+    const roughnessByte = Math.round(clamp01(roughness) * 255);
+    roughnessImage.data[offset] = roughnessByte;
+    roughnessImage.data[offset + 1] = roughnessByte;
+    roughnessImage.data[offset + 2] = roughnessByte;
+    roughnessImage.data[offset + 3] = 255;
+
+    // Overlaid features become part of the scalar height field before normal
+    // generation, including fine litter that was previously colour-only.
+    height[index] = height[index]! + root * 0.15
+      + stone * 0.21
+      + leaf * 0.052
+      + twig * 0.075
+      + moss * 0.022;
   }
   albedoContext.putImageData(albedoImage, 0, 0);
   roughnessContext.putImageData(roughnessImage, 0, 0);
-
-  // Leaf litter adds scale cues without baking light or introducing seams.
-  const random = seededRandom(0xf012e57);
-  for (let leaf = 0; leaf < Math.round(safeSize / 2.8); leaf += 1) {
-    const x = random() * safeSize;
-    const y = random() * safeSize;
-    const length = safeSize * (0.006 + random() * 0.014);
-    const width = length * (0.14 + random() * 0.2);
-    albedoContext.save();
-    albedoContext.translate(x, y);
-    albedoContext.rotate(random() * TWO_PI);
-    albedoContext.fillStyle = random() > 0.54
-      ? `rgba(106, 126, 73, ${0.18 + random() * 0.2})`
-      : `rgba(47, 56, 39, ${0.2 + random() * 0.2})`;
-    albedoContext.beginPath();
-    albedoContext.ellipse(0, 0, length, width, 0, 0, TWO_PI);
-    albedoContext.fill();
-    albedoContext.restore();
-  }
 
   const normalCanvas = createCanvas(safeSize, safeSize);
   const normalContext = getContext(normalCanvas);
@@ -326,8 +537,8 @@ export const createForestGroundTextures = (size = 512): ForestGroundTextures => 
       const right = height[y * safeSize + wrap(x + 1)]!;
       const top = height[wrap(y - 1) * safeSize + x]!;
       const bottom = height[wrap(y + 1) * safeSize + x]!;
-      const normalX = (left - right) * 2.4;
-      const normalY = (top - bottom) * 2.4;
+      const normalX = (left - right) * 3.35;
+      const normalY = (top - bottom) * 3.35;
       const inverseLength = 1 / Math.hypot(normalX, normalY, 1);
       const offset = (y * safeSize + x) * 4;
       normalImage.data[offset] = Math.round((normalX * inverseLength * 0.5 + 0.5) * 255);
