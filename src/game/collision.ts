@@ -10,6 +10,86 @@ const insideHorizontal = (position: Vec3, obstacle: AabbObstacle, margin = 0): b
 const overlapsVertical = (feetY: number, height: number, obstacle: AabbObstacle): boolean =>
   feetY < obstacle.max.y - 0.02 && feetY + height > obstacle.min.y + 0.02;
 
+const CONTACT_EPSILON = 0.0001;
+type HorizontalAxis = 'x' | 'z';
+
+const overlapsExpandedAxis = (
+  value: number,
+  obstacle: AabbObstacle,
+  axis: HorizontalAxis,
+  radius: number,
+): boolean =>
+  value > obstacle.min[axis] - radius + CONTACT_EPSILON
+  && value < obstacle.max[axis] + radius - CONTACT_EPSILON;
+
+/**
+ * Sweeps one horizontal axis while treating exact surface contact as free for
+ * the perpendicular axis. This preserves tangential velocity, so walking into
+ * a wall naturally becomes a slide instead of a full stop.
+ */
+const sweepHorizontalAxis = (
+  position: Vec3,
+  velocity: Vec3,
+  player: Pick<PlayerState, 'height' | 'radius'>,
+  map: MapDefinition,
+  dt: number,
+  axis: HorizontalAxis,
+): boolean => {
+  const otherAxis: HorizontalAxis = axis === 'x' ? 'z' : 'x';
+  const start = position[axis];
+  const delta = velocity[axis] * dt;
+  if (Math.abs(delta) < EPSILON) return false;
+
+  const target = start + delta;
+  let resolved = target;
+  let collided = false;
+
+  for (const obstacle of map.obstacles) {
+    if (
+      !overlapsVertical(position.y, player.height, obstacle)
+      || !overlapsExpandedAxis(position[otherAxis], obstacle, otherAxis, player.radius)
+    ) {
+      continue;
+    }
+
+    const near = obstacle.min[axis] - player.radius;
+    const far = obstacle.max[axis] + player.radius;
+    if (delta > 0 && start <= near + CONTACT_EPSILON && target > near) {
+      resolved = Math.min(resolved, near);
+      collided = true;
+      continue;
+    }
+    if (delta < 0 && start >= far - CONTACT_EPSILON && target < far) {
+      resolved = Math.max(resolved, far);
+      collided = true;
+      continue;
+    }
+
+    // Recover deterministically if network correction or spawning ever leaves
+    // a capsule inside an expanded obstacle. Movement that is already escaping
+    // remains untouched; movement deeper into it is pushed to the nearest face.
+    if (start > near + CONTACT_EPSILON && start < far - CONTACT_EPSILON) {
+      const escaping = delta > 0 ? target >= far : target <= near;
+      if (!escaping) {
+        resolved = start - near <= far - start ? near : far;
+        collided = true;
+      }
+    }
+  }
+
+  const minimum = axis === 'x'
+    ? map.bounds.minX + player.radius
+    : map.bounds.minZ + player.radius;
+  const maximum = axis === 'x'
+    ? map.bounds.maxX - player.radius
+    : map.bounds.maxZ - player.radius;
+  const bounded = clamp(resolved, minimum, maximum);
+  if (Math.abs(bounded - resolved) > CONTACT_EPSILON) collided = true;
+  position[axis] = bounded;
+  if (collided) velocity[axis] = 0;
+  return collided;
+};
+
 export interface MovementResult {
   position: Vec3;
   velocity: Vec3;
@@ -27,28 +107,8 @@ export const moveCapsule = (
   const velocity = { ...player.velocity };
   let hitWall = false;
 
-  position.x += velocity.x * dt;
-  for (const obstacle of map.obstacles) {
-    if (!overlapsVertical(position.y, player.height, obstacle) || !insideHorizontal(position, obstacle, player.radius)) continue;
-    if (previous.x <= obstacle.min.x - player.radius) position.x = obstacle.min.x - player.radius;
-    else if (previous.x >= obstacle.max.x + player.radius) position.x = obstacle.max.x + player.radius;
-    else position.x = previous.x;
-    velocity.x = 0;
-    hitWall = true;
-  }
-
-  position.z += velocity.z * dt;
-  for (const obstacle of map.obstacles) {
-    if (!overlapsVertical(position.y, player.height, obstacle) || !insideHorizontal(position, obstacle, player.radius)) continue;
-    if (previous.z <= obstacle.min.z - player.radius) position.z = obstacle.min.z - player.radius;
-    else if (previous.z >= obstacle.max.z + player.radius) position.z = obstacle.max.z + player.radius;
-    else position.z = previous.z;
-    velocity.z = 0;
-    hitWall = true;
-  }
-
-  position.x = clamp(position.x, map.bounds.minX + player.radius, map.bounds.maxX - player.radius);
-  position.z = clamp(position.z, map.bounds.minZ + player.radius, map.bounds.maxZ - player.radius);
+  hitWall = sweepHorizontalAxis(position, velocity, player, map, dt, 'x') || hitWall;
+  hitWall = sweepHorizontalAxis(position, velocity, player, map, dt, 'z') || hitWall;
 
   const nextY = position.y + velocity.y * dt;
   let resolvedY = nextY;
