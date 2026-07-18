@@ -17,9 +17,10 @@ El repositorio contiene una **primera vertical jugable completa**, no una versi�
 - un mapa inicial, **Cresta del Cráter**, con bases, torre central, coberturas, plataformas, puntos de aparición y armas recogibles;
 - seis armas, bots con tres dificultades, controles de teclado/ratón y mando, y audio procedural;
 - una capa de presentación Three.js con iluminación PBR, entorno procedural, sombras, bloom moderado, color grading, arquitectura biselada, astronautas articulados, seis modelos de arma diferenciados, paisaje atmosférico y cámara en primera persona;
+- animación procedural compartida entre primera y tercera persona: locomoción direccional, respiración, salto, caída, aterrizaje, muerte/reaparición, retroceso, recarga, cambio de arma, cuerpo a cuerpo y lanzamiento de granada, con rodillas, pies, manos y piezas de arma móviles;
 - menús, configuración 1v1/4v4, lobby manual P2P, HUD, marcador, kill feed, audio y pantalla de resultado integrados;
 - transporte WebRTC P2P nativo con señalización manual, mensajes tipados y un host con hasta siete invitados;
-- 20 pruebas automatizadas para combate, balance inicial, objetivos, bots, regresiones, acceso a la torre, puntuación y determinismo básico.
+- 49 pruebas automatizadas para combate, balance inicial, objetivos, bots, regresiones, acceso a la torre, puntuación, determinismo, curvas de animación y piezas móviles de armamento.
 
 El proyecto pasa `typecheck`, tests y build de producción. Aun así, el flujo WebRTC debe probarse con varios navegadores y redes reales antes de declarar soporte público 4v4; tampoco hay matchmaking, persistencia, cuentas, backend, migración de host ni anti-cheat.
 
@@ -189,7 +190,7 @@ La vertical se construyó en seis capas verificables, actualmente completadas:
 5. **Presentación y red:** arte 3D procedural, astronautas, cámara FPS, HUD/audio, host autoritativo y señalización WebRTC manual.
 6. **Endurecimiento de la vertical:** validación de inputs, backpressure de snapshots, regresiones y simulaciones largas de bots.
 
-Para convertir la vertical en un lanzamiento público, el orden recomendado es: pruebas reales Chrome/Firefox/Safari; sesiones sostenidas de ocho navegadores sobre varias redes; snapshots no fiables y predicción/reconciliación del cliente; segundo mapa específico de duelo; animaciones y audio finales; opciones de accesibilidad; y, solo si se acepta infraestructura, señalización automática, TURN y/o migración de host.
+Para convertir la vertical en un lanzamiento público, el orden recomendado es: pruebas reales Chrome/Firefox/Safari; sesiones sostenidas de ocho navegadores sobre varias redes; snapshots no fiables y predicción/reconciliación del cliente; segundo mapa específico de duelo; captura de movimiento y audio finales; opciones de accesibilidad; y, solo si se acepta infraestructura, señalización automática, TURN y/o migración de host.
 
 ## Arquitectura
 
@@ -220,9 +221,12 @@ Para convertir la vertical en un lanzamiento público, el orden recomendado es: 
     ├── network
     │   └── P2PNetwork.ts      # WebRTC, señalización base64 y DataChannels
     ├── render
+    │   ├── animationMath.ts   # Curvas puras y pesos de acciones animadas
+    │   ├── animationMath.test.ts # Continuidad y estabilidad de las curvas
     │   ├── ArenaRenderer.ts   # Escena Three.js, iluminación, cámara y efectos
     │   ├── landscapeGeometry.ts # Crestas y vegetación procedural
     │   ├── visualTextures.ts  # Entorno, terreno y máscaras procedurales
+    │   ├── weaponModels.test.ts # Contratos de piezas móviles y anclajes
     │   └── weaponModels.ts    # Modelos PBR y poses de las seis armas
     ├── main.ts                # Entrada de la aplicación
     ├── styles.css             # Dirección visual, menús y HUD responsive

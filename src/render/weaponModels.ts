@@ -6,6 +6,23 @@ import { WEAPONS } from '../game/weapons';
 
 type VectorTuple = readonly [x: number, y: number, z: number];
 
+export type WeaponAnimationRole =
+  | 'magazine'
+  | 'energy-cell'
+  | 'slide'
+  | 'bolt'
+  | 'pump'
+  | 'launcher-cassette';
+
+const markAnimationPart = <TObject extends THREE.Object3D>(
+  object: TObject,
+  role: WeaponAnimationRole,
+): TObject => {
+  object.name = `weapon-part-${role}`;
+  object.userData.animationRole = role;
+  return object;
+};
+
 export interface WeaponViewPose {
   readonly scale: number;
   readonly position: VectorTuple;
@@ -304,9 +321,19 @@ const addSideRail = (
 
 const buildSidearm = (builder: ModelBuilder): void => {
   const { materials } = builder;
-  builder.rounded([0.25, 0.2, 0.72], [0, 0.14, -0.24], materials.paint, 0.035);
+  const slide = builder.rounded([0.25, 0.2, 0.72], [0, 0.14, -0.24], materials.paint, 0.035);
+  markAnimationPart(slide, 'slide');
   builder.rounded([0.22, 0.14, 0.43], [0, 0.015, -0.08], materials.polymer, 0.025);
   builder.rounded([0.19, 0.43, 0.23], [0, -0.245, 0.045], materials.polymer, 0.045, [-0.2, 0, 0]);
+  const magazine = builder.rounded(
+    [0.145, 0.31, 0.145],
+    [0, -0.285, 0.045],
+    materials.metal,
+    0.024,
+    [-0.2, 0, 0],
+    false,
+  );
+  markAnimationPart(magazine, 'magazine');
   builder.box([0.012, 0.085, 0.36], [-0.131, 0.14, -0.23], materials.accent);
   builder.rounded([0.15, 0.025, 0.22], [0, 0.247, -0.24], materials.metal, 0.008, undefined, false);
   builder.box([0.13, 0.025, 0.16], [0.126, 0.17, -0.12], materials.polymer);
@@ -340,7 +367,15 @@ const buildPulseRifle = (builder: ModelBuilder): void => {
   builder.cylinder(0.058, 0.07, 0.58, [0, 0.105, -1.01], materials.metal, 12);
   addMuzzle(builder, [0, 0.105, -1.32], 0.078, true);
 
-  builder.rounded([0.1, 0.29, 0.34], [0.205, -0.045, 0.24], materials.metal, 0.03, [0.1, 0, -0.08], false);
+  const energyCell = builder.rounded(
+    [0.1, 0.29, 0.34],
+    [0.205, -0.045, 0.24],
+    materials.metal,
+    0.03,
+    [0.1, 0, -0.08],
+    false,
+  );
+  markAnimationPart(energyCell, 'energy-cell');
   builder.rounded([0.018, 0.085, 0.48], [-0.189, 0.075, -0.38], materials.accent, 0.006, undefined, false);
   for (const z of [-0.2, -0.39, -0.58]) {
     builder.box([0.025, 0.075, 0.1], [0.19, 0.105, z], materials.accent);
@@ -358,7 +393,15 @@ const buildBattleRifle = (builder: ModelBuilder): void => {
   builder.rounded([0.31, 0.29, 0.9], [0, 0.08, -0.37], materials.paint, 0.045);
   builder.rounded([0.3, 0.29, 0.58], [0, 0.035, 0.36], materials.polymer, 0.055, [0.04, 0, 0]);
   builder.rounded([0.19, 0.42, 0.2], [0, -0.25, 0.055], materials.polymer, 0.035, [-0.18, 0, 0]);
-  builder.rounded([0.19, 0.4, 0.2], [0, -0.21, -0.28], materials.metal, 0.025, [0.13, 0, 0], false);
+  const magazine = builder.rounded(
+    [0.19, 0.4, 0.2],
+    [0, -0.21, -0.28],
+    materials.metal,
+    0.025,
+    [0.13, 0, 0],
+    false,
+  );
+  markAnimationPart(magazine, 'magazine');
   builder.rounded([0.27, 0.2, 0.38], [0, 0.045, -0.92], materials.polymer, 0.04);
   builder.cylinder(0.045, 0.055, 0.84, [0, 0.11, -1.33], materials.metal, 12);
   builder.cylinder(0.075, 0.075, 0.18, [0, 0.11, -1.76], materials.paint, 10);
@@ -368,6 +411,15 @@ const buildBattleRifle = (builder: ModelBuilder): void => {
   builder.box([0.018, 0.075, 0.46], [-0.162, 0.095, -0.4], materials.accent);
   builder.rounded([0.23, 0.08, 0.42], [0, 0.29, 0.27], materials.paint, 0.02, undefined, false);
   builder.box([0.2, 0.045, 0.18], [0, -0.07, 0.66], materials.metal);
+  const bolt = builder.rounded(
+    [0.055, 0.075, 0.28],
+    [0.175, 0.135, -0.18],
+    materials.metal,
+    0.014,
+    undefined,
+    false,
+  );
+  markAnimationPart(bolt, 'bolt');
   addSideRail(builder, 0.165, 0.23, -0.69, 4, 0.12);
   builder.group.userData.primaryGrip = new THREE.Vector3(0, -0.2, 0.05);
   builder.group.userData.supportGrip = new THREE.Vector3(0, -0.02, -0.73);
@@ -379,7 +431,15 @@ const buildSniper = (builder: ModelBuilder): void => {
   builder.rounded([0.29, 0.3, 0.96], [0, 0.07, -0.38], materials.paint, 0.045);
   builder.rounded([0.28, 0.24, 0.66], [0, 0.02, 0.45], materials.polymer, 0.055, [0.05, 0, 0]);
   builder.rounded([0.18, 0.43, 0.2], [0, -0.25, 0.08], materials.polymer, 0.035, [-0.2, 0, 0]);
-  builder.rounded([0.16, 0.4, 0.18], [0, -0.2, -0.31], materials.metal, 0.025, [0.12, 0, 0], false);
+  const magazine = builder.rounded(
+    [0.16, 0.4, 0.18],
+    [0, -0.2, -0.31],
+    materials.metal,
+    0.025,
+    [0.12, 0, 0],
+    false,
+  );
+  markAnimationPart(magazine, 'magazine');
   builder.rounded([0.24, 0.17, 0.42], [0, 0.08, -0.98], materials.polymer, 0.03);
   builder.cylinder(0.038, 0.05, 1.2, [0, 0.13, -1.5], materials.metal, 12);
 
@@ -392,9 +452,16 @@ const buildSniper = (builder: ModelBuilder): void => {
   builder.rounded([0.25, 0.08, 0.44], [0, 0.27, 0.37], materials.paint, 0.025, undefined, false);
   builder.box([0.016, 0.08, 0.5], [-0.151, 0.075, -0.4], materials.accent);
 
+  const boltAssembly = markAnimationPart(new THREE.Group(), 'bolt');
+  builder.group.add(boltAssembly);
   const bolt = builder.cylinder(0.025, 0.025, 0.18, [0.23, 0.13, -0.16], materials.metal, 8, false);
   bolt.rotation.set(0, 0, Math.PI / 2);
-  builder.cylinder(0.055, 0.055, 0.06, [0.32, 0.13, -0.16], materials.metal, 10, false).rotation.set(0, 0, Math.PI / 2);
+  builder.group.remove(bolt);
+  boltAssembly.add(bolt);
+  const boltKnob = builder.cylinder(0.055, 0.055, 0.06, [0.32, 0.13, -0.16], materials.metal, 10, false);
+  boltKnob.rotation.set(0, 0, Math.PI / 2);
+  builder.group.remove(boltKnob);
+  boltAssembly.add(boltKnob);
 
   for (const side of [-1, 1]) {
     const foldedLeg = builder.cylinder(0.018, 0.022, 0.56, [side * 0.11, -0.115, -1.04], materials.metal, 7, false);
@@ -416,10 +483,25 @@ const buildShotgun = (builder: ModelBuilder): void => {
   addMuzzle(builder, [0, 0.13, -1.465], 0.105);
   builder.ring(0.073, 0.014, [0, -0.04, -1.31], materials.paint);
 
-  builder.rounded([0.39, 0.29, 0.45], [0, 0.0, -0.72], materials.polymer, 0.055);
+  const pumpAssembly = markAnimationPart(new THREE.Group(), 'pump');
+  builder.group.add(pumpAssembly);
+  const pump = builder.rounded([0.39, 0.29, 0.45], [0, 0.0, -0.72], materials.polymer, 0.055);
+  builder.group.remove(pump);
+  pumpAssembly.add(pump);
   for (const z of [-0.56, -0.65, -0.74, -0.83, -0.92]) {
-    builder.box([0.405, 0.025, 0.025], [0, -0.015, z], materials.metal);
+    const rib = builder.box([0.405, 0.025, 0.025], [0, -0.015, z], materials.metal);
+    builder.group.remove(rib);
+    pumpAssembly.add(rib);
   }
+  const shellCarrier = builder.rounded(
+    [0.16, 0.095, 0.34],
+    [0, -0.135, -0.2],
+    materials.metal,
+    0.025,
+    [0.08, 0, 0],
+    false,
+  );
+  markAnimationPart(shellCarrier, 'magazine');
   for (let index = 0; index < 6; index += 1) {
     const active = index < 2;
     builder.box(
@@ -458,7 +540,13 @@ const buildRocketLauncher = (builder: ModelBuilder): void => {
   builder.lens(0.058, [-0.13, 0.41, -0.48]);
   builder.box([0.38, 0.026, 0.12], [0, 0.43, 0.08], materials.accent);
   builder.box([0.03, 0.11, 0.52], [-0.35, 0.08, -0.34], materials.accent);
-  builder.rounded([0.58, 0.24, 0.16], [0, 0.04, 0.76], materials.polymer, 0.05);
+  const cassette = builder.rounded(
+    [0.58, 0.24, 0.16],
+    [0, 0.04, 0.76],
+    materials.polymer,
+    0.05,
+  );
+  markAnimationPart(cassette, 'launcher-cassette');
   builder.group.userData.primaryGrip = new THREE.Vector3(0.12, -0.25, 0.04);
   builder.group.userData.supportGrip = new THREE.Vector3(-0.17, -0.03, -0.38);
   builder.group.userData.muzzle = new THREE.Vector3(-0.19, 0.08, -1.19);

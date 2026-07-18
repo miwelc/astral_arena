@@ -21,17 +21,34 @@ import type {
   WeaponId,
 } from '../game/types';
 import { WEAPONS } from '../game/weapons';
+import {
+  damp,
+  evaluateGrenade,
+  evaluateMelee,
+  evaluateReload,
+  evaluateSwap,
+  normalizedTimer,
+  saturate,
+  smootherstep01,
+  trianglePulse,
+  type ActionPoseWeights,
+} from './animationMath';
 import { createColdAlienPlant, createLayeredRidge } from './landscapeGeometry';
 import {
   createColdEnvironmentTexture,
   createRadialTexture,
   createStylizedGroundTexture,
 } from './visualTextures';
-import { createWeaponModel, WEAPON_VIEW_POSES } from './weaponModels';
+import {
+  createWeaponModel,
+  WEAPON_VIEW_POSES,
+  type WeaponAnimationRole,
+} from './weaponModels';
 
 const UP = new THREE.Vector3(0, 1, 0);
 const DOWN = new THREE.Vector3(0, -1, 0);
 const FORWARD = new THREE.Vector3(0, 0, -1);
+const ASTRONAUT_WAIST_HEIGHT = 1.05;
 
 const TEAM_COLORS: Record<Team, { armor: number; accent: number; glow: number }> = {
   aurora: { armor: 0x8db8b2, accent: 0x43e2d0, glow: 0x35f0d5 },
@@ -41,14 +58,24 @@ const TEAM_COLORS: Record<Team, { armor: number; accent: number; glow: number }>
 
 interface PlayerRig {
   root: THREE.Group;
+  motionRoot: THREE.Group;
   torso: THREE.Group;
   upperBodyAim: THREE.Group;
+  actionPivot: THREE.Group;
   head: THREE.Group;
   leftArm: THREE.Group;
   rightArm: THREE.Group;
+  leftForearm: THREE.Group;
+  rightForearm: THREE.Group;
   leftLeg: THREE.Group;
   rightLeg: THREE.Group;
+  leftKnee: THREE.Group;
+  rightKnee: THREE.Group;
+  leftFoot: THREE.Group;
+  rightFoot: THREE.Group;
   weaponMount: THREE.Group;
+  weaponModel: THREE.Group | null;
+  weaponParts: AnimatedWeaponParts;
   contactShadow: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
   shield: THREE.Mesh<THREE.SphereGeometry, THREE.MeshBasicMaterial>;
   juggernautRing: THREE.Mesh<THREE.TorusGeometry, THREE.MeshBasicMaterial>;
@@ -61,7 +88,42 @@ interface PlayerRig {
   previousYaw: number;
   targetYaw: number;
   lastTick: number;
+  locomotionPhase: number;
+  moveBlend: number;
+  groundBlend: number;
+  forwardBlend: number;
+  strafeBlend: number;
+  previousGrounded: boolean;
+  previousVerticalVelocity: number;
+  previousMeleeCooldown: number;
+  previousGrenadeCooldown: number;
+  previousAlive: boolean;
+  landingTimer: number;
+  landingStrength: number;
+  jumpTimer: number;
+  swapTimer: number;
+  meleeTimer: number;
+  grenadeTimer: number;
+  fireTimer: number;
+  hitTimer: number;
+  hitDirection: number;
+  deathTimer: number;
+  spawnTimer: number;
+  recoil: number;
+  baseLeftArmQuaternion: THREE.Quaternion;
+  baseRightArmQuaternion: THREE.Quaternion;
+  baseLeftForearmQuaternion: THREE.Quaternion;
+  baseRightForearmQuaternion: THREE.Quaternion;
 }
+
+interface AnimatedWeaponPart {
+  object: THREE.Object3D;
+  basePosition: THREE.Vector3;
+  baseQuaternion: THREE.Quaternion;
+  baseScale: THREE.Vector3;
+}
+
+type AnimatedWeaponParts = Partial<Record<WeaponAnimationRole, AnimatedWeaponPart>>;
 
 interface PickupVisual {
   root: THREE.Group;
@@ -150,9 +212,14 @@ export class ArenaRenderer {
   private groundTexture: THREE.CanvasTexture | null = null;
   private contactShadowTexture: THREE.CanvasTexture | null = null;
   private readonly viewModel = new THREE.Group();
+  private readonly viewActionPivot = new THREE.Group();
   private readonly viewWeaponMount = new THREE.Group();
   private readonly viewRightHandAssembly = new THREE.Group();
   private readonly viewLeftHandAssembly = new THREE.Group();
+  private readonly viewRightHandBasePosition = new THREE.Vector3();
+  private readonly viewLeftHandBasePosition = new THREE.Vector3();
+  private viewWeaponModel: THREE.Group | null = null;
+  private viewWeaponParts: AnimatedWeaponParts = {};
   private readonly viewArmMaterial = new THREE.MeshStandardMaterial({
     color: TEAM_COLORS.neutral.armor,
     roughness: 0.52,
@@ -178,6 +245,13 @@ export class ArenaRenderer {
   private eventsInitialized = false;
   private damagePulse = 0;
   private weaponKick = 0;
+  private viewSwayYaw = 0;
+  private viewSwayPitch = 0;
+  private previousViewYaw: number | null = null;
+  private previousViewPitch: number | null = null;
+  private visualSimulationTime = 0;
+  private previousStateElapsed = 0;
+  private visualClockInitialized = false;
   private elapsedRenderTime = 0;
   private disposed = false;
 
@@ -323,9 +397,24 @@ export class ArenaRenderer {
     const delta = Math.min(this.clock.getDelta(), 0.05);
     this.elapsedRenderTime += delta;
     const interpolation = clamp01(alpha);
-    const worldTime = state.elapsed + interpolation / 60;
+    if (
+      !this.visualClockInitialized
+      || state.elapsed < this.previousStateElapsed
+      || state.elapsed - this.previousStateElapsed > 1
+    ) {
+      this.visualSimulationTime = state.elapsed;
+      this.visualClockInitialized = true;
+    } else {
+      this.visualSimulationTime = Math.max(this.visualSimulationTime, state.elapsed);
+      this.visualSimulationTime = Math.min(
+        this.visualSimulationTime + delta,
+        state.elapsed + 0.1,
+      );
+    }
+    this.previousStateElapsed = state.elapsed;
+    const worldTime = this.visualSimulationTime + interpolation / 60;
 
-    this.syncPlayers(state, interpolation, worldTime, firstPerson);
+    this.syncPlayers(state, interpolation, worldTime, firstPerson, delta);
     this.syncPickups(state.pickups, worldTime);
     this.syncFlags(state.config.mode === 'capture-the-flag' ? state.flags : [], state, worldTime);
     this.syncProjectiles(state.projectiles, worldTime);
@@ -1134,7 +1223,12 @@ export class ArenaRenderer {
     this.viewModel.position.set(0.31, -0.28, -0.62);
     this.viewModel.rotation.set(-0.03, -0.045, 0.012);
     this.viewCamera.add(this.viewModel);
-    this.viewModel.add(this.viewRightHandAssembly, this.viewLeftHandAssembly);
+    this.viewModel.add(this.viewActionPivot);
+    this.viewActionPivot.add(
+      this.viewRightHandAssembly,
+      this.viewLeftHandAssembly,
+      this.viewWeaponMount,
+    );
 
     const gloveMaterial = new THREE.MeshStandardMaterial({
       color: 0x172831,
@@ -1151,7 +1245,7 @@ export class ArenaRenderer {
     const rightForearm = new THREE.Mesh(new THREE.CapsuleGeometry(0.082, 0.36, 5, 12), this.viewArmMaterial);
     rightForearm.rotation.x = Math.PI * 0.47;
     rightForearm.position.set(0.2, -0.09, 0.13);
-    this.viewModel.add(rightForearm);
+    this.viewRightHandAssembly.add(rightForearm);
     const rightBracer = new THREE.Mesh(new RoundedBoxGeometry(0.19, 0.16, 0.29, 3, 0.05), this.viewArmMaterial);
     rightBracer.position.set(0.2, -0.055, -0.015);
     rightBracer.rotation.x = -0.08;
@@ -1180,7 +1274,7 @@ export class ArenaRenderer {
     leftForearm.rotation.x = Math.PI * 0.43;
     leftForearm.rotation.z = -0.2;
     leftForearm.position.set(-0.18, -0.08, -0.05);
-    this.viewModel.add(leftForearm);
+    this.viewLeftHandAssembly.add(leftForearm);
     const leftBracer = new THREE.Mesh(new RoundedBoxGeometry(0.17, 0.145, 0.27, 3, 0.045), this.viewArmMaterial);
     leftBracer.position.set(-0.15, -0.045, -0.17);
     leftBracer.rotation.set(-0.1, 0, -0.16);
@@ -1202,7 +1296,6 @@ export class ArenaRenderer {
     }
     this.viewLeftHandAssembly.add(leftGlove);
 
-    this.viewModel.add(this.viewWeaponMount);
     this.viewModel.traverse((object) => {
       object.frustumCulled = false;
       object.renderOrder = 30;
@@ -1243,7 +1336,13 @@ export class ArenaRenderer {
     return overlay;
   }
 
-  private syncPlayers(state: MatchState, alpha: number, worldTime: number, firstPerson: boolean): void {
+  private syncPlayers(
+    state: MatchState,
+    alpha: number,
+    worldTime: number,
+    firstPerson: boolean,
+    delta: number,
+  ): void {
     const present = new Set<string>();
     for (const player of Object.values(state.players)) {
       present.add(player.id);
@@ -1256,28 +1355,35 @@ export class ArenaRenderer {
 
       if (rig.team !== player.team) this.updateRigTeam(rig, player.team);
       if (rig.lastTick !== state.tick) {
-        rig.previousPosition.copy(rig.targetPosition);
-        vectorFrom(player.position, rig.targetPosition);
-        rig.previousYaw = rig.targetYaw;
-        rig.targetYaw = player.yaw;
+        const nextPosition = vectorFrom(player.position);
+        if (rig.targetPosition.distanceToSquared(nextPosition) > 36) {
+          rig.previousPosition.copy(nextPosition);
+          rig.targetPosition.copy(nextPosition);
+          rig.root.position.copy(nextPosition);
+          rig.previousYaw = player.yaw;
+          rig.targetYaw = player.yaw;
+        } else {
+          rig.previousPosition.copy(rig.targetPosition);
+          rig.targetPosition.copy(nextPosition);
+          rig.previousYaw = rig.targetYaw;
+          rig.targetYaw = player.yaw;
+        }
         rig.lastTick = state.tick;
       }
-      rig.root.position.lerpVectors(rig.previousPosition, rig.targetPosition, alpha);
-      rig.root.rotation.y = lerpAngle(rig.previousYaw, rig.targetYaw, alpha);
-
-      const horizontalSpeed = Math.hypot(player.velocity.x, player.velocity.z);
-      const gait = worldTime * (5.8 + horizontalSpeed * 1.25) + (hashString(player.id) % 100) * 0.04;
-      const stride = Math.sin(gait) * Math.min(horizontalSpeed / 5.5, 1) * (player.grounded ? 0.56 : 0.08);
-      rig.leftLeg.rotation.x = stride;
-      rig.rightLeg.rotation.x = -stride;
-      rig.torso.position.y = Math.abs(Math.sin(gait)) * Math.min(horizontalSpeed / 8, 1) * 0.035;
-      rig.torso.rotation.x = player.pitch * 0.075;
-      rig.upperBodyAim.rotation.x = player.pitch * 0.65;
-      rig.head.rotation.x = THREE.MathUtils.clamp(player.pitch * 0.35, -0.42, 0.42);
+      const desiredPosition = new THREE.Vector3().lerpVectors(
+        rig.previousPosition,
+        rig.targetPosition,
+        alpha,
+      );
+      const desiredYaw = lerpAngle(rig.previousYaw, rig.targetYaw, alpha);
+      const presentationDamping = alpha > 0.001 ? 1 : 1 - Math.exp(-delta * 18);
+      rig.root.position.lerp(desiredPosition, presentationDamping);
+      rig.root.rotation.y = lerpAngle(rig.root.rotation.y, desiredYaw, presentationDamping);
 
       const activeWeapon = player.inventory[player.activeWeapon] ?? player.inventory[0];
       const weaponId = activeWeapon?.id ?? null;
       if (weaponId !== rig.weaponId) this.setRigWeapon(rig, weaponId);
+      this.updateRigAnimation(rig, player, activeWeapon, worldTime, delta);
 
       const recentlyDamaged = state.elapsed - player.lastDamageAt < 0.22;
       rig.shield.visible = player.alive && player.shield > 0 && (recentlyDamaged || player.spawnProtection > 0);
@@ -1286,12 +1392,17 @@ export class ArenaRenderer {
         : 0.2;
       rig.shield.rotation.y = worldTime * 0.55;
       rig.juggernautRing.visible = player.alive && player.isJuggernaut;
-      rig.contactShadow.visible = player.alive && player.grounded;
-      rig.contactShadow.material.opacity = 0.32 + Math.min(horizontalSpeed / 8, 1) * 0.08;
+      const horizontalSpeed = Math.hypot(player.velocity.x, player.velocity.z);
+      rig.contactShadow.material.opacity = (0.28 + Math.min(horizontalSpeed / 8, 1) * 0.1) * rig.groundBlend;
+      rig.contactShadow.scale.setScalar(0.82 + rig.groundBlend * 0.18);
+      rig.contactShadow.visible = player.grounded
+        && (player.alive || rig.deathTimer > 0)
+        && rig.contactShadow.material.opacity > 0.01;
       rig.juggernautRing.rotation.z = worldTime * 0.72;
       rig.armorMaterial.emissiveIntensity = player.isJuggernaut ? 0.42 + Math.sin(worldTime * 5) * 0.12 : 0.08;
       rig.accentMaterial.emissiveIntensity = player.isJuggernaut ? 1.25 : 0.48;
-      rig.root.visible = player.alive && !(firstPerson && player.id === this.localPlayerId);
+      rig.root.visible = (player.alive || rig.deathTimer > 0)
+        && !(firstPerson && player.id === this.localPlayerId && player.alive);
     }
 
     for (const [id, rig] of this.playerRigs) {
@@ -1301,6 +1412,254 @@ export class ArenaRenderer {
       disposeObject(rig.root);
       this.playerRigs.delete(id);
     }
+  }
+
+  private updateRigAnimation(
+    rig: PlayerRig,
+    player: PlayerState,
+    activeWeapon: PlayerState['inventory'][number] | undefined,
+    worldTime: number,
+    delta: number,
+  ): void {
+    if (!rig.previousGrounded && player.grounded && rig.previousVerticalVelocity < -0.65) {
+      rig.landingTimer = 0.34;
+      rig.landingStrength = THREE.MathUtils.clamp(-rig.previousVerticalVelocity / 8.5, 0, 1);
+    } else if (rig.previousGrounded && !player.grounded && player.velocity.y > 0.25) {
+      rig.jumpTimer = 0.32;
+    }
+    if (player.meleeCooldown > rig.previousMeleeCooldown + 0.12) rig.meleeTimer = 0.85;
+    if (player.grenadeCooldown > rig.previousGrenadeCooldown + 0.12) rig.grenadeTimer = 0.65;
+    if (rig.previousAlive && !player.alive) rig.deathTimer = 1.05;
+    if (!rig.previousAlive && player.alive) rig.spawnTimer = 0.62;
+
+    rig.previousGrounded = player.grounded;
+    rig.previousVerticalVelocity = player.velocity.y;
+    rig.previousMeleeCooldown = player.meleeCooldown;
+    rig.previousGrenadeCooldown = player.grenadeCooldown;
+    rig.previousAlive = player.alive;
+
+    const horizontalSpeed = Math.hypot(player.velocity.x, player.velocity.z);
+    const forwardX = -Math.sin(player.yaw);
+    const forwardZ = -Math.cos(player.yaw);
+    const rightX = Math.cos(player.yaw);
+    const rightZ = -Math.sin(player.yaw);
+    const forwardSpeed = player.velocity.x * forwardX + player.velocity.z * forwardZ;
+    const strafeSpeed = player.velocity.x * rightX + player.velocity.z * rightZ;
+    const targetMove = smootherstep01((horizontalSpeed - 0.08) / 6.7);
+    rig.moveBlend = damp(rig.moveBlend, targetMove, 13, delta);
+    rig.groundBlend = damp(rig.groundBlend, player.grounded ? 1 : 0, player.grounded ? 19 : 13, delta);
+    rig.forwardBlend = damp(rig.forwardBlend, THREE.MathUtils.clamp(forwardSpeed / 7, -1, 1), 10, delta);
+    rig.strafeBlend = damp(rig.strafeBlend, THREE.MathUtils.clamp(strafeSpeed / 7, -1, 1), 10, delta);
+
+    const runBlend = smootherstep01((horizontalSpeed - 2.7) / 4.3);
+    const strideLength = THREE.MathUtils.lerp(1.05, 1.68, runBlend);
+    const phaseDirection = rig.forwardBlend < -0.12 ? -1 : 1;
+    rig.locomotionPhase += horizontalSpeed * delta / strideLength * Math.PI * 2 * phaseDirection;
+    const cycle = Math.sin(rig.locomotionPhase);
+    const oppositeCycle = -cycle;
+    const strideAmplitude = THREE.MathUtils.lerp(0.28, 0.72, runBlend) * rig.moveBlend;
+    const groundedWeight = rig.groundBlend;
+    const airborneWeight = 1 - groundedWeight;
+    const rise = saturate(player.velocity.y / 6.3);
+    const fall = saturate(-player.velocity.y / 9);
+    const leftAirHip = rise * (0.28 + cycle * 0.1) - fall * 0.08;
+    const rightAirHip = rise * (0.14 - cycle * 0.1) + fall * 0.08;
+    const landingProgress = normalizedTimer(rig.landingTimer, 0.34);
+    const landingWeight = trianglePulse(landingProgress, 0, 0.2, 1) * rig.landingStrength;
+    const jumpProgress = normalizedTimer(rig.jumpTimer, 0.32);
+    const jumpWeight = trianglePulse(jumpProgress, 0, 0.18, 1);
+    const hitWeight = trianglePulse(normalizedTimer(rig.hitTimer, 0.24), 0, 0.18, 1);
+
+    const leftHipX = cycle * strideAmplitude * groundedWeight + leftAirHip * airborneWeight - jumpWeight * 0.08;
+    const rightHipX = oppositeCycle * strideAmplitude * groundedWeight + rightAirHip * airborneWeight - jumpWeight * 0.02;
+    const leftRecovery = Math.max(0, -cycle) * (0.36 + runBlend * 0.42) * rig.moveBlend;
+    const rightRecovery = Math.max(0, cycle) * (0.36 + runBlend * 0.42) * rig.moveBlend;
+    const airKnee = rise * 0.52 + fall * 0.12;
+    const leftKneeX = leftRecovery * groundedWeight + airKnee * airborneWeight + landingWeight * 0.72;
+    const rightKneeX = rightRecovery * groundedWeight + airKnee * airborneWeight + landingWeight * 0.72;
+    const strafeLean = rig.strafeBlend * 0.12 * rig.moveBlend;
+
+    rig.leftLeg.rotation.set(leftHipX, 0, strafeLean * 0.34);
+    rig.rightLeg.rotation.set(rightHipX, 0, strafeLean * 0.34);
+    rig.leftKnee.rotation.set(-leftKneeX, 0, 0);
+    rig.rightKnee.rotation.set(-rightKneeX, 0, 0);
+    rig.leftFoot.rotation.set(-leftHipX + leftKneeX * 0.78, 0, -strafeLean * 0.24);
+    rig.rightFoot.rotation.set(-rightHipX + rightKneeX * 0.78, 0, -strafeLean * 0.24);
+
+    const visualTime = this.elapsedRenderTime + (hashString(player.id) % 100) * 0.017;
+    const breathing = Math.sin(visualTime * 1.75) * 0.0065 * (1 - rig.moveBlend * 0.72);
+    const gaitBob = Math.abs(Math.sin(rig.locomotionPhase))
+      * THREE.MathUtils.lerp(0.018, 0.052, runBlend)
+      * rig.moveBlend
+      * groundedWeight;
+    const lateralSway = Math.cos(rig.locomotionPhase) * 0.018 * rig.moveBlend * groundedWeight;
+    rig.torso.position.set(
+      lateralSway,
+      ASTRONAUT_WAIST_HEIGHT + breathing + gaitBob - landingWeight * 0.12,
+      0,
+    );
+    rig.torso.rotation.set(
+      player.pitch * 0.075 - rig.forwardBlend * 0.065 * rig.moveBlend + landingWeight * 0.1 + fall * airborneWeight * 0.055,
+      0,
+      -rig.strafeBlend * 0.1 * rig.moveBlend
+        - cycle * 0.018 * rig.moveBlend * groundedWeight
+        + rig.hitDirection * hitWeight * 0.085,
+    );
+    rig.upperBodyAim.rotation.set(
+      THREE.MathUtils.clamp(player.pitch * 0.61 - rig.torso.rotation.x * 0.18, -0.92, 0.92),
+      0,
+      0,
+    );
+    rig.head.rotation.set(
+      THREE.MathUtils.clamp(player.pitch * 0.36, -0.48, 0.48),
+      Math.sin(visualTime * 0.43) * 0.012 * (1 - rig.moveBlend),
+      rig.strafeBlend * 0.025 * rig.moveBlend,
+    );
+
+    let actionKind: 'none' | 'reload' | 'swap' | 'melee' | 'grenade' = 'none';
+    let actionPose: ActionPoseWeights = { lower: 0, twist: 0, part: 0, hand: 0 };
+    let reloadProgress = 0;
+    if (activeWeapon && activeWeapon.reloadTimer > 0) {
+      reloadProgress = normalizedTimer(activeWeapon.reloadTimer, WEAPONS[activeWeapon.id].reloadSeconds);
+      actionKind = 'reload';
+      actionPose = evaluateReload(reloadProgress);
+    }
+    if (rig.swapTimer > 0) {
+      actionKind = 'swap';
+      actionPose = evaluateSwap(normalizedTimer(rig.swapTimer, 0.48));
+    }
+    if (rig.grenadeTimer > 0) {
+      actionKind = 'grenade';
+      actionPose = evaluateGrenade(normalizedTimer(rig.grenadeTimer, 0.65));
+    }
+    if (rig.meleeTimer > 0) {
+      actionKind = 'melee';
+      actionPose = evaluateMelee(normalizedTimer(rig.meleeTimer, 0.85));
+    }
+
+    const recoil = rig.recoil;
+    rig.actionPivot.position.set(
+      (actionKind === 'melee' ? -actionPose.part * 0.08 : 0) + rig.hitDirection * hitWeight * 0.025,
+      breathing * 0.35 - actionPose.lower * (actionKind === 'swap' ? 0.38 : 0.14),
+      actionKind === 'melee' ? -actionPose.part * 0.2 : recoil * 0.065,
+    );
+    rig.actionPivot.rotation.set(
+      (actionKind === 'melee' ? -0.48 * actionPose.part : 0.15 * actionPose.lower)
+        + (actionKind === 'grenade' ? -0.42 * actionPose.part : 0)
+        + recoil * 0.1,
+      (actionKind === 'melee' ? -0.72 : actionKind === 'grenade' ? 0.36 : -0.12) * actionPose.twist
+        - recoil * 0.018,
+      (actionKind === 'swap' ? 0.54 : actionKind === 'reload' ? 0.31 : 0.2) * actionPose.twist
+        + recoil * 0.022,
+    );
+    rig.weaponMount.position.set(0.03, -0.13, -0.27);
+    rig.weaponMount.rotation.set(0, 0, 0);
+    this.applyRigArmAction(rig, actionKind, actionPose);
+
+    this.resetAnimatedWeaponParts(rig.weaponParts);
+    this.animateWeaponParts(
+      rig.weaponParts,
+      rig.weaponId,
+      actionKind === 'reload' ? reloadProgress : 0,
+      normalizedTimer(rig.fireTimer, 0.55),
+      recoil,
+    );
+
+    rig.motionRoot.position.set(0, 0, 0);
+    rig.motionRoot.rotation.set(0, 0, 0);
+    rig.motionRoot.scale.set(1, 1, 1);
+    if (rig.deathTimer > 0) {
+      const deathProgress = smootherstep01(normalizedTimer(rig.deathTimer, 1.05));
+      const fallSide = hashString(player.id) % 2 === 0 ? 1 : -1;
+      rig.motionRoot.rotation.set(deathProgress * 0.2, 0, fallSide * deathProgress * 1.34);
+      rig.motionRoot.position.y = -deathProgress * 0.34;
+    } else if (rig.spawnTimer > 0 && player.alive) {
+      const spawnProgress = smootherstep01(normalizedTimer(rig.spawnTimer, 0.62));
+      rig.motionRoot.position.y = (1 - spawnProgress) * 0.18;
+      rig.motionRoot.scale.set(0.88 + spawnProgress * 0.12, 0.76 + spawnProgress * 0.24, 0.88 + spawnProgress * 0.12);
+    }
+
+    rig.landingTimer = Math.max(0, rig.landingTimer - delta);
+    rig.jumpTimer = Math.max(0, rig.jumpTimer - delta);
+    rig.swapTimer = Math.max(0, rig.swapTimer - delta);
+    rig.meleeTimer = Math.max(0, rig.meleeTimer - delta);
+    rig.grenadeTimer = Math.max(0, rig.grenadeTimer - delta);
+    rig.fireTimer = Math.max(0, rig.fireTimer - delta);
+    rig.hitTimer = Math.max(0, rig.hitTimer - delta);
+    rig.deathTimer = Math.max(0, rig.deathTimer - delta);
+    rig.spawnTimer = Math.max(0, rig.spawnTimer - delta);
+    rig.recoil = damp(rig.recoil, 0, 17, delta);
+  }
+
+  private applyRigArmAction(
+    rig: PlayerRig,
+    kind: 'none' | 'reload' | 'swap' | 'melee' | 'grenade',
+    pose: ActionPoseWeights,
+  ): void {
+    rig.leftArm.quaternion.copy(rig.baseLeftArmQuaternion);
+    rig.rightArm.quaternion.copy(rig.baseRightArmQuaternion);
+    rig.leftForearm.quaternion.copy(rig.baseLeftForearmQuaternion);
+    rig.rightForearm.quaternion.copy(rig.baseRightForearmQuaternion);
+    const leftOffset = new THREE.Quaternion();
+    const forearmOffset = new THREE.Quaternion();
+    if (kind === 'reload') {
+      leftOffset.setFromEuler(new THREE.Euler(0.16 * pose.hand, -0.34 * pose.hand, -0.48 * pose.hand));
+      forearmOffset.setFromEuler(new THREE.Euler(0.24 * pose.hand, 0, 0.25 * pose.hand));
+    } else if (kind === 'grenade') {
+      leftOffset.setFromEuler(new THREE.Euler(-0.9 * pose.hand, -0.2 * pose.hand, -0.62 * pose.hand));
+      forearmOffset.setFromEuler(new THREE.Euler(-0.55 * pose.hand, 0, 0.28 * pose.hand));
+    } else if (kind === 'swap') {
+      leftOffset.setFromEuler(new THREE.Euler(0.08 * pose.hand, 0, -0.16 * pose.hand));
+    }
+    rig.leftArm.quaternion.multiply(leftOffset);
+    rig.leftForearm.quaternion.multiply(forearmOffset);
+  }
+
+  private animateWeaponParts(
+    parts: AnimatedWeaponParts,
+    weaponId: WeaponId | null,
+    reloadProgress: number,
+    fireProgress: number,
+    recoil: number,
+  ): void {
+    const reloadPose = evaluateReload(reloadProgress);
+    const magazine = parts.magazine;
+    if (magazine) {
+      magazine.object.position.y -= reloadPose.part * 0.38;
+      magazine.object.position.x -= reloadPose.part * 0.06;
+      magazine.object.quaternion.multiply(
+        new THREE.Quaternion().setFromEuler(new THREE.Euler(0, 0, reloadPose.part * 0.18)),
+      );
+    }
+    const energyCell = parts['energy-cell'];
+    if (energyCell) {
+      energyCell.object.position.x += reloadPose.part * 0.22;
+      energyCell.object.position.y -= reloadPose.part * 0.08;
+      const pulse = 1 + recoil * 0.08;
+      energyCell.object.scale.copy(energyCell.baseScale).multiplyScalar(pulse);
+    }
+    const cassette = parts['launcher-cassette'];
+    if (cassette) {
+      cassette.object.position.z += reloadPose.part * 0.42;
+      cassette.object.rotation.x += reloadPose.part * 0.16;
+    }
+
+    if (!weaponId || fireProgress <= 0 || fireProgress >= 1) return;
+    const slide = parts.slide;
+    if (slide) slide.object.position.z += trianglePulse(fireProgress, 0, 0.1, 0.34) * 0.17;
+    const bolt = parts.bolt;
+    if (bolt) {
+      const boltCycle = trianglePulse(
+        fireProgress,
+        weaponId === 'sniper' ? 0.16 : 0.02,
+        weaponId === 'sniper' ? 0.44 : 0.13,
+        weaponId === 'sniper' ? 0.9 : 0.38,
+      );
+      bolt.object.position.z += boltCycle * 0.24;
+      bolt.object.rotation.x += boltCycle * 0.24;
+    }
+    const pump = parts.pump;
+    if (pump) pump.object.position.z += trianglePulse(fireProgress, 0.12, 0.48, 0.92) * 0.34;
   }
 
   private syncObjectiveVisibility(state: MatchState): void {
@@ -1318,6 +1677,9 @@ export class ArenaRenderer {
     root.name = `astronaut-${player.id}`;
     root.position.set(player.position.x, player.position.y, player.position.z);
     root.rotation.y = player.yaw;
+    const motionRoot = new THREE.Group();
+    motionRoot.name = 'astronaut-motion-root';
+    root.add(motionRoot);
 
     const armorMaterial = new THREE.MeshStandardMaterial({
       color: palette.armor,
@@ -1380,7 +1742,7 @@ export class ArenaRenderer {
 
     const torso = new THREE.Group();
     torso.position.y = 0;
-    root.add(torso);
+    motionRoot.add(torso);
 
     const pelvis = new THREE.Mesh(new RoundedBoxGeometry(0.52, 0.25, 0.38, 3, 0.075), armorMaterial);
     pelvis.position.y = 0.88;
@@ -1448,7 +1810,7 @@ export class ArenaRenderer {
     const head = new THREE.Group();
     // Match the simulation's head hit-volume (height * 0.86) closely.
     head.position.y = 1.63;
-    root.add(head);
+    torso.add(head);
     const helmet = new THREE.Mesh(new THREE.SphereGeometry(0.34, 24, 16), armorMaterial);
     helmet.scale.set(0.96, 1.03, 0.94);
     helmet.castShadow = true;
@@ -1485,7 +1847,7 @@ export class ArenaRenderer {
 
     const createArm = (side: number): THREE.Group => {
       const arm = new THREE.Group();
-      arm.position.set(side * 0.42, 1.43, -0.01);
+      arm.position.set(side * 0.42, 0.13, -0.01);
       const shoulder = new THREE.Mesh(new RoundedBoxGeometry(0.28, 0.22, 0.29, 3, 0.075), accentMaterial);
       shoulder.position.y = -0.04;
       shoulder.castShadow = true;
@@ -1522,52 +1884,65 @@ export class ArenaRenderer {
     const leftArm = createArm(-1);
     const rightArm = createArm(1);
     const upperBodyAim = new THREE.Group();
+    upperBodyAim.position.y = 1.3;
     torso.add(upperBodyAim);
-    upperBodyAim.add(leftArm, rightArm);
+    const actionPivot = new THREE.Group();
+    actionPivot.name = 'astronaut-action-pivot';
+    upperBodyAim.add(actionPivot);
+    actionPivot.add(leftArm, rightArm);
 
-    const createLeg = (side: number): THREE.Group => {
-      const leg = new THREE.Group();
-      leg.position.set(side * 0.19, 1.075, 0);
+    const createLeg = (side: number): { hip: THREE.Group; knee: THREE.Group; foot: THREE.Group } => {
+      const hip = new THREE.Group();
+      hip.position.set(side * 0.19, 1.075, 0);
       const hipPlate = new THREE.Mesh(new RoundedBoxGeometry(0.24, 0.22, 0.33, 3, 0.055), accentMaterial);
       hipPlate.position.set(side * 0.015, -0.06, 0);
       hipPlate.castShadow = true;
-      leg.add(hipPlate);
+      hip.add(hipPlate);
       const thigh = new THREE.Mesh(new THREE.CapsuleGeometry(0.125, 0.28, 4, 9), armorMaterial);
       thigh.position.y = -0.29;
       thigh.castShadow = true;
-      leg.add(thigh);
+      hip.add(thigh);
+
+      const knee = new THREE.Group();
+      knee.position.y = -0.52;
+      hip.add(knee);
       const kneeJoint = new THREE.Mesh(new THREE.SphereGeometry(0.115, 10, 7), jointMaterial);
-      kneeJoint.position.y = -0.52;
       kneeJoint.castShadow = true;
-      leg.add(kneeJoint);
-      const knee = new THREE.Mesh(new RoundedBoxGeometry(0.22, 0.18, 0.13, 3, 0.042), accentMaterial);
-      knee.position.set(0, -0.52, -0.105);
-      knee.rotation.x = 0.18;
-      knee.castShadow = true;
-      leg.add(knee);
+      knee.add(kneeJoint);
+      const kneePlate = new THREE.Mesh(new RoundedBoxGeometry(0.22, 0.18, 0.13, 3, 0.042), accentMaterial);
+      kneePlate.position.set(0, 0, -0.105);
+      kneePlate.rotation.x = 0.18;
+      kneePlate.castShadow = true;
+      knee.add(kneePlate);
       const shin = new THREE.Mesh(new THREE.CapsuleGeometry(0.105, 0.26, 4, 9), armorMaterial);
-      shin.position.y = -0.72;
+      shin.position.y = -0.2;
       shin.castShadow = true;
-      leg.add(shin);
+      knee.add(shin);
       const shinPlate = new THREE.Mesh(new RoundedBoxGeometry(0.2, 0.25, 0.09, 3, 0.032), technicalMaterial);
-      shinPlate.position.set(0, -0.7, -0.105);
-      leg.add(shinPlate);
+      shinPlate.position.set(0, -0.18, -0.105);
+      knee.add(shinPlate);
+
+      const foot = new THREE.Group();
+      foot.position.y = -0.42;
+      knee.add(foot);
       const boot = new THREE.Mesh(new RoundedBoxGeometry(0.27, 0.19, 0.42, 3, 0.055), jointMaterial);
-      boot.position.set(0, -0.94, -0.075);
+      boot.position.set(0, 0, -0.075);
       boot.castShadow = true;
-      leg.add(boot);
+      foot.add(boot);
       const sole = new THREE.Mesh(new RoundedBoxGeometry(0.285, 0.06, 0.44, 2, 0.022), technicalMaterial);
-      sole.position.set(0, -1.045, -0.075);
-      leg.add(sole);
-      return leg;
+      sole.position.set(0, -0.105, -0.075);
+      foot.add(sole);
+      return { hip, knee, foot };
     };
-    const leftLeg = createLeg(-1);
-    const rightLeg = createLeg(1);
-    root.add(leftLeg, rightLeg);
+    const leftLegRig = createLeg(-1);
+    const rightLegRig = createLeg(1);
+    const leftLeg = leftLegRig.hip;
+    const rightLeg = rightLegRig.hip;
+    motionRoot.add(leftLeg, rightLeg);
 
     const weaponMount = new THREE.Group();
-    weaponMount.position.set(0.03, 1.17, -0.27);
-    upperBodyAim.add(weaponMount);
+    weaponMount.position.set(0.03, -0.13, -0.27);
+    actionPivot.add(weaponMount);
 
     const shieldMaterial = new THREE.MeshBasicMaterial({
       color: palette.glow,
@@ -1581,7 +1956,7 @@ export class ArenaRenderer {
     shield.scale.set(0.82, 1.35, 0.82);
     shield.position.y = 0.92;
     shield.visible = false;
-    root.add(shield);
+    motionRoot.add(shield);
 
     const juggernautRing = new THREE.Mesh(
       new THREE.TorusGeometry(0.43, 0.045, 6, 20),
@@ -1596,19 +1971,37 @@ export class ArenaRenderer {
     juggernautRing.position.y = 2.18;
     juggernautRing.rotation.x = Math.PI / 2;
     juggernautRing.visible = false;
-    root.add(juggernautRing);
+    motionRoot.add(juggernautRing);
+
+    // Author body meshes in world-like coordinates for readability, then
+    // shift the direct torso children once so all lean/breathing rotates from
+    // the waist instead of from the astronaut's feet.
+    for (const child of torso.children) child.position.y -= ASTRONAUT_WAIST_HEIGHT;
+    torso.position.y = ASTRONAUT_WAIST_HEIGHT;
 
     const initial = vectorFrom(player.position);
+    const leftForearm = leftArm.userData.forearm as THREE.Group;
+    const rightForearm = rightArm.userData.forearm as THREE.Group;
     return {
       root,
+      motionRoot,
       torso,
       upperBodyAim,
+      actionPivot,
       head,
       leftArm,
       rightArm,
+      leftForearm,
+      rightForearm,
       leftLeg,
       rightLeg,
+      leftKnee: leftLegRig.knee,
+      rightKnee: rightLegRig.knee,
+      leftFoot: leftLegRig.foot,
+      rightFoot: rightLegRig.foot,
       weaponMount,
+      weaponModel: null,
+      weaponParts: {},
       contactShadow,
       shield,
       juggernautRing,
@@ -1621,6 +2014,32 @@ export class ArenaRenderer {
       previousYaw: player.yaw,
       targetYaw: player.yaw,
       lastTick: -1,
+      locomotionPhase: (hashString(player.id) % 628) * 0.01,
+      moveBlend: 0,
+      groundBlend: player.grounded ? 1 : 0,
+      forwardBlend: 0,
+      strafeBlend: 0,
+      previousGrounded: player.grounded,
+      previousVerticalVelocity: player.velocity.y,
+      previousMeleeCooldown: player.meleeCooldown,
+      previousGrenadeCooldown: player.grenadeCooldown,
+      previousAlive: player.alive,
+      landingTimer: 0,
+      landingStrength: 0,
+      jumpTimer: 0,
+      swapTimer: 0,
+      meleeTimer: 0,
+      grenadeTimer: 0,
+      fireTimer: 0,
+      hitTimer: 0,
+      hitDirection: hashString(player.id) % 2 === 0 ? 1 : -1,
+      deathTimer: 0,
+      spawnTimer: player.alive ? 0.6 : 0,
+      recoil: 0,
+      baseLeftArmQuaternion: leftArm.quaternion.clone(),
+      baseRightArmQuaternion: rightArm.quaternion.clone(),
+      baseLeftForearmQuaternion: leftForearm.quaternion.clone(),
+      baseRightForearmQuaternion: rightForearm.quaternion.clone(),
     };
   }
 
@@ -1635,15 +2054,51 @@ export class ArenaRenderer {
   }
 
   private setRigWeapon(rig: PlayerRig, id: WeaponId | null): void {
+    const hadWeapon = rig.weaponId !== null;
     rig.weaponMount.clear();
+    rig.weaponMount.position.set(0.03, -0.13, -0.27);
+    rig.weaponMount.rotation.set(0, 0, 0);
     rig.weaponId = id;
+    rig.weaponModel = null;
+    rig.weaponParts = {};
+    rig.swapTimer = hadWeapon ? 0.48 : 0;
     if (!id) return;
     const model = this.getWeaponTemplate(id).clone(true);
     const worldScale = id === 'sidearm' ? 0.63 : id === 'rocket-launcher' ? 0.46 : id === 'sniper' ? 0.44 : 0.53;
     model.scale.setScalar(worldScale);
     model.rotation.set(-0.04, 0, 0);
     rig.weaponMount.add(model);
+    rig.weaponModel = model;
+    rig.weaponParts = this.collectAnimatedWeaponParts(model);
     this.poseRigHands(rig, model);
+    rig.baseLeftArmQuaternion.copy(rig.leftArm.quaternion);
+    rig.baseRightArmQuaternion.copy(rig.rightArm.quaternion);
+    rig.baseLeftForearmQuaternion.copy(rig.leftForearm.quaternion);
+    rig.baseRightForearmQuaternion.copy(rig.rightForearm.quaternion);
+  }
+
+  private collectAnimatedWeaponParts(model: THREE.Group): AnimatedWeaponParts {
+    const parts: AnimatedWeaponParts = {};
+    model.traverse((object) => {
+      const role = object.userData.animationRole as WeaponAnimationRole | undefined;
+      if (!role) return;
+      parts[role] = {
+        object,
+        basePosition: object.position.clone(),
+        baseQuaternion: object.quaternion.clone(),
+        baseScale: object.scale.clone(),
+      };
+    });
+    return parts;
+  }
+
+  private resetAnimatedWeaponParts(parts: AnimatedWeaponParts): void {
+    for (const part of Object.values(parts)) {
+      if (!part) continue;
+      part.object.position.copy(part.basePosition);
+      part.object.quaternion.copy(part.baseQuaternion);
+      part.object.scale.copy(part.baseScale);
+    }
   }
 
   private poseRigHands(rig: PlayerRig, weapon: THREE.Group): void {
@@ -1653,11 +2108,11 @@ export class ArenaRenderer {
 
     rig.root.updateMatrixWorld(true);
     const primaryWorld = weapon.localToWorld(vectorFrom(primaryGrip));
-    const primaryTarget = rig.upperBodyAim.worldToLocal(primaryWorld.clone());
+    const primaryTarget = rig.actionPivot.worldToLocal(primaryWorld.clone());
     const supportWorld = supportGrip
       ? weapon.localToWorld(vectorFrom(supportGrip))
       : primaryWorld.clone().add(new THREE.Vector3(-0.12, 0.04, -0.28));
-    const supportTarget = rig.upperBodyAim.worldToLocal(supportWorld);
+    const supportTarget = rig.actionPivot.worldToLocal(supportWorld);
     this.solveArmPose(rig.rightArm, primaryTarget, 1);
     this.solveArmPose(rig.leftArm, supportTarget, -1);
     rig.root.updateMatrixWorld(true);
@@ -2007,6 +2462,25 @@ export class ArenaRenderer {
 
   private createEventEffect(event: GameEvent, state: MatchState): void {
     if (
+      event.targetId
+      && (event.type === 'hit' || event.type === 'shield-break' || event.type === 'melee')
+    ) {
+      const targetRig = this.playerRigs.get(event.targetId);
+      const target = state.players[event.targetId];
+      const actor = event.actorId ? state.players[event.actorId] : undefined;
+      if (targetRig) {
+        targetRig.hitTimer = 0.24;
+        if (target && actor) {
+          const toActorX = actor.position.x - target.position.x;
+          const toActorZ = actor.position.z - target.position.z;
+          const rightX = Math.cos(target.yaw);
+          const rightZ = -Math.sin(target.yaw);
+          targetRig.hitDirection = toActorX * rightX + toActorZ * rightZ >= 0 ? 1 : -1;
+        }
+      }
+    }
+
+    if (
       event.targetId === this.localPlayerId
       && (event.type === 'hit' || event.type === 'shield-break' || event.type === 'melee')
     ) {
@@ -2061,7 +2535,21 @@ export class ArenaRenderer {
           flash.scale.multiplyScalar(0.93);
         },
       });
-      if (event.actorId === this.localPlayerId) this.weaponKick = 1;
+      if (event.message !== 'Torreta') {
+        const rig = this.playerRigs.get(event.actorId);
+        if (rig) {
+          const recoilStrength = event.weaponId === 'rocket-launcher'
+            ? 1.35
+            : event.weaponId === 'sniper' || event.weaponId === 'shotgun'
+              ? 1.15
+              : event.weaponId === 'sidearm'
+                ? 0.82
+                : 0.68;
+          rig.recoil = Math.min(1.5, rig.recoil + recoilStrength);
+          rig.fireTimer = 0.55;
+        }
+        if (event.actorId === this.localPlayerId) this.weaponKick = 1;
+      }
       return;
     }
 
@@ -2225,17 +2713,29 @@ export class ArenaRenderer {
 
     if (firstPerson && localPlayer && localRig && alive) {
       const speed = Math.hypot(localPlayer.velocity.x, localPlayer.velocity.z);
-      const bobAmount = localPlayer.grounded ? Math.min(speed / 7, 1) : 0;
-      const bobPhase = worldTime * (7.2 + speed * 0.45);
+      const bobAmount = localRig.moveBlend * localRig.groundBlend;
+      const bobPhase = localRig.locomotionPhase;
+      const landingWeight = trianglePulse(
+        normalizedTimer(localRig.landingTimer, 0.34),
+        0,
+        0.2,
+        1,
+      ) * localRig.landingStrength;
+      const jumpWeight = trianglePulse(normalizedTimer(localRig.jumpTimer, 0.32), 0, 0.18, 1);
       const damageShake = this.damagePulse * 0.018;
       const eyeHeight = localPlayer.height * 0.86;
       this.camera.position.copy(localRig.root.position);
-      this.camera.position.y += eyeHeight + Math.sin(bobPhase * 2) * 0.018 * bobAmount;
-      this.camera.position.x += Math.sin(bobPhase) * 0.01 * bobAmount;
+      this.camera.position.y += eyeHeight
+        + Math.abs(Math.cos(bobPhase)) * 0.018 * bobAmount
+        - landingWeight * 0.085
+        + jumpWeight * 0.024;
+      this.camera.position.x += Math.sin(bobPhase) * 0.011 * bobAmount;
       this.camera.rotation.set(
         localPlayer.pitch + Math.sin(worldTime * 58) * damageShake,
         localPlayer.yaw + Math.cos(worldTime * 47) * damageShake,
-        Math.sin(bobPhase) * 0.004 * bobAmount + Math.sin(worldTime * 69) * damageShake * 0.35,
+        Math.sin(bobPhase) * 0.0055 * bobAmount
+          - localRig.strafeBlend * 0.006 * bobAmount
+          + Math.sin(worldTime * 69) * damageShake * 0.35,
         'YXZ',
       );
 
@@ -2244,18 +2744,105 @@ export class ArenaRenderer {
       const palette = TEAM_COLORS[localPlayer.team];
       this.viewArmMaterial.color.setHex(palette.armor);
       this.viewModel.visible = true;
-      const bobX = Math.sin(bobPhase) * 0.018 * bobAmount;
-      const bobY = Math.abs(Math.cos(bobPhase)) * 0.014 * bobAmount;
-      this.viewModel.position.set(0.31 + bobX, -0.28 - bobY - this.weaponKick * 0.012, -0.62 + this.weaponKick * 0.055);
+
+      if (this.previousViewYaw === null || this.previousViewPitch === null) {
+        this.previousViewYaw = localPlayer.yaw;
+        this.previousViewPitch = localPlayer.pitch;
+      }
+      const yawDelta = Math.atan2(
+        Math.sin(localPlayer.yaw - this.previousViewYaw),
+        Math.cos(localPlayer.yaw - this.previousViewYaw),
+      );
+      const pitchDelta = localPlayer.pitch - this.previousViewPitch;
+      const targetSwayYaw = THREE.MathUtils.clamp(-yawDelta / Math.max(delta, 1 / 240) * 0.014, -0.12, 0.12);
+      const targetSwayPitch = THREE.MathUtils.clamp(-pitchDelta / Math.max(delta, 1 / 240) * 0.012, -0.09, 0.09);
+      this.viewSwayYaw = damp(this.viewSwayYaw, targetSwayYaw, 14, delta);
+      this.viewSwayPitch = damp(this.viewSwayPitch, targetSwayPitch, 14, delta);
+      this.previousViewYaw = localPlayer.yaw;
+      this.previousViewPitch = localPlayer.pitch;
+
+      let actionKind: 'none' | 'reload' | 'swap' | 'melee' | 'grenade' = 'none';
+      let actionPose: ActionPoseWeights = { lower: 0, twist: 0, part: 0, hand: 0 };
+      let reloadProgress = 0;
+      if (activeWeapon && activeWeapon.reloadTimer > 0) {
+        reloadProgress = normalizedTimer(activeWeapon.reloadTimer, WEAPONS[activeWeapon.id].reloadSeconds);
+        actionKind = 'reload';
+        actionPose = evaluateReload(reloadProgress);
+      }
+      if (localRig.swapTimer > 0) {
+        actionKind = 'swap';
+        actionPose = evaluateSwap(normalizedTimer(localRig.swapTimer, 0.48));
+      }
+      if (localRig.grenadeTimer > 0) {
+        actionKind = 'grenade';
+        actionPose = evaluateGrenade(normalizedTimer(localRig.grenadeTimer, 0.65));
+      }
+      if (localRig.meleeTimer > 0) {
+        actionKind = 'melee';
+        actionPose = evaluateMelee(normalizedTimer(localRig.meleeTimer, 0.85));
+      }
+
+      const recoil = Math.max(localRig.recoil, this.weaponKick);
+      const bobX = Math.sin(bobPhase) * 0.021 * bobAmount;
+      const bobY = Math.abs(Math.cos(bobPhase)) * 0.016 * bobAmount;
+      const airDrift = (1 - localRig.groundBlend) * THREE.MathUtils.clamp(localPlayer.velocity.y / 8, -1, 1);
+      this.viewModel.position.set(
+        0.31 + bobX,
+        -0.28 - bobY - landingWeight * 0.06 + airDrift * 0.025,
+        -0.62,
+      );
       this.viewModel.rotation.set(
-        -0.03 + this.weaponKick * 0.09,
-        -0.045 - this.weaponKick * 0.025,
-        0.012 - bobX * 0.28,
+        -0.03 + landingWeight * 0.045,
+        -0.045,
+        0.012 - bobX * 0.32 - localRig.strafeBlend * 0.012 * bobAmount,
+      );
+
+      this.viewActionPivot.position.set(
+        this.viewSwayYaw * 0.14 + (actionKind === 'melee' ? -actionPose.part * 0.08 : 0),
+        this.viewSwayPitch * 0.1 - actionPose.lower * (actionKind === 'swap' ? 0.48 : 0.2) - recoil * 0.012,
+        recoil * 0.07 + (actionKind === 'melee' ? -actionPose.part * 0.25 : 0),
+      );
+      this.viewActionPivot.rotation.set(
+        this.viewSwayPitch
+          + recoil * 0.11
+          + (actionKind === 'melee' ? -0.58 * actionPose.part : 0.18 * actionPose.lower)
+          + (actionKind === 'grenade' ? -0.34 * actionPose.part : 0),
+        this.viewSwayYaw
+          + (actionKind === 'melee' ? -0.82 : actionKind === 'grenade' ? 0.28 : -0.12) * actionPose.twist
+          - recoil * 0.022,
+        (actionKind === 'swap' ? 0.68 : actionKind === 'reload' ? 0.52 : 0.24) * actionPose.twist
+          + recoil * 0.018,
+      );
+
+      this.viewRightHandAssembly.position.copy(this.viewRightHandBasePosition);
+      this.viewLeftHandAssembly.position.copy(this.viewLeftHandBasePosition);
+      this.viewRightHandAssembly.rotation.set(0, 0, 0);
+      this.viewLeftHandAssembly.rotation.set(0, 0, 0);
+      if (actionKind === 'reload') {
+        this.viewLeftHandAssembly.position.add(new THREE.Vector3(-0.09, -0.18, 0.11).multiplyScalar(actionPose.hand));
+        this.viewLeftHandAssembly.rotation.set(0.22 * actionPose.hand, -0.18 * actionPose.hand, -0.46 * actionPose.hand);
+      } else if (actionKind === 'grenade') {
+        this.viewLeftHandAssembly.position.add(new THREE.Vector3(-0.34, 0.2, -0.16).multiplyScalar(actionPose.hand));
+        this.viewLeftHandAssembly.rotation.set(-0.72 * actionPose.hand, 0.24 * actionPose.hand, -0.5 * actionPose.hand);
+      } else if (actionKind === 'swap') {
+        this.viewLeftHandAssembly.position.y -= actionPose.hand * 0.07;
+        this.viewLeftHandAssembly.rotation.z = -actionPose.hand * 0.18;
+      }
+
+      this.resetAnimatedWeaponParts(this.viewWeaponParts);
+      this.animateWeaponParts(
+        this.viewWeaponParts,
+        this.viewWeaponId,
+        actionKind === 'reload' ? reloadProgress : 0,
+        normalizedTimer(localRig.fireTimer, 0.55),
+        recoil,
       );
       return;
     }
 
     this.viewModel.visible = false;
+    this.previousViewYaw = null;
+    this.previousViewPitch = null;
     if (localPlayer && localRig) {
       const target = localRig.root.position.clone().add(new THREE.Vector3(0, localPlayer.height * 0.7, 0));
       const forward = FORWARD.clone().applyAxisAngle(UP, localPlayer.yaw);
@@ -2284,6 +2871,8 @@ export class ArenaRenderer {
     if (id === this.viewWeaponId) return;
     this.viewWeaponMount.clear();
     this.viewWeaponId = id;
+    this.viewWeaponModel = null;
+    this.viewWeaponParts = {};
     if (!id) return;
     const weapon = this.getWeaponTemplate(id).clone(true);
     const pose = WEAPON_VIEW_POSES[id];
@@ -2299,20 +2888,24 @@ export class ArenaRenderer {
       }
     });
     this.viewWeaponMount.add(weapon);
+    this.viewWeaponModel = weapon;
+    this.viewWeaponParts = this.collectAnimatedWeaponParts(weapon);
 
     const primaryGrip = weapon.userData.primaryGrip as Vec3 | undefined;
     const supportGrip = weapon.userData.supportGrip as Vec3 | undefined;
     if (primaryGrip) {
       this.viewCamera.updateMatrixWorld(true);
-      const primaryTarget = this.viewModel.worldToLocal(weapon.localToWorld(vectorFrom(primaryGrip)));
+      const primaryTarget = this.viewActionPivot.worldToLocal(weapon.localToWorld(vectorFrom(primaryGrip)));
       this.viewRightHandAssembly.position.copy(primaryTarget).sub(new THREE.Vector3(0.2, -0.015, -0.24));
       const supportTarget = supportGrip
-        ? this.viewModel.worldToLocal(weapon.localToWorld(vectorFrom(supportGrip)))
+        ? this.viewActionPivot.worldToLocal(weapon.localToWorld(vectorFrom(supportGrip)))
         : primaryTarget.clone().add(new THREE.Vector3(-0.12, 0.02, -0.24));
       this.viewLeftHandAssembly.position.copy(supportTarget).sub(new THREE.Vector3(-0.115, -0.005, -0.38));
     } else {
       this.viewRightHandAssembly.position.set(0, 0, 0);
       this.viewLeftHandAssembly.position.set(0, 0, 0);
     }
+    this.viewRightHandBasePosition.copy(this.viewRightHandAssembly.position);
+    this.viewLeftHandBasePosition.copy(this.viewLeftHandAssembly.position);
   }
 }
