@@ -229,6 +229,181 @@ export const createStylizedGroundTexture = (size = 512): THREE.CanvasTexture => 
   return texture;
 };
 
+export interface ForestGroundTextures {
+  albedo: THREE.CanvasTexture;
+  normal: THREE.CanvasTexture;
+  roughness: THREE.CanvasTexture;
+}
+
+/**
+ * Deterministic, tileable forest-floor PBR set. The material deliberately
+ * avoids baked directional light so it remains convincing under the arena's
+ * moving camera and real sun/shadow setup.
+ */
+export const createForestGroundTextures = (size = 512): ForestGroundTextures => {
+  const safeSize = Math.max(128, Math.round(size));
+  const height = new Float32Array(safeSize * safeSize);
+  const albedoCanvas = createCanvas(safeSize, safeSize);
+  const albedoContext = getContext(albedoCanvas);
+  const albedoImage = albedoContext.createImageData(safeSize, safeSize);
+  const roughnessCanvas = createCanvas(safeSize, safeSize);
+  const roughnessContext = getContext(roughnessCanvas);
+  const roughnessImage = roughnessContext.createImageData(safeSize, safeSize);
+
+  for (let y = 0; y < safeSize; y += 1) {
+    const v = y / safeSize;
+    for (let x = 0; x < safeSize; x += 1) {
+      const u = x / safeSize;
+      const macro =
+        tiledNoise(u * 5, v * 5, 5, 0x51f0) * 0.5
+        + tiledNoise(u * 13, v * 13, 13, 0x8d31) * 0.32
+        + tiledNoise(u * 47, v * 47, 47, 0x2a61) * 0.18;
+      const moss = smoothstep(THREE.MathUtils.clamp((macro - 0.34) / 0.52, 0, 1));
+      const mineral = tiledNoise(u * 91, v * 91, 91, 0x771c) - 0.5;
+      const rootBand = Math.abs(Math.sin((u * 2.1 + v * 1.35) * TWO_PI + macro * 2.4));
+      const root = smoothstep(THREE.MathUtils.clamp((rootBand - 0.82) / 0.18, 0, 1));
+      const wet = smoothstep(THREE.MathUtils.clamp((0.48 - macro) / 0.22, 0, 1));
+      const index = y * safeSize + x;
+      height[index] = macro * 0.72 + mineral * 0.06 + root * 0.22;
+
+      const mossMix = moss * 0.76;
+      const litterMix = Math.max(0, mineral) * 0.18;
+      const rootMix = root * 0.42;
+      const brightness = 0.86 + mineral * 0.15 - wet * 0.08;
+      let red = THREE.MathUtils.lerp(38, 85, mossMix);
+      let green = THREE.MathUtils.lerp(49, 117, mossMix);
+      let blue = THREE.MathUtils.lerp(40, 72, mossMix);
+      red = THREE.MathUtils.lerp(red, 113, litterMix) * brightness;
+      green = THREE.MathUtils.lerp(green, 134, litterMix) * brightness;
+      blue = THREE.MathUtils.lerp(blue, 90, litterMix) * brightness;
+      red = THREE.MathUtils.lerp(red, 56, rootMix);
+      green = THREE.MathUtils.lerp(green, 47, rootMix);
+      blue = THREE.MathUtils.lerp(blue, 36, rootMix);
+
+      const offset = index * 4;
+      albedoImage.data[offset] = THREE.MathUtils.clamp(red, 0, 255);
+      albedoImage.data[offset + 1] = THREE.MathUtils.clamp(green, 0, 255);
+      albedoImage.data[offset + 2] = THREE.MathUtils.clamp(blue, 0, 255);
+      albedoImage.data[offset + 3] = 255;
+
+      const roughness = THREE.MathUtils.clamp(0.91 - wet * 0.3 - root * 0.08 + mineral * 0.06, 0.5, 0.98);
+      const roughnessByte = Math.round(roughness * 255);
+      roughnessImage.data[offset] = roughnessByte;
+      roughnessImage.data[offset + 1] = roughnessByte;
+      roughnessImage.data[offset + 2] = roughnessByte;
+      roughnessImage.data[offset + 3] = 255;
+    }
+  }
+  albedoContext.putImageData(albedoImage, 0, 0);
+  roughnessContext.putImageData(roughnessImage, 0, 0);
+
+  // Leaf litter adds scale cues without baking light or introducing seams.
+  const random = seededRandom(0xf012e57);
+  for (let leaf = 0; leaf < Math.round(safeSize / 2.8); leaf += 1) {
+    const x = random() * safeSize;
+    const y = random() * safeSize;
+    const length = safeSize * (0.006 + random() * 0.014);
+    const width = length * (0.14 + random() * 0.2);
+    albedoContext.save();
+    albedoContext.translate(x, y);
+    albedoContext.rotate(random() * TWO_PI);
+    albedoContext.fillStyle = random() > 0.54
+      ? `rgba(106, 126, 73, ${0.18 + random() * 0.2})`
+      : `rgba(47, 56, 39, ${0.2 + random() * 0.2})`;
+    albedoContext.beginPath();
+    albedoContext.ellipse(0, 0, length, width, 0, 0, TWO_PI);
+    albedoContext.fill();
+    albedoContext.restore();
+  }
+
+  const normalCanvas = createCanvas(safeSize, safeSize);
+  const normalContext = getContext(normalCanvas);
+  const normalImage = normalContext.createImageData(safeSize, safeSize);
+  const wrap = (value: number): number => (value + safeSize) % safeSize;
+  for (let y = 0; y < safeSize; y += 1) {
+    for (let x = 0; x < safeSize; x += 1) {
+      const left = height[y * safeSize + wrap(x - 1)]!;
+      const right = height[y * safeSize + wrap(x + 1)]!;
+      const top = height[wrap(y - 1) * safeSize + x]!;
+      const bottom = height[wrap(y + 1) * safeSize + x]!;
+      const normalX = (left - right) * 2.4;
+      const normalY = (top - bottom) * 2.4;
+      const inverseLength = 1 / Math.hypot(normalX, normalY, 1);
+      const offset = (y * safeSize + x) * 4;
+      normalImage.data[offset] = Math.round((normalX * inverseLength * 0.5 + 0.5) * 255);
+      normalImage.data[offset + 1] = Math.round((normalY * inverseLength * 0.5 + 0.5) * 255);
+      normalImage.data[offset + 2] = Math.round((inverseLength * 0.5 + 0.5) * 255);
+      normalImage.data[offset + 3] = 255;
+    }
+  }
+  normalContext.putImageData(normalImage, 0, 0);
+
+  const makeTexture = (
+    canvas: HTMLCanvasElement,
+    name: string,
+    colorSpace: THREE.ColorSpace,
+  ): THREE.CanvasTexture => {
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.name = name;
+    texture.colorSpace = colorSpace;
+    texture.wrapS = THREE.RepeatWrapping;
+    texture.wrapT = THREE.RepeatWrapping;
+    texture.minFilter = THREE.LinearMipmapLinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+    texture.generateMipmaps = true;
+    return texture;
+  };
+
+  return {
+    albedo: makeTexture(albedoCanvas, 'forest-ground-albedo', THREE.SRGBColorSpace),
+    normal: makeTexture(normalCanvas, 'forest-ground-normal', THREE.NoColorSpace),
+    roughness: makeTexture(roughnessCanvas, 'forest-ground-roughness', THREE.NoColorSpace),
+  };
+};
+
+/** White ceramic/black composite/lime stripe surface used by facility paths. */
+export const createFacilityPanelTexture = (size = 512): THREE.CanvasTexture => {
+  const safeSize = Math.max(128, Math.round(size));
+  const canvas = createCanvas(safeSize, safeSize);
+  const context = getContext(canvas);
+  context.fillStyle = '#dce3df';
+  context.fillRect(0, 0, safeSize, safeSize);
+
+  const half = safeSize * 0.5;
+  context.fillStyle = '#11191d';
+  context.fillRect(half - safeSize * 0.012, 0, safeSize * 0.024, safeSize);
+  context.fillRect(0, half - safeSize * 0.012, safeSize, safeSize * 0.024);
+  context.fillStyle = '#a8e63a';
+  context.fillRect(0, safeSize * 0.09, safeSize, safeSize * 0.035);
+  context.fillRect(safeSize * 0.875, 0, safeSize * 0.032, safeSize);
+
+  context.strokeStyle = 'rgba(8, 16, 18, 0.32)';
+  context.lineWidth = Math.max(1, safeSize / 256);
+  context.strokeRect(safeSize * 0.025, safeSize * 0.025, safeSize * 0.95, safeSize * 0.95);
+  context.strokeRect(safeSize * 0.055, safeSize * 0.055, safeSize * 0.39, safeSize * 0.37);
+  context.strokeRect(safeSize * 0.555, safeSize * 0.555, safeSize * 0.39, safeSize * 0.37);
+
+  const random = seededRandom(0xface71);
+  for (let mark = 0; mark < Math.round(safeSize * 0.42); mark += 1) {
+    const alpha = 0.025 + random() * 0.07;
+    context.fillStyle = `rgba(13, 26, 27, ${alpha})`;
+    const radius = 0.3 + random() * 1.8;
+    context.beginPath();
+    context.arc(random() * safeSize, random() * safeSize, radius, 0, TWO_PI);
+    context.fill();
+  }
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.name = 'facility-panel-albedo';
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.wrapS = THREE.RepeatWrapping;
+  texture.wrapT = THREE.RepeatWrapping;
+  texture.minFilter = THREE.LinearMipmapLinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+  texture.generateMipmaps = true;
+  return texture;
+};
+
 export type RadialTextureProfile = 'shadow' | 'glow';
 
 export interface RadialTextureOptions {

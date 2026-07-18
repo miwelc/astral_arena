@@ -1,6 +1,6 @@
 # Astral Arena
 
-Astral Arena es un prototipo de *arena shooter* 3D para navegador, inspirado en el ritmo de combate, los escudos recargables, el control de armas del mapa y los modos competitivos de los shooters de consola de principios de los 2000. Su identidad propia, **Arctic Orbital Dusk**, combina astronautas estilizados, arquitectura orbital y grandes siluetas de paisaje frío: toma del lenguaje gráfico de *Firewatch* la composición y la perspectiva atmosférica, pero no su paleta otoñal ni sus recursos.
+Astral Arena es un prototipo de *arena shooter* 3D para navegador, inspirado en el ritmo de combate, los escudos recargables, el control de armas del mapa y los modos competitivos de los shooters de consola de principios de los 2000. Su identidad propia, **Arctic Orbital Dusk**, combina astronautas *hard-surface*, un campus científico extraterrestre de cerámica blanca/grafito/lima y un bosque frío que invade la instalación. Conserva una composición atmosférica estilizada, pero usa materiales PBR, vegetación densa y una iluminación de sol cálido contra sombras cian.
 
 El diseño se concentra en dos formatos:
 
@@ -16,11 +16,11 @@ El repositorio contiene una **primera vertical jugable completa**, no una versi�
 - simulación determinista del combate, movimiento, colisiones, escudos, reapariciones, proyectiles, granadas, cuerpo a cuerpo, puntuación y objetivos;
 - un mapa inicial, **Cresta del Cráter**, con bases, torre central, coberturas, plataformas, puntos de aparición y armas recogibles;
 - seis armas, bots con tres dificultades, controles de teclado/ratón y mando, y audio procedural;
-- una capa de presentación Three.js con iluminación PBR, entorno procedural, sombras, bloom moderado, color grading, arquitectura biselada, astronautas articulados, seis modelos de arma diferenciados, paisaje atmosférico y cámara en primera persona;
+- una capa de presentación Three.js con terreno PBR húmedo, bosque instanciado, niebla local, haces solares, arquitectura modular señalizada, sombras, bloom moderado, color grading, astronautas articulados de placas cerámicas, seis armas *hard-surface* y ADS interpolado por arma;
 - animación procedural compartida entre primera y tercera persona: locomoción direccional, respiración, salto, caída, aterrizaje, muerte/reaparición, retroceso, recarga, cambio de arma, cuerpo a cuerpo y lanzamiento de granada, con rodillas, pies, manos y piezas de arma móviles;
 - menús, configuración 1v1/4v4, lobby manual P2P, HUD, marcador, kill feed, audio y pantalla de resultado integrados;
 - transporte WebRTC P2P nativo con señalización manual, mensajes tipados y un host con hasta siete invitados;
-- 49 pruebas automatizadas para combate, balance inicial, objetivos, bots, regresiones, acceso a la torre, puntuación, determinismo, curvas de animación y piezas móviles de armamento.
+- 66 pruebas automatizadas para combate, balance inicial, objetivos, bots, regresiones, acceso a la torre, puntuación, determinismo, curvas de animación, entorno procedural y piezas móviles de armamento.
 
 El proyecto pasa `typecheck`, tests y build de producción. Aun así, el flujo WebRTC debe probarse con varios navegadores y redes reales antes de declarar soporte público 4v4; tampoco hay matchmaking, persistencia, cuentas, backend, migración de host ni anti-cheat.
 
@@ -224,6 +224,8 @@ Para convertir la vertical en un lanzamiento público, el orden recomendado es: 
     │   ├── animationMath.ts   # Curvas puras y pesos de acciones animadas
     │   ├── animationMath.test.ts # Continuidad y estabilidad de las curvas
     │   ├── ArenaRenderer.ts   # Escena Three.js, iluminación, cámara y efectos
+    │   ├── facilityEnvironment.test.ts # Contratos del entorno instanciado
+    │   ├── facilityEnvironment.ts # Bosque y arquitectura modular procedural
     │   ├── landscapeGeometry.ts # Crestas y vegetación procedural
     │   ├── visualTextures.ts  # Entorno, terreno y máscaras procedurales
     │   ├── weaponModels.test.ts # Contratos de piezas móviles y anclajes
