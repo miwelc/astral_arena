@@ -49,6 +49,7 @@ import {
 } from './visualTextures';
 import {
   createWeaponModel,
+  getWeaponAnchor,
   WEAPON_VIEW_POSES,
   type WeaponAnimationRole,
 } from './weaponModels';
@@ -2531,8 +2532,8 @@ export class ArenaRenderer {
   }
 
   private poseRigHands(rig: PlayerRig, weapon: THREE.Group): void {
-    const primaryGrip = weapon.userData.primaryGrip as Vec3 | undefined;
-    const supportGrip = weapon.userData.supportGrip as Vec3 | undefined;
+    const primaryGrip = getWeaponAnchor(weapon, 'primaryGrip');
+    const supportGrip = getWeaponAnchor(weapon, 'supportGrip');
     if (!primaryGrip) return;
 
     rig.root.updateMatrixWorld(true);
@@ -2921,10 +2922,12 @@ export class ArenaRenderer {
       if (!actor) return;
       const origin = new THREE.Vector3(actor.position.x, actor.position.y + actor.height * 0.76, actor.position.z);
       const actorRig = this.playerRigs.get(event.actorId);
-      const modelMuzzle = actorRig?.weaponModel?.userData.muzzle as THREE.Vector3 | undefined;
+      const modelMuzzle = actorRig?.weaponModel
+        ? getWeaponAnchor(actorRig.weaponModel, 'muzzle')
+        : null;
       if (actorRig?.weaponModel && modelMuzzle) {
         actorRig.weaponModel.updateWorldMatrix(true, false);
-        origin.copy(actorRig.weaponModel.localToWorld(modelMuzzle.clone()));
+        origin.copy(actorRig.weaponModel.localToWorld(modelMuzzle));
       }
       const direction = new THREE.Vector3(
         -Math.sin(actor.yaw) * Math.cos(actor.pitch),
@@ -3000,7 +3003,9 @@ export class ArenaRenderer {
         }
         if (event.actorId === this.localPlayerId) {
           this.weaponKick = 1;
-          const viewMuzzle = this.viewWeaponModel?.userData.muzzle as THREE.Vector3 | undefined;
+          const viewMuzzle = this.viewWeaponModel
+            ? getWeaponAnchor(this.viewWeaponModel, 'muzzle')
+            : null;
           if (this.viewWeaponModel && viewMuzzle) {
             const localFlash = new THREE.Group();
             localFlash.position.copy(viewMuzzle);
@@ -3404,8 +3409,8 @@ export class ArenaRenderer {
     this.viewWeaponModel = weapon;
     this.viewWeaponParts = this.collectAnimatedWeaponParts(weapon);
 
-    const primaryGrip = weapon.userData.primaryGrip as Vec3 | undefined;
-    const supportGrip = weapon.userData.supportGrip as Vec3 | undefined;
+    const primaryGrip = getWeaponAnchor(weapon, 'primaryGrip');
+    const supportGrip = getWeaponAnchor(weapon, 'supportGrip');
     if (primaryGrip) {
       this.viewCamera.updateMatrixWorld(true);
       const primaryTarget = this.viewActionPivot.worldToLocal(weapon.localToWorld(vectorFrom(primaryGrip)));

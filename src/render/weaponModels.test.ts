@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import type { WeaponId } from '../game/types';
 import {
   createWeaponModel,
+  getWeaponAnchor,
   type WeaponAnimationRole,
 } from './weaponModels';
 
@@ -62,6 +63,21 @@ describe('procedural weapon animation contract', () => {
       if (model.userData.secondaryMuzzle !== undefined) {
         expectFiniteVector(model.userData.secondaryMuzzle);
       }
+    });
+
+    it(`${weaponId} exposes safe anchors after Object3D cloning`, () => {
+      const clone = createWeaponModel(weaponId).clone(true);
+      const primaryGrip = getWeaponAnchor(clone, 'primaryGrip');
+      const supportGrip = getWeaponAnchor(clone, 'supportGrip');
+      const muzzle = getWeaponAnchor(clone, 'muzzle');
+
+      expect(primaryGrip).toBeInstanceOf(THREE.Vector3);
+      expect(supportGrip).toBeInstanceOf(THREE.Vector3);
+      expect(muzzle).toBeInstanceOf(THREE.Vector3);
+      expectFiniteVector(primaryGrip);
+      expectFiniteVector(supportGrip);
+      expectFiniteVector(muzzle);
+      expect(muzzle).not.toBe(clone.userData.muzzle);
     });
 
     it(`${weaponId} keeps a readable hard-surface material hierarchy`, () => {

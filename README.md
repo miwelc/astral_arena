@@ -20,7 +20,7 @@ El repositorio contiene una **primera vertical jugable completa**, no una versi�
 - animación procedural compartida entre primera y tercera persona: locomoción direccional, respiración, salto, caída, aterrizaje, muerte/reaparición, retroceso, recarga, cambio de arma, cuerpo a cuerpo y lanzamiento de granada, con rodillas, pies, manos y piezas de arma móviles;
 - menús, configuración 1v1/4v4, lobby manual P2P, HUD, marcador, kill feed, audio y pantalla de resultado integrados;
 - transporte WebRTC P2P nativo con señalización manual, mensajes tipados y un host con hasta siete invitados;
-- 66 pruebas automatizadas para combate, balance inicial, objetivos, bots, regresiones, acceso a la torre, puntuación, determinismo, curvas de animación, entorno procedural y piezas móviles de armamento.
+- 72 pruebas automatizadas para combate, balance inicial, objetivos, bots, regresiones, acceso a la torre, puntuación, determinismo, curvas de animación, entorno procedural y piezas móviles de armamento.
 
 El proyecto pasa `typecheck`, tests y build de producción. Aun así, el flujo WebRTC debe probarse con varios navegadores y redes reales antes de declarar soporte público 4v4; tampoco hay matchmaking, persistencia, cuentas, backend, migración de host ni anti-cheat.
 

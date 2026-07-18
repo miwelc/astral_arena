@@ -6,6 +6,37 @@ import { WEAPONS } from '../game/weapons';
 
 type VectorTuple = readonly [x: number, y: number, z: number];
 
+export type WeaponAnchorName =
+  | 'primaryGrip'
+  | 'supportGrip'
+  | 'muzzle'
+  | 'secondaryMuzzle';
+
+/**
+ * Reads positional metadata without assuming it retained its Vector3
+ * prototype. Object3D.clone() JSON-copies userData, turning Vector3 anchors
+ * into plain `{ x, y, z }` records at runtime.
+ */
+export const getWeaponAnchor = (
+  model: THREE.Object3D,
+  name: WeaponAnchorName,
+  target = new THREE.Vector3(),
+): THREE.Vector3 | null => {
+  const value = model.userData[name] as Partial<Record<'x' | 'y' | 'z', unknown>> | undefined;
+  if (
+    !value
+    || typeof value.x !== 'number'
+    || typeof value.y !== 'number'
+    || typeof value.z !== 'number'
+    || !Number.isFinite(value.x)
+    || !Number.isFinite(value.y)
+    || !Number.isFinite(value.z)
+  ) {
+    return null;
+  }
+  return target.set(value.x, value.y, value.z);
+};
+
 export type WeaponAnimationRole =
   | 'magazine'
   | 'energy-cell'
