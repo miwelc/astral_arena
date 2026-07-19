@@ -153,6 +153,8 @@ describe('ExternalWeaponModelLibrary', () => {
       for (const role of EXPECTED_ROLES[id]) {
         const part = external.getObjectByName(`weapon-part-${role}`);
         expect(part).toBeDefined();
+        expect(part?.parent).toBe(external);
+        expect(part?.userData.animationSpace).toBe('weapon-root');
         if (part?.userData.externalAnimationProxy !== true) continue;
         let hasVisibleMesh = false;
         part.traverse((object) => {
@@ -161,6 +163,27 @@ describe('ExternalWeaponModelLibrary', () => {
         expect(hasVisibleMesh, `${id} ${role} proxy should remain visibly animated`).toBe(true);
       }
     }
+  });
+
+  it('keeps imported sidearm mechanism offsets in normalized weapon space', async () => {
+    const library = new ExternalWeaponModelLibrary(new SyntheticLoader());
+    await library.load('sidearm');
+    const sidearm = library.create('sidearm');
+    const magazine = sidearm.getObjectByName('weapon-part-magazine');
+    expect(magazine).toBeDefined();
+    expect(magazine?.userData.sourceNodeName).toBe('pewmagazine');
+    expect(magazine?.parent).toBe(sidearm);
+
+    sidearm.updateMatrixWorld(true);
+    const before = magazine!.getWorldPosition(new THREE.Vector3());
+    magazine!.position.x -= 0.035;
+    magazine!.position.y -= 0.29;
+    sidearm.updateMatrixWorld(true);
+    const after = magazine!.getWorldPosition(new THREE.Vector3());
+
+    expect(after.x - before.x).toBeCloseTo(-0.035, 8);
+    expect(after.y - before.y).toBeCloseTo(-0.29, 8);
+    expect(after.z - before.z).toBeCloseTo(0, 8);
   });
 
   it('remaps imported paint to pale ceramic while keeping dark functional parts', async () => {

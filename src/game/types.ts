@@ -5,6 +5,7 @@ export type Team = 'aurora' | 'nova' | 'neutral';
 export type PlayerKind = 'human' | 'bot' | 'remote';
 export type WeaponId = 'pulse-rifle' | 'sidearm' | 'battle-rifle' | 'sniper' | 'shotgun' | 'rocket-launcher';
 export type PickupKind = 'weapon' | 'overshield' | 'ammo' | 'grenade';
+export const GAME_PROTOCOL_VERSION = 3 as const;
 
 export interface Vec3 {
   x: number;
@@ -22,7 +23,7 @@ export interface MatchConfig {
   timeLimitSeconds: number;
   botFill: boolean;
   playerName: string;
-  mapId: 'crater-ridge';
+  mapId: 'crater-ridge' | 'umbra-station';
 }
 
 export interface PlayerInput {
@@ -116,6 +117,10 @@ export interface BotMemory {
   radarContactPosition: Vec3 | null;
   radarContactAt: number;
   waypointIndex: number;
+  /** Stable authored route through a multi-level map's waypoint graph. */
+  navigationRoute: number[];
+  navigationCursor: number;
+  navigationGoalIndex: number | null;
   reactionTimer: number;
   aimError: Vec3;
   preferredRange: number;
@@ -308,6 +313,24 @@ export interface SpawnPoint {
   team: Team;
 }
 
+export interface JumpPadZone {
+  id: string;
+  center: Vec3;
+  halfSize: { x: number; z: number };
+  /** Suggested launch velocity. Simulation may refine it for the destination. */
+  launchVelocity: Vec3;
+}
+
+export type NavigationTraversal = 'walk' | 'jump' | 'drop' | 'launch';
+
+export interface WaypointLink {
+  from: number;
+  to: number;
+  traversal: NavigationTraversal;
+  /** Most corridors and stair flights are safe in both directions. */
+  bidirectional: boolean;
+}
+
 export interface MapDefinition {
   id: MatchConfig['mapId'];
   name: string;
@@ -315,9 +338,21 @@ export interface MapDefinition {
   obstacles: AabbObstacle[];
   spawns: SpawnPoint[];
   waypoints: Vec3[];
+  /**
+   * Optional directed navigation graph over `waypoints`; bidirectional links
+   * opt into their reverse edge. Stacked maps should author this so bots do
+   * not mistake a visible deck for a directly walkable destination.
+   */
+  waypointLinks?: WaypointLink[];
+  jumpPads: JumpPadZone[];
   pickups: Omit<PickupState, 'available' | 'respawnTimer' | 'weaponState' | 'amount' | 'temporary' | 'despawnTimer'>[];
   flagBases: Record<Exclude<Team, 'neutral'>, Vec3>;
   towerCenter: Vec3;
+  towerZone: {
+    radius: number;
+    controlMinY: number;
+    patrolRadius: number;
+  };
 }
 
 export interface RayHit {
@@ -336,13 +371,13 @@ export interface SerializedSnapshot {
 }
 
 export type ClientMessage =
-  | { kind: 'hello'; name: string; protocol: 2 }
+  | { kind: 'hello'; name: string; protocol: typeof GAME_PROTOCOL_VERSION }
   | { kind: 'input'; playerId: string; input: PlayerInput }
   | { kind: 'ready'; playerId: string }
   | { kind: 'ping'; sentAt: number };
 
 export type HostMessage =
   | SerializedSnapshot
-  | { kind: 'welcome'; playerId: string; config: MatchConfig; protocol: 2 }
+  | { kind: 'welcome'; playerId: string; config: MatchConfig; protocol: typeof GAME_PROTOCOL_VERSION }
   | { kind: 'pong'; sentAt: number; serverAt: number }
   | { kind: 'error'; message: string };

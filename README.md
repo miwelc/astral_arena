@@ -15,13 +15,13 @@ Las plazas vacías pueden llenarse con bots. El modo local significa **un humano
 El repositorio contiene una **primera vertical jugable completa**, no una versión terminada ni preparada todavía para partidas públicas. Actualmente incluye:
 
 - simulación determinista del combate, movimiento, colisiones, escudos, reapariciones, proyectiles, granadas, cuerpo a cuerpo, puntuación y objetivos;
-- un mapa inicial, **Cresta del Cráter**, de 104 × 84 m, con tres rutas, dos edificios base con interiores, torre central, puestos logísticos, relay meteorológico, laboratorio hidropónico, terrazas, bermas físicas, coberturas y armas recogibles;
+- dos mapas seleccionables: **Cresta del Cráter**, un campus abierto de 104 × 84 m con tres rutas, y **Estación Umbra**, una instalación compacta y vertical de tres alturas con cuatro alas, interiores, puentes, rutas inferiores, torre de señales y plataforma central;
 - seis armas, bots con tres dificultades moderadas, evaluación de utilidad de pickups, memoria antiatasco, controles de teclado/ratón y mando, hitboxes anatómicos ampliados y audio procedural multicapa por arma;
-- una capa de presentación Three.js con terreno PBR húmedo de barro, musgo, raíces, piedras, relieve, césped denso y charcos; UV antirrepetición, tintado macroscópico, bosque instanciado, niebla local, puertas, cristales, rampas, barandillas, cajas, iluminación interior, sombras, bloom moderado, profundidad de campo, aberración cromática, astronautas articulados y seis armas GLB CC0 adaptadas al estilo *hard-surface*, con fallback procedural, fogonazo, trazadoras e impactos;
+- una capa de presentación Three.js con terreno PBR húmedo de barro, musgo, raíces, piedras, relieve, césped denso y charcos; UV antirrepetición, tintado macroscópico, bosque instanciado, niebla local, puertas, cristales, rampas, barandillas, cajas, iluminación interior, sombras, bloom moderado, profundidad de campo, aberración cromática, astronautas articulados y seis armas GLB CC0 incluidas en el propio build y adaptadas al estilo cerámico *hard-surface*, con fogonazo, trazadoras e impactos;
 - animación procedural compartida entre primera y tercera persona: locomoción ligada a la distancia recorrida y diferenciada por dirección, respiración, salto, caída, aterrizaje, muerte/reaparición, retroceso, recarga, cambio de arma, cuerpo a cuerpo y lanzamiento de granada, con rodillas, pies, manos y piezas de arma móviles;
 - menús con formato canónico por modo, lobby manual P2P, HUD contextual para armas y torreta, radar de movimiento de 25 m, IFF aliado/enemigo, avisos contextuales, voz de objetivos, audio y pantalla de resultado integrados;
 - transporte WebRTC P2P nativo con señalización manual, mensajes tipados y un host con hasta siete invitados;
-- 315 pruebas automatizadas para combate, daño de precisión, ráfagas y balística, drops con munición, dispersión y retículas, transiciones de input P2P, agachado, movimiento, auto-step y deslizamiento por paredes, hitboxes, perfiles y objetivos de bots, radar, regeneración, snapshots P2P, navegación, relieve y arquitectura del mapa, pads de salto, torreta, puntuación, determinismo, audio, animación, materiales y modelos de armamento externos.
+- 366 pruebas automatizadas para combate, daño de precisión, ráfagas y balística, drops con munición, dispersión y retículas, transiciones de input P2P, agachado, movimiento, auto-step y deslizamiento por paredes, hitboxes, perfiles y objetivos de bots, radar, regeneración, snapshots P2P, navegación vertical, recorrido físico de rutas, relieve y arquitectura de ambos mapas, pads de salto, torreta, puntuación, determinismo, audio, animación, materiales y modelos de armamento externos.
 
 El proyecto pasa `typecheck`, tests y build de producción. Aun así, el flujo WebRTC debe probarse con varios navegadores y redes reales antes de declarar soporte público 4v4; tampoco hay matchmaking, persistencia, cuentas, backend, migración de host ni anti-cheat.
 
@@ -197,12 +197,12 @@ La vertical se construyó en seis capas verificables, actualmente completadas:
 
 1. **Base técnica:** Vite, TypeScript estricto, estado serializable y simulación fija a 60 Hz.
 2. **Arena shooter:** movimiento, colisiones, escudos, salud, respawn, dos armas, pickups, melee, granadas, hitscan y proyectiles.
-3. **Contenido competitivo:** mapa Cresta del Cráter, seis armas, formatos de 2/8 plazas y reglas de los cinco modos.
+3. **Contenido competitivo:** mapas Cresta del Cráter y Estación Umbra, seis armas, formatos de 2/8 plazas y reglas de los cinco modos.
 4. **Oponentes:** percepción limitada, memoria, dificultad, navegación, desatasco y conducta específica por objetivo.
 5. **Presentación y red:** arte 3D procedural combinado con modelos CC0, astronautas, cámara FPS, HUD/audio, host autoritativo y señalización WebRTC manual.
 6. **Endurecimiento de la vertical:** validación de inputs, backpressure de snapshots, regresiones y simulaciones largas de bots.
 
-Para convertir la vertical en un lanzamiento público, el orden recomendado es: pruebas reales Chrome/Firefox/Safari; sesiones sostenidas de ocho navegadores sobre varias redes; snapshots no fiables y predicción/reconciliación del cliente; segundo mapa específico de duelo; captura de movimiento y audio finales; opciones de accesibilidad; y, solo si se acepta infraestructura, señalización automática, TURN y/o migración de host.
+Para convertir la vertical en un lanzamiento público, el orden recomendado es: pruebas reales Chrome/Firefox/Safari; sesiones sostenidas de ocho navegadores sobre varias redes; snapshots no fiables y predicción/reconciliación del cliente; captura de movimiento y audio finales; opciones de accesibilidad; y, solo si se acepta infraestructura, señalización automática, TURN y/o migración de host.
 
 ## Arquitectura
 
@@ -224,8 +224,9 @@ Para convertir la vertical en un lanzamiento público, el orden recomendado es: 
     │   ├── bots.test.ts       # Perfiles de dificultad y ritmo de combate
     │   ├── collision.ts       # Movimiento, colisiones y raycasts
     │   ├── collision.test.ts  # Deslizamiento, esquinas y límites del arena
-    │   ├── map.ts             # Cresta del Cráter, spawns y pickups
-    │   ├── map.test.ts        # Simetría, rutas, escalones y pads de salto
+    │   ├── map.ts             # Registro de mapas, Cresta, spawns y pickups
+    │   ├── maps/umbraStation.ts # Estación Umbra y su grafo vertical dirigido
+    │   ├── map.test.ts        # Volúmenes, rutas, escalones y pads de salto
     │   ├── math.ts            # Vectores, límites y aleatoriedad
     │   ├── regressions.test.ts # Regresiones y simulaciones largas de bots
     │   ├── simulation.ts      # Estado autoritativo y reglas de partida

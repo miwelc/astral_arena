@@ -819,6 +819,193 @@ const createLogisticsDetails = (map: MapDefinition, materials: ArchitectureMater
 };
 
 /**
+ * Architectural dressing for Estación Umbra. Gameplay collision is authored
+ * in the map; these pieces explain it as a coherent orbital communications
+ * complex through airlock frames, bridge trusses, lighting, glazing and
+ * functional antenna/power hardware.
+ */
+const createUmbraStationArchitecture = (
+  map: MapDefinition,
+  materials: ArchitectureMaterials,
+): THREE.Group => {
+  const group = new THREE.Group();
+  group.name = 'umbra-station-architecture';
+  group.userData.hasInteriors = true;
+  group.userData.function = 'orbital-communications-and-life-support-station';
+
+  for (const team of ['aurora', 'nova'] as const) {
+    const side = team === 'aurora' ? 'west' : 'east';
+    const direction = team === 'aurora' ? 1 : -1;
+    const floor = obstacleById(map, `umbra-${side}-base-floor`);
+    const roof = obstacleById(map, `umbra-${side}-base-roof`);
+    const entryX = team === 'aurora' ? floor.max.x : floor.min.x;
+    const centerX = (floor.min.x + floor.max.x) * 0.5;
+
+    // The broad ground portal stays visibly open and receives a luminous IFF
+    // spine so flag carriers can orient in peripheral vision.
+    for (const z of [-3.62, 3.62]) {
+      group.add(boxMesh(
+        `umbra-${team}-main-airlock-jamb-${z < 0 ? 'north' : 'south'}`,
+        [0.3, 3.62, 0.28],
+        [entryX + direction * 0.07, floor.max.y + 1.81, z],
+        materials.structure,
+      ));
+      const status = boxMesh(
+        `umbra-${team}-main-airlock-status-${z < 0 ? 'north' : 'south'}`,
+        [0.075, 0.9, 0.1],
+        [entryX + direction * 0.25, floor.max.y + 2.22, z - Math.sign(z) * 0.42],
+        materials.teamGlow[team],
+      );
+      status.castShadow = false;
+      group.add(status);
+    }
+    group.add(boxMesh(
+      `umbra-${team}-main-airlock-header`,
+      [0.32, 0.3, 7.35],
+      [entryX + direction * 0.07, 4.02, 0],
+      materials.structure,
+    ));
+
+    const routeLine = boxMesh(
+      `umbra-${team}-flag-room-route-line`,
+      [Math.abs(floor.max.x - floor.min.x) * 0.82, 0.018, 1.1],
+      [centerX, floor.max.y + 0.012, 0],
+      materials.floorMarking,
+    );
+    routeLine.castShadow = false;
+    group.add(routeLine);
+    addCeilingLights(
+      group,
+      `umbra-${team}-habitat`,
+      [centerX - direction * 2.15, centerX + direction * 2.15],
+      [-7, 0, 7],
+      roof.min.y - 0.34,
+      materials.screen,
+    );
+
+    // Independent upper pressure doors communicate why both exposed bridges
+    // are valid routes rather than scenery glued to the habitation shell.
+    for (const zSide of [-1, 1]) {
+      const z = zSide * 10.24;
+      for (const xOffset of [-1.7, 1.7]) {
+        group.add(boxMesh(
+          `umbra-${team}-${zSide < 0 ? 'north' : 'south'}-upper-door-jamb-${xOffset}`,
+          [0.18, 2.18, 0.28],
+          [team === 'aurora' ? -31.1 + xOffset : 31.1 + xOffset, 3.85, z],
+          materials.structure,
+        ));
+      }
+      group.add(boxMesh(
+        `umbra-${team}-${zSide < 0 ? 'north' : 'south'}-upper-door-header`,
+        [3.55, 0.2, 0.3],
+        [team === 'aurora' ? -31.1 : 31.1, 4.94, z],
+        materials.team[team],
+      ));
+    }
+
+    for (const suffix of ['a', 'b']) {
+      addCargoDetail(
+        group,
+        `umbra-${team}-habitat-${suffix}`,
+        obstacleById(map, `umbra-${side}-base-crate-${suffix}`),
+        materials,
+        team,
+      );
+    }
+  }
+
+  // Repeating bridge trusses and compact route lights give the exposed ring a
+  // purpose-built silhouette without adding invisible collision to the deck.
+  for (const side of ['west', 'east'] as const) {
+    const team = side === 'west' ? 'aurora' : 'nova';
+    for (const lane of ['north', 'south'] as const) {
+      const deck = obstacleById(map, `umbra-${side}-${lane}-catwalk`);
+      const centerX = (deck.min.x + deck.max.x) * 0.5;
+      const centerZ = (deck.min.z + deck.max.z) * 0.5;
+      const length = deck.max.x - deck.min.x;
+      for (const zEdge of [deck.min.z + 0.18, deck.max.z - 0.18]) {
+        group.add(boxMesh(
+          `umbra-${side}-${lane}-underslung-truss-${zEdge}`,
+          [length - 0.5, 0.14, 0.12],
+          [centerX, deck.min.y - 0.16, zEdge],
+          materials.structure,
+        ));
+      }
+      for (const x of [deck.min.x + 3, centerX, deck.max.x - 3]) {
+        const beacon = boxMesh(
+          `umbra-${side}-${lane}-route-beacon-${x}`,
+          [0.11, 0.08, 0.34],
+          [x, deck.max.y + 0.1, centerZ],
+          materials.teamGlow[team],
+        );
+        beacon.castShadow = false;
+        group.add(beacon);
+      }
+    }
+  }
+
+  const relayRoof = obstacleById(map, 'umbra-north-relay-roof');
+  const relayCenterZ = (relayRoof.min.z + relayRoof.max.z) * 0.5;
+  addCeilingLights(group, 'umbra-relay', [-5.2, 0, 5.2], [-20.5, -16.2], relayRoof.min.y - 0.28, materials.screen);
+  group.add(cylinderBetween(
+    'umbra-relay-primary-mast',
+    new THREE.Vector3(0, relayRoof.max.y, relayCenterZ),
+    new THREE.Vector3(0, relayRoof.max.y + 5.4, relayCenterZ),
+    0.16,
+    materials.structure,
+    12,
+  ));
+  const dish = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.46, 2.15, 0.32, 24, 1, true),
+    materials.panel,
+  );
+  dish.name = 'umbra-relay-deep-space-dish';
+  dish.rotation.z = -0.48;
+  dish.position.set(0.8, relayRoof.max.y + 4.05, relayCenterZ);
+  dish.castShadow = true;
+  group.add(dish);
+  for (const x of [-5.4, 5.4]) {
+    // These sit on the relay's opaque pressure wall, so they read as recessed
+    // telemetry displays rather than fake windows painted over solid collision.
+    const telemetryPanel = boxMesh(
+      `umbra-relay-telemetry-panel-${x < 0 ? 'west' : 'east'}`,
+      [3.2, 1.28, 0.055],
+      [x, 4.8, -22.86],
+      materials.screen,
+    );
+    telemetryPanel.castShadow = false;
+    group.add(telemetryPanel);
+  }
+
+  const annexRoof = obstacleById(map, 'umbra-south-annex-roof');
+  addCeilingLights(group, 'umbra-power-annex-lower', [-5, 0, 5], [16.2, 21.2], 2.36, materials.screen);
+  addCeilingLights(group, 'umbra-power-annex-upper', [-5, 0, 5], [17.1, 21.4], annexRoof.min.y - 0.26, materials.screen);
+  for (const x of [-5.2, 5.2]) {
+    const bus = cylinderBetween(
+      `umbra-annex-power-bus-${x < 0 ? 'west' : 'east'}`,
+      new THREE.Vector3(x, annexRoof.max.y + 0.16, 15.2),
+      new THREE.Vector3(x, annexRoof.max.y + 0.16, 22.2),
+      0.11,
+      x < 0 ? materials.team.aurora : materials.team.nova,
+      10,
+    );
+    group.add(bus);
+  }
+  for (const x of [-4.6, 0, 4.6]) {
+    const skylight = boxMesh(
+      `umbra-annex-skylight-${x}`,
+      [3.2, 0.055, 4.8],
+      [x, annexRoof.max.y + 0.045, 20.2],
+      materials.glass,
+    );
+    skylight.castShadow = false;
+    group.add(skylight);
+  }
+
+  return group;
+};
+
+/**
  * Static opaque architecture does not need one WebGL draw per beam, crate
  * brace or door jamb. Bake those meshes into one geometry per material while
  * retaining their source names as metadata for inspection and tests. Glass
@@ -881,13 +1068,17 @@ export const createBaseArchitecture = (
   const group = new THREE.Group();
   group.name = 'human-base-architecture';
   group.userData.architectureVersion = 1;
-  group.add(
-    createTeamOperationsBuilding(map, 'aurora', materials),
-    createTeamOperationsBuilding(map, 'nova', materials),
-    createRelayBuilding(map, materials),
-    createGreenhouseBuilding(map, materials, quality, seed ^ 0x9e3779b9),
-    createLogisticsDetails(map, materials),
-  );
+  if (map.id === 'umbra-station') {
+    group.add(createUmbraStationArchitecture(map, materials));
+  } else {
+    group.add(
+      createTeamOperationsBuilding(map, 'aurora', materials),
+      createTeamOperationsBuilding(map, 'nova', materials),
+      createRelayBuilding(map, materials),
+      createGreenhouseBuilding(map, materials, quality, seed ^ 0x9e3779b9),
+      createLogisticsDetails(map, materials),
+    );
+  }
   batchStaticArchitecture(group);
 
   const materialSet = new Set<THREE.Material>([

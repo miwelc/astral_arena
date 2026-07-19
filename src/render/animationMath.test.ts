@@ -9,9 +9,11 @@ import {
   evaluateMelee,
   evaluateReload,
   evaluateSwap,
+  evaluateWeaponReload,
   evaluateWeaponBob,
   normalizedTimer,
   saturate,
+  smoothWindow,
   smootherstep01,
   smoothstep01,
   trianglePulse,
@@ -78,6 +80,15 @@ describe('animation curve primitives', () => {
     expect(trianglePulse(0.5, 0.4, 0.4, 0.8)).toBe(0);
   });
 
+  it('creates a smooth held window with neutral endpoints', () => {
+    expect(smoothWindow(0, 0, 0.2, 0.7, 1)).toBe(0);
+    expect(smoothWindow(0.2, 0, 0.2, 0.7, 1)).toBe(1);
+    expect(smoothWindow(0.45, 0, 0.2, 0.7, 1)).toBe(1);
+    expect(smoothWindow(0.7, 0, 0.2, 0.7, 1)).toBe(1);
+    expect(smoothWindow(1, 0, 0.2, 0.7, 1)).toBe(0);
+    expect(smoothWindow(0.5, 0.4, 0.3, 0.7, 0.8)).toBe(0);
+  });
+
   it('normalizes countdown timers and clamps overshoot', () => {
     expect(normalizedTimer(2, 2)).toBe(0);
     expect(normalizedTimer(1, 2)).toBe(0.5);
@@ -119,6 +130,58 @@ describe('action pose evaluators', () => {
       peak = Math.max(peak, ...values(evaluate(index / 100)));
     }
     expect(peak).toBeGreaterThan(0.95);
+  });
+});
+
+describe('weapon-specific reload animation', () => {
+  const reloadValues = (progress: number): number[] => {
+    const pose = evaluateWeaponReload(progress, 'sidearm');
+    return [
+      ...values(pose.action),
+      pose.magazineOffsetX,
+      pose.magazineOffsetY,
+      pose.magazineOffsetZ,
+      pose.magazineRoll,
+      pose.slideOffsetZ,
+    ];
+  };
+
+  it('stages the sidearm magazine before the slide and returns exactly to bind pose', () => {
+    expect(reloadValues(0).every((value) => value === 0)).toBe(true);
+    expect(reloadValues(1).every((value) => value === 0)).toBe(true);
+
+    const magazinePhase = evaluateWeaponReload(0.4, 'sidearm');
+    expect(magazinePhase.magazineOffsetY).toBeCloseTo(-0.29, 6);
+    expect(magazinePhase.slideOffsetZ).toBe(0);
+
+    const rackPhase = evaluateWeaponReload(0.8, 'sidearm');
+    expect(rackPhase.magazineOffsetY).toBe(0);
+    expect(rackPhase.slideOffsetZ).toBeCloseTo(0.085, 6);
+  });
+
+  it('has no discontinuity or exaggerated longitudinal magazine kick', () => {
+    let previous = reloadValues(0);
+    let maximumSlideTravel = 0;
+    for (let index = 1; index <= 2000; index += 1) {
+      const pose = evaluateWeaponReload(index / 2000, 'sidearm');
+      const current = reloadValues(index / 2000);
+      current.forEach((value, valueIndex) => {
+        expect(Number.isFinite(value)).toBe(true);
+        expect(Math.abs(value - (previous[valueIndex] ?? 0))).toBeLessThan(0.006);
+      });
+      expect(pose.magazineOffsetZ).toBe(0);
+      maximumSlideTravel = Math.max(maximumSlideTravel, pose.slideOffsetZ);
+      previous = current;
+    }
+    expect(maximumSlideTravel).toBeLessThanOrEqual(0.085);
+  });
+
+  it('keeps the established long-gun mechanism trajectory unchanged', () => {
+    const generic = evaluateReload(0.49);
+    const rifle = evaluateWeaponReload(0.49, 'battle-rifle');
+    expect(rifle.action).toEqual(generic);
+    expect(rifle.magazineOffsetY).toBeCloseTo(-generic.part * 0.38, 8);
+    expect(rifle.slideOffsetZ).toBe(0);
   });
 });
 

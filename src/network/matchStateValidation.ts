@@ -123,12 +123,29 @@ const isBotMemory = (value: unknown): boolean => {
       || isVec3(value.radarContactPosition)
     )
     && (value.radarContactAt === undefined || isFiniteNumber(value.radarContactAt));
+  const validOptionalNavigationMemory = (() => {
+    if (
+      value.navigationRoute === undefined
+      && value.navigationCursor === undefined
+      && value.navigationGoalIndex === undefined
+    ) return true;
+    if (!Array.isArray(value.navigationRoute) || value.navigationRoute.length > 128) return false;
+    if (!value.navigationRoute.every((entry) => isSafeNonNegativeInteger(entry) && entry < 512)) return false;
+    if (!isSafeNonNegativeInteger(value.navigationCursor)) return false;
+    if (
+      (value.navigationRoute.length === 0 && value.navigationCursor !== 0)
+      || (value.navigationRoute.length > 0 && value.navigationCursor >= value.navigationRoute.length)
+    ) return false;
+    return value.navigationGoalIndex === null
+      || (isSafeNonNegativeInteger(value.navigationGoalIndex) && value.navigationGoalIndex < 512);
+  })();
   return isEnumValue(DIFFICULTIES, value.difficulty)
     && isNonNegativeNumber(value.decisionTimer)
     && isNullableIdentifier(value.targetId)
     && (value.lastSeenPosition === null || isVec3(value.lastSeenPosition))
     && isFiniteNumber(value.lastSeenAt)
     && validOptionalRadarMemory
+    && validOptionalNavigationMemory
     && isSafeNonNegativeInteger(value.waypointIndex)
     && isNonNegativeNumber(value.reactionTimer)
     && isVec3(value.aimError)
@@ -198,7 +215,7 @@ const isMatchConfig = (value: unknown): boolean => {
     && isSafeNonNegativeInteger(value.timeLimitSeconds) && value.timeLimitSeconds > 0 && value.timeLimitSeconds <= 86_400
     && typeof value.botFill === 'boolean'
     && typeof value.playerName === 'string' && value.playerName.length > 0 && value.playerName.length <= 64
-    && value.mapId === 'crater-ridge';
+    && (value.mapId === 'crater-ridge' || value.mapId === 'umbra-station');
 };
 
 const isProjectile = (value: unknown): boolean => {

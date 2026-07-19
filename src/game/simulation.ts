@@ -289,7 +289,7 @@ export class GameSimulation {
       ],
       tower: {
         center: cloneVec3(this.map.towerCenter),
-        radius: 7,
+        radius: this.map.towerZone.radius,
         controllingTeam: 'neutral',
         turretOwnerId: null,
         turretYaw: 0,
@@ -721,7 +721,7 @@ export class GameSimulation {
 
   private tryLaunchFromJumpPad(player: PlayerState): boolean {
     const padReadyAt = this.jumpPadReadyAt.get(player.id) ?? 0;
-    if (!player.grounded || !isJumpPad(player.position) || this.state.elapsed < padReadyAt) return false;
+    if (!player.grounded || !isJumpPad(player.position, this.map) || this.state.elapsed < padReadyAt) return false;
 
     const towerDelta = subtract(this.state.tower.center, player.position);
     const towerDistance = Math.hypot(towerDelta.x, towerDelta.z);
@@ -1745,7 +1745,9 @@ export class GameSimulation {
   private updateTower(dt: number): void {
     if (this.state.config.mode !== 'towah-of-powah') return;
     const occupants = Object.values(this.state.players).filter(
-      (player) => player.alive && player.position.y >= 5.15 && distanceSquared(player.position, this.state.tower.center) <= this.state.tower.radius ** 2,
+      (player) => player.alive
+        && player.position.y >= this.map.towerZone.controlMinY
+        && distanceSquared(player.position, this.state.tower.center) <= this.state.tower.radius ** 2,
     );
     const teams = new Set(occupants.map((player) => player.team));
     if (teams.size === 1) {
@@ -2009,6 +2011,6 @@ export const createDefaultConfig = (overrides: Partial<MatchConfig> = {}): Match
     timeLimitSeconds: overrides.timeLimitSeconds ?? recommendedTimeLimit(mode, format),
     botFill: overrides.botFill ?? true,
     playerName: overrides.playerName ?? 'Astronauta',
-    mapId: 'crater-ridge',
+    mapId: overrides.mapId ?? 'crater-ridge',
   };
 };

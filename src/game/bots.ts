@@ -19,6 +19,7 @@ import type {
   Difficulty,
   MapDefinition,
   MatchState,
+  NavigationTraversal,
   PickupState,
   PlayerInput,
   PlayerState,
@@ -27,7 +28,7 @@ import type {
   WeaponId,
   WeaponState,
 } from './types';
-import { JUMP_PAD_ZONES, TOWER_TURRET_LAYOUT } from './map';
+import { TOWER_TURRET_LAYOUT } from './map';
 import { WEAPONS } from './weapons';
 
 export type LineOfSightTest = (from: Vec3, to: Vec3) => boolean;
@@ -129,9 +130,8 @@ const MOTION_RADAR_RADIUS = 25;
 const MOTION_RADAR_THRESHOLD = 0.55;
 const MOTION_RADAR_SHOT_REVEAL_SECONDS = 0.8;
 const MOTION_RADAR_ELEVATION_THRESHOLD = 2.4;
-const TOWER_DECK_MIN_Y = 5.15;
-const TOWER_PATROL_RADIUS = 5.45;
 const TOWER_PATROL_STEP_SECONDS = 2.4;
+const DIRECT_NAVIGATION_HEIGHT = 0.55;
 
 const WEAPON_PICKUP_RATING: Readonly<Record<WeaponId, number>> = {
   'pulse-rifle': 2.5,
@@ -476,8 +476,8 @@ const juggernautPlan = (state: MatchState, player: PlayerState): ObjectivePlan =
   return { goal: juggernaut.position, urgent: true };
 };
 
-const isOnTowerDeck = (state: MatchState, player: PlayerState): boolean =>
-  player.position.y >= TOWER_DECK_MIN_Y &&
+const isOnTowerDeck = (state: MatchState, player: PlayerState, map: MapDefinition): boolean =>
+  player.position.y >= map.towerZone.controlMinY &&
   horizontalDistance(player.position, state.tower.center) <= state.tower.radius + 0.75;
 
 /**
@@ -503,30 +503,31 @@ export const botTowerCommitment = (state: MatchState, player: PlayerState): numb
   return clamp(commitment, 0.28, 1);
 };
 
-const nearestTowerPad = (player: PlayerState) => {
+const nearestTowerPad = (player: PlayerState, map: MapDefinition) => {
   const preferredSide = player.position.x < -0.5
     ? -1
     : player.position.x > 0.5
       ? 1
       : hashString(player.id) % 2 === 0 ? -1 : 1;
-  return JUMP_PAD_ZONES.find((pad) => Math.sign(pad.center.x) === preferredSide) ?? JUMP_PAD_ZONES[0]!;
+  return map.jumpPads.find((pad) => Math.sign(pad.center.x) === preferredSide) ?? map.jumpPads[0] ?? null;
 };
 
-const towahPlan = (state: MatchState, player: PlayerState): ObjectivePlan => {
+const towahPlan = (state: MatchState, player: PlayerState, map: MapDefinition): ObjectivePlan => {
   player.bot!.objective = 'tower';
   const commitment = botTowerCommitment(state, player);
   const teamOwnsTower = state.tower.controllingTeam === player.team;
   const urgent = commitment >= 0.64;
-  const pad = nearestTowerPad(player);
+  const pad = nearestTowerPad(player, map);
 
-  if (!isOnTowerDeck(state, player)) {
+  if (!isOnTowerDeck(state, player, map)) {
+    if (!pad) return { goal: state.tower.center, urgent: true };
     // Once a launch has begun, keep steering toward the deck instead of asking
     // the airborne bot to turn back toward the pad it just left.
     if (player.position.y > 1.8 && !player.grounded) {
       const landingSide = Math.sign(pad.center.x);
       return {
         goal: {
-          x: state.tower.center.x + landingSide * TOWER_PATROL_RADIUS,
+          x: state.tower.center.x + landingSide * map.towerZone.patrolRadius,
           y: state.tower.center.y,
           z: state.tower.center.z,
         },
@@ -549,9 +550,9 @@ const towahPlan = (state: MatchState, player: PlayerState): ObjectivePlan => {
   const angle = (slot + direction * phase) * Math.PI / 4;
   return {
     goal: {
-      x: state.tower.center.x + Math.cos(angle) * TOWER_PATROL_RADIUS,
+      x: state.tower.center.x + Math.cos(angle) * map.towerZone.patrolRadius,
       y: state.tower.center.y,
-      z: state.tower.center.z + Math.sin(angle) * TOWER_PATROL_RADIUS,
+      z: state.tower.center.z + Math.sin(angle) * map.towerZone.patrolRadius,
     },
     urgent,
   };
@@ -560,7 +561,7 @@ const towahPlan = (state: MatchState, player: PlayerState): ObjectivePlan => {
 const objectivePlan = (state: MatchState, player: PlayerState, map: MapDefinition): ObjectivePlan => {
   if (state.config.mode === 'capture-the-flag') return ctfPlan(state, player, map);
   if (state.config.mode === 'juggernaut') return juggernautPlan(state, player);
-  if (state.config.mode === 'towah-of-powah') return towahPlan(state, player);
+  if (state.config.mode === 'towah-of-powah') return towahPlan(state, player, map);
 
   const pickup = nearestAvailablePickup(state, player);
   if (pickup && horizontalDistance(player.position, pickup.position) <= 30) {
@@ -606,17 +607,198 @@ const pickupPlanHasStalled = (
   return true;
 };
 
+interface NavigationSelection {
+  target: Vec3;
+  traversal: NavigationTraversal;
+}
+
+interface NavigationEdge {
+  to: number;
+  traversal: NavigationTraversal;
+  cost: number;
+}
+
+const navigationAdjacency = (map: MapDefinition): NavigationEdge[][] => {
+  const adjacency = Array.from({ length: map.waypoints.length }, () => [] as NavigationEdge[]);
+  for (const link of map.waypointLinks ?? []) {
+    const from = map.waypoints[link.from];
+    const to = map.waypoints[link.to];
+    if (!from || !to || link.from === link.to) continue;
+    const cost = distance(from, to) + (link.traversal === 'launch' ? 1.5 : 0);
+    adjacency[link.from]!.push({ to: link.to, traversal: link.traversal, cost });
+    if (link.bidirectional) {
+      adjacency[link.to]!.push({ to: link.from, traversal: link.traversal, cost });
+    }
+  }
+  return adjacency;
+};
+
+const shortestNavigationRoute = (
+  map: MapDefinition,
+  adjacency: NavigationEdge[][],
+  start: number,
+  destination: number,
+): number[] => {
+  const nodeCount = map.waypoints.length;
+  const costs = Array.from({ length: nodeCount }, () => Number.POSITIVE_INFINITY);
+  const previous = Array.from({ length: nodeCount }, () => -1);
+  const visited = new Set<number>();
+  costs[start] = 0;
+
+  while (visited.size < nodeCount) {
+    let current = -1;
+    let currentCost = Number.POSITIVE_INFINITY;
+    for (let index = 0; index < nodeCount; index += 1) {
+      if (!visited.has(index) && costs[index]! < currentCost) {
+        current = index;
+        currentCost = costs[index]!;
+      }
+    }
+    if (current < 0 || current === destination) break;
+    visited.add(current);
+    for (const edge of adjacency[current] ?? []) {
+      const candidateCost = currentCost + edge.cost;
+      if (candidateCost >= costs[edge.to]!) continue;
+      costs[edge.to] = candidateCost;
+      previous[edge.to] = current;
+    }
+  }
+
+  if (start !== destination && previous[destination]! < 0) return [];
+  const route = [destination];
+  while (route[0] !== start) {
+    const parent = previous[route[0]!]!;
+    if (parent < 0) return [];
+    route.unshift(parent);
+  }
+  return route;
+};
+
+const closestGraphWaypoint = (
+  player: PlayerState,
+  map: MapDefinition,
+  hasLineOfSight: LineOfSightTest,
+): number => {
+  const eye = eyePosition(player);
+  let selected = -1;
+  let selectedScore = Number.POSITIVE_INFINITY;
+  for (let index = 0; index < map.waypoints.length; index += 1) {
+    const waypoint = map.waypoints[index];
+    if (!waypoint || Math.abs(waypoint.y - player.position.y) > 1.25) continue;
+    const approach = horizontalDistance(player.position, waypoint);
+    if (approach > 2.2 && !hasLineOfSight(eye, raisedPoint(waypoint))) continue;
+    const score = approach + Math.abs(waypoint.y - player.position.y) * 3;
+    if (score < selectedScore) {
+      selected = index;
+      selectedScore = score;
+    }
+  }
+  return selected;
+};
+
+const traversalBetween = (
+  map: MapDefinition,
+  from: number,
+  to: number,
+): NavigationTraversal => {
+  for (const link of map.waypointLinks ?? []) {
+    if (link.from === from && link.to === to) return link.traversal;
+    if (link.bidirectional && link.from === to && link.to === from) return link.traversal;
+  }
+  return 'walk';
+};
+
+const selectGraphWaypoint = (
+  player: PlayerState,
+  memory: BotMemory,
+  goal: Vec3,
+  map: MapDefinition,
+  hasLineOfSight: LineOfSightTest,
+): NavigationSelection | null => {
+  if (!map.waypointLinks?.length || map.waypoints.length === 0) return null;
+  const start = closestGraphWaypoint(player, map, hasLineOfSight);
+  if (start < 0) return null;
+
+  let destination = 0;
+  let destinationScore = Number.POSITIVE_INFINITY;
+  for (let index = 0; index < map.waypoints.length; index += 1) {
+    const waypoint = map.waypoints[index]!;
+    const score = horizontalDistance(waypoint, goal) + Math.abs(waypoint.y - goal.y) * 4;
+    if (score < destinationScore) {
+      destination = index;
+      destinationScore = score;
+    }
+  }
+
+  memory.navigationRoute ??= [];
+  memory.navigationCursor ??= 0;
+  memory.navigationGoalIndex ??= null;
+  const currentRouteNode = memory.navigationRoute[memory.navigationCursor];
+  const routeIsStale = memory.navigationGoalIndex !== destination
+    || currentRouteNode === undefined
+    || !map.waypoints[currentRouteNode]
+    || (
+      horizontalDistance(player.position, map.waypoints[currentRouteNode]!) > 18
+      && !memory.navigationRoute.slice(Math.max(0, memory.navigationCursor - 1)).includes(start)
+    );
+  if (routeIsStale) {
+    memory.navigationRoute = shortestNavigationRoute(map, navigationAdjacency(map), start, destination);
+    memory.navigationGoalIndex = destination;
+    memory.navigationCursor = memory.navigationRoute[0] === start
+      && horizontalDistance(player.position, map.waypoints[start]!) <= 2.2
+      && Math.abs(player.position.y - map.waypoints[start]!.y) <= 1.25
+      ? Math.min(1, Math.max(0, memory.navigationRoute.length - 1))
+      : 0;
+  }
+  if (memory.navigationRoute.length === 0) return null;
+
+  while (memory.navigationCursor < memory.navigationRoute.length - 1) {
+    const nodeIndex = memory.navigationRoute[memory.navigationCursor]!;
+    const waypoint = map.waypoints[nodeIndex]!;
+    if (
+      horizontalDistance(player.position, waypoint) > 1.65
+      || Math.abs(player.position.y - waypoint.y) > 1.25
+    ) break;
+    memory.navigationCursor += 1;
+  }
+
+  const nodeIndex = memory.navigationRoute[memory.navigationCursor]!;
+  const previousIndex = memory.navigationCursor > 0
+    ? memory.navigationRoute[memory.navigationCursor - 1]!
+    : start;
+  const node = map.waypoints[nodeIndex]!;
+  memory.waypointIndex = nodeIndex;
+  if (
+    nodeIndex === destination
+    && horizontalDistance(player.position, node) <= 2.2
+    && Math.abs(player.position.y - goal.y) <= DIRECT_NAVIGATION_HEIGHT
+    && hasLineOfSight(eyePosition(player), raisedPoint(goal))
+  ) {
+    return { target: goal, traversal: 'walk' };
+  }
+  return { target: node, traversal: traversalBetween(map, previousIndex, nodeIndex) };
+};
+
 const selectWaypoint = (
   player: PlayerState,
   memory: BotMemory,
   goal: Vec3,
   map: MapDefinition,
   hasLineOfSight: LineOfSightTest,
-): Vec3 => {
-  if (horizontalDistance(player.position, goal) <= 2.2 && Math.abs(player.position.y - goal.y) <= 1.2) return goal;
+): NavigationSelection => {
+  if (
+    horizontalDistance(player.position, goal) <= 2.2
+    && Math.abs(player.position.y - goal.y) <= DIRECT_NAVIGATION_HEIGHT
+  ) return { target: goal, traversal: 'walk' };
   const from = eyePosition(player);
   const directVerticalDifference = Math.abs(goal.y - player.position.y);
-  if (directVerticalDifference < 1.8 && hasLineOfSight(from, raisedPoint(goal))) return goal;
+  if (
+    directVerticalDifference <= DIRECT_NAVIGATION_HEIGHT
+    && hasLineOfSight(from, raisedPoint(goal))
+  ) return { target: goal, traversal: 'walk' };
+
+  const graphSelection = selectGraphWaypoint(player, memory, goal, map, hasLineOfSight);
+  if (graphSelection) return graphSelection;
 
   let bestIndex = -1;
   let bestScore = Number.POSITIVE_INFINITY;
@@ -635,9 +817,9 @@ const selectWaypoint = (
     }
   }
 
-  if (bestIndex < 0) return goal;
+  if (bestIndex < 0) return { target: goal, traversal: 'walk' };
   memory.waypointIndex = bestIndex;
-  return map.waypoints[bestIndex] ?? goal;
+  return { target: map.waypoints[bestIndex] ?? goal, traversal: 'walk' };
 };
 
 const weaponUsable = (weapon: WeaponState): boolean => weapon.magazine > 0 || weapon.reserve > 0;
@@ -843,6 +1025,9 @@ export const createBotMemory = (difficulty: Difficulty): BotMemory => ({
   radarContactPosition: null,
   radarContactAt: -1_000_000,
   waypointIndex: 0,
+  navigationRoute: [],
+  navigationCursor: 0,
+  navigationGoalIndex: null,
   reactionTimer: 0,
   aimError: vec3(0, 0, 1),
   preferredRange: WEAPON_RANGE['pulse-rifle'].ideal,
@@ -908,6 +1093,9 @@ export const updateBotInputs = (
         memory.unstickTimer = 1.1;
         memory.aimError.z *= -1;
         memory.waypointIndex = (memory.waypointIndex + 3) % Math.max(1, map.waypoints.length);
+        memory.navigationRoute = [];
+        memory.navigationCursor = 0;
+        memory.navigationGoalIndex = null;
       }
       memory.decisionTimer = randomRange(state, profile.decisionInterval * 0.85, profile.decisionInterval * 1.15);
       memory.aimError.x = randomRange(state, -profile.aimError, profile.aimError);
@@ -941,7 +1129,8 @@ export const updateBotInputs = (
       : awarenessGoal ?? plan.goal;
     const fallbackWaypoint = map.waypoints[memory.waypointIndex % Math.max(1, map.waypoints.length)] ?? player.position;
     const goal = strategicGoal ?? fallbackWaypoint;
-    const navigationTarget = selectWaypoint(player, memory, goal, map, hasLineOfSight);
+    const navigation = selectWaypoint(player, memory, goal, map, hasLineOfSight);
+    const navigationTarget = navigation.target;
     let navigationDirection = normalize(subtract(navigationTarget, player.position));
 
     if (!strategicGoal && horizontalDistance(player.position, fallbackWaypoint) < 2.2 && map.waypoints.length > 0) {
@@ -1006,7 +1195,7 @@ export const updateBotInputs = (
     input.moveZ = localMovement.moveZ * combatMovementScale;
     input.crouch = state.config.mode === 'towah-of-powah' &&
       player.grounded &&
-      isOnTowerDeck(state, player) &&
+      isOnTowerDeck(state, player, map) &&
       state.tower.controllingTeam === player.team &&
       visibleTarget === null &&
       player.health <= 45;
@@ -1106,7 +1295,13 @@ export const updateBotInputs = (
     if (decisionDue && player.grounded) {
       const needsVerticalMovement = navigationTarget.y > player.position.y + 0.65 &&
         horizontalDistance(player.position, navigationTarget) < 8;
-      input.jump = memory.unstickTimer > 0 || needsVerticalMovement || random01(state) < profile.jumpChance;
+      input.jump = navigation.traversal === 'drop'
+        ? false
+        : memory.unstickTimer > 0
+          || navigation.traversal === 'jump'
+          || navigation.traversal === 'launch'
+          || needsVerticalMovement
+          || random01(state) < profile.jumpChance;
     }
 
     player.input = input;

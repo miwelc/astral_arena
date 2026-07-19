@@ -1,3 +1,5 @@
+import type { WeaponId } from '../game/types';
+
 /**
  * Pure, frame-rate independent curves shared by first- and third-person
  * animation. Every evaluator accepts normalized action progress and returns
@@ -14,6 +16,20 @@ export interface ActionPoseWeights {
   part: number;
   /** Releases/repositions the support hand while the action is active. */
   hand: number;
+}
+
+/**
+ * Root-space mechanism offsets for a reload. Keeping these values in weapon
+ * space is important for imported models: their authored node transforms can
+ * otherwise rotate and amplify a small magazine movement into a large jump.
+ */
+export interface WeaponReloadPose {
+  action: ActionPoseWeights;
+  magazineOffsetX: number;
+  magazineOffsetY: number;
+  magazineOffsetZ: number;
+  magazineRoll: number;
+  slideOffsetZ: number;
 }
 
 /** Direction-aware locomotion values shared by the character and viewmodel. */
@@ -102,6 +118,25 @@ export const trianglePulse = (progress: number, start: number, peak: number, end
   if (value === peak) return 1;
   if (value < peak) return smootherstep01((value - start) / (peak - start));
   return 1 - smootherstep01((value - peak) / (end - peak));
+};
+
+/** Smooth attack, optional hold, and smooth release with stationary joins. */
+export const smoothWindow = (
+  progress: number,
+  enterStart: number,
+  enterEnd: number,
+  exitStart: number,
+  exitEnd: number,
+): number => {
+  if (
+    ![enterStart, enterEnd, exitStart, exitEnd].every(Number.isFinite)
+    || !(enterStart < enterEnd && enterEnd <= exitStart && exitStart < exitEnd)
+  ) return 0;
+  const value = saturate(progress);
+  if (value <= enterStart || value >= exitEnd) return 0;
+  if (value < enterEnd) return smootherstep01((value - enterStart) / (enterEnd - enterStart));
+  if (value <= exitStart) return 1;
+  return 1 - smootherstep01((value - exitStart) / (exitEnd - exitStart));
 };
 
 /**
@@ -256,6 +291,50 @@ export const evaluateReload = (progress: number): ActionPoseWeights => ({
   part: trianglePulse(progress, 0.2, 0.49, 0.8),
   hand: trianglePulse(progress, 0.09, 0.3, 0.89),
 });
+
+/**
+ * A pistol reload is deliberately staged instead of reusing the long-gun
+ * pulse. The weapon settles first, the magazine clears and seats, then the
+ * slide is racked before the whole pose recovers. All joins use quintic curves
+ * so neither the weapon nor a mechanism part can snap between phases.
+ */
+export const evaluateWeaponReload = (
+  progress: number,
+  weaponId: WeaponId | null,
+): WeaponReloadPose => {
+  if (weaponId !== 'sidearm') {
+    const action = evaluateReload(progress);
+    return {
+      action,
+      magazineOffsetX: action.part > 0 ? -action.part * 0.06 : 0,
+      magazineOffsetY: action.part > 0 ? -action.part * 0.38 : 0,
+      magazineOffsetZ: 0,
+      magazineRoll: action.part * 0.18,
+      slideOffsetZ: 0,
+    };
+  }
+
+  const magazineDrop = smoothWindow(progress, 0.14, 0.34, 0.47, 0.68);
+  const magazineSweep = trianglePulse(progress, 0.2, 0.43, 0.67);
+  const slideRack = smoothWindow(progress, 0.7, 0.79, 0.81, 0.92);
+  const action: ActionPoseWeights = {
+    lower: smoothWindow(progress, 0, 0.2, 0.82, 1),
+    twist: smoothWindow(progress, 0.04, 0.24, 0.8, 0.97),
+    part: magazineDrop,
+    hand: smoothWindow(progress, 0.08, 0.27, 0.76, 0.95),
+  };
+
+  return {
+    action,
+    // The magazine follows the grip axis. In particular, it never receives a
+    // positive Z kick toward the camera, which was the conspicuous old jump.
+    magazineOffsetX: magazineSweep > 0 ? -magazineSweep * 0.035 : 0,
+    magazineOffsetY: magazineDrop > 0 ? -magazineDrop * 0.29 : 0,
+    magazineOffsetZ: 0,
+    magazineRoll: magazineSweep * 0.1,
+    slideOffsetZ: slideRack * 0.085,
+  };
+};
 
 /** Fast down/up weapon swap; `part` peaks while the weapon is concealed. */
 export const evaluateSwap = (progress: number): ActionPoseWeights => ({

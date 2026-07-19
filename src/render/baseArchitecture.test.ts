@@ -1,13 +1,19 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import * as THREE from 'three';
 
-import { CRATER_RIDGE } from '../game/map';
+import { CRATER_RIDGE, UMBRA_STATION } from '../game/map';
 import { createBaseArchitecture, type BaseArchitectureBundle } from './baseArchitecture';
 
 const bundles: BaseArchitectureBundle[] = [];
 
 const createBundle = (quality: 'low' | 'high' = 'high'): BaseArchitectureBundle => {
   const bundle = createBaseArchitecture(CRATER_RIDGE, { quality, seed: 712 });
+  bundles.push(bundle);
+  return bundle;
+};
+
+const createUmbraBundle = (): BaseArchitectureBundle => {
+  const bundle = createBaseArchitecture(UMBRA_STATION, { quality: 'high', seed: 909 });
   bundles.push(bundle);
   return bundle;
 };
@@ -87,5 +93,20 @@ describe('human base architecture', () => {
       if (object instanceof THREE.Mesh) renderables += 1;
     });
     expect(renderables).toBeLessThanOrEqual(60);
+  });
+
+  it('dispatches Umbra to its own orbital-station architecture without Crater-only dependencies', () => {
+    const { group } = createUmbraBundle();
+    const station = group.getObjectByName('umbra-station-architecture');
+
+    expect(station).toBeInstanceOf(THREE.Group);
+    expect(station?.userData.hasInteriors).toBe(true);
+    expect(station?.userData.function).toBe('orbital-communications-and-life-support-station');
+    expect(group.getObjectByName('aurora-operations-building')).toBeUndefined();
+    expect(findAuthoredMesh(group, 'umbra-aurora-main-airlock-header')).toBeInstanceOf(THREE.Mesh);
+    expect(findAuthoredMesh(group, 'umbra-nova-main-airlock-header')).toBeInstanceOf(THREE.Mesh);
+    expect(findAuthoredMesh(group, 'umbra-relay-primary-mast')).toBeInstanceOf(THREE.Mesh);
+    expect(findAuthoredMesh(group, 'umbra-relay-deep-space-dish')).toBeInstanceOf(THREE.Mesh);
+    expect(findAuthoredMesh(group, 'umbra-annex-power-bus-west')).toBeInstanceOf(THREE.Mesh);
   });
 });

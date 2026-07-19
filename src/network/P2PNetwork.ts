@@ -11,7 +11,10 @@
  * networks being able to establish a direct route (typically the same LAN).
  */
 
-export const P2P_PROTOCOL_VERSION = 2 as const;
+// Version 3 adds selectable authored maps and vertical bot navigation state.
+// Keeping this in the signalling/message envelope makes stale cached clients
+// fail before entering a lobby they cannot deserialize correctly.
+export const P2P_PROTOCOL_VERSION = 3 as const;
 export const MAX_HOST_PEERS = 7 as const;
 export const HOST_PEER_ID = 'host' as const;
 export const DEFAULT_DATA_CHANNEL_LABEL = 'astral-arena-reliable' as const;

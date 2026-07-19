@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
-import { pointInsideObstacle, raycastWorld } from './collision';
+import { canOccupyCapsule, hasLineOfSight, moveCapsule, pointInsideObstacle, raycastWorld } from './collision';
 import { directionFromAngles } from './math';
-import { CRATER_RIDGE, isJumpPad, JUMP_PAD_ZONES, jumpPadAt, TOWER_TURRET_LAYOUT } from './map';
-import type { AabbObstacle, Vec3 } from './types';
+import { CRATER_RIDGE, isJumpPad, JUMP_PAD_ZONES, jumpPadAt, MAPS, TOWER_TURRET_LAYOUT, UMBRA_STATION } from './map';
+import type { AabbObstacle, MapDefinition, Vec3 } from './types';
 
 const reflectedGeometry = (obstacle: AabbObstacle): string => [
   -obstacle.max.x,
@@ -193,5 +193,233 @@ describe('Crater Ridge competitive layout', () => {
         z: pad.center.z + pad.halfSize.z + 0.1,
       })).toBe(false);
     }
+  });
+});
+
+const isInMapBounds = (position: Vec3, map: MapDefinition): boolean =>
+  position.x >= map.bounds.minX
+  && position.x <= map.bounds.maxX
+  && position.z >= map.bounds.minZ
+  && position.z <= map.bounds.maxZ
+  && position.y >= map.bounds.floorY
+  && position.y < map.bounds.ceilingY;
+
+const hasNearbySupport = (position: Vec3, map: MapDefinition, hoverAllowance: number): boolean => {
+  if (position.y - map.bounds.floorY >= -0.01 && position.y - map.bounds.floorY <= hoverAllowance) return true;
+  return map.obstacles.some((obstacle) =>
+    obstacle.kind === 'platform'
+    && position.x >= obstacle.min.x - 0.02
+    && position.x <= obstacle.max.x + 0.02
+    && position.z >= obstacle.min.z - 0.02
+    && position.z <= obstacle.max.z + 0.02
+    && position.y >= obstacle.max.y - 0.02
+    && position.y - obstacle.max.y <= hoverAllowance,
+  );
+};
+
+const reachableWaypointIndexes = (map: MapDefinition, start: number): Set<number> => {
+  const visited = new Set([start]);
+  const pending = [start];
+  while (pending.length > 0) {
+    const current = pending.shift()!;
+    for (const link of map.waypointLinks ?? []) {
+      const targets = link.from === current
+        ? [link.to]
+        : link.bidirectional && link.to === current
+          ? [link.from]
+          : [];
+      for (const target of targets) {
+        if (visited.has(target)) continue;
+        visited.add(target);
+        pending.push(target);
+      }
+    }
+  }
+  return visited;
+};
+
+const simulateGroundTraversal = (
+  map: MapDefinition,
+  from: Vec3,
+  to: Vec3,
+): { reached: boolean; final: Vec3; hitWallTicks: number } => {
+  const dt = 1 / 120;
+  let player = {
+    position: { ...from },
+    velocity: { x: 0, y: -0.1, z: 0 },
+    radius: 0.48,
+    height: 1.8,
+    grounded: true,
+  };
+  let hitWallTicks = 0;
+  const directDistance = Math.hypot(to.x - from.x, to.z - from.z);
+  const tickLimit = Math.ceil((directDistance / 2.4 + 5) / dt);
+  for (let tick = 0; tick < tickLimit; tick += 1) {
+    const dx = to.x - player.position.x;
+    const dz = to.z - player.position.z;
+    const horizontal = Math.hypot(dx, dz);
+    if (horizontal <= 0.58 && Math.abs(to.y - player.position.y) <= 0.48) {
+      return { reached: true, final: player.position, hitWallTicks };
+    }
+    const speed = horizontal > 0.08 ? 3.2 : 0;
+    const moved = moveCapsule({
+      ...player,
+      velocity: {
+        x: horizontal > 0.08 ? dx / horizontal * speed : 0,
+        y: player.grounded ? -0.1 : player.velocity.y - 24 * dt,
+        z: horizontal > 0.08 ? dz / horizontal * speed : 0,
+      },
+    }, map, dt);
+    if (moved.hitWall) hitWallTicks += 1;
+    player = { ...player, ...moved };
+  }
+  return { reached: false, final: player.position, hitWallTicks };
+};
+
+describe('Umbra Station vertical competitive layout', () => {
+  it('is a registered compact three-level arena with coherent named structures', () => {
+    expect(MAPS['umbra-station']).toBe(UMBRA_STATION);
+    expect(UMBRA_STATION.name).toBe('Estación Umbra');
+    expect(UMBRA_STATION.bounds.maxX - UMBRA_STATION.bounds.minX).toBeLessThan(80);
+    expect(UMBRA_STATION.bounds.maxZ - UMBRA_STATION.bounds.minZ).toBeLessThan(70);
+    const ids = UMBRA_STATION.obstacles.map((obstacle) => obstacle.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids).toEqual(expect.arrayContaining([
+      'tower-deck',
+      'umbra-west-base-floor',
+      'umbra-east-base-floor',
+      'umbra-north-relay-mid-deck',
+      'umbra-north-relay-roof',
+      'umbra-south-annex-floor',
+      'umbra-south-annex-mid-deck',
+      'umbra-north-skybridge',
+      'umbra-south-skybridge',
+    ]));
+    const playableLevels = new Set(
+      UMBRA_STATION.obstacles
+        .filter((obstacle) => obstacle.kind === 'platform' && obstacle.max.y > 0.5)
+        .map((obstacle) => Math.round(obstacle.max.y)),
+    );
+    expect(playableLevels.size).toBeGreaterThanOrEqual(5);
+  });
+
+  it('keeps all spawns, objectives, pickups and navigation nodes supported and outside solids', () => {
+    const points = [
+      ...UMBRA_STATION.spawns.map((spawn) => ({ label: `spawn-${spawn.team}`, position: spawn.position, hover: 0.12 })),
+      ...UMBRA_STATION.pickups.map((pickup) => ({ label: pickup.id, position: pickup.position, hover: 0.48 })),
+      ...UMBRA_STATION.waypoints.map((position, index) => ({ label: `waypoint-${index}`, position, hover: 0.12 })),
+      ...Object.entries(UMBRA_STATION.flagBases).map(([team, position]) => ({ label: `flag-${team}`, position, hover: 0.48 })),
+    ];
+    for (const { label, position, hover } of points) {
+      expect(isInMapBounds(position, UMBRA_STATION), `${label} bounds`).toBe(true);
+      expect(pointInsideObstacle(position, UMBRA_STATION), `${label} solid`).toBe(false);
+      expect(hasNearbySupport(position, UMBRA_STATION, hover), `${label} support ${JSON.stringify(position)}`).toBe(true);
+      expect(canOccupyCapsule(position, 0.48, 1.8, UMBRA_STATION), `${label} capsule ${JSON.stringify(position)}`).toBe(true);
+    }
+  });
+
+  it('uses a valid directed graph that connects every authored floor and preserves launch/drop semantics', () => {
+    expect(UMBRA_STATION.waypointLinks?.length).toBeGreaterThan(UMBRA_STATION.waypoints.length);
+    for (const link of UMBRA_STATION.waypointLinks ?? []) {
+      expect(Number.isInteger(link.from)).toBe(true);
+      expect(Number.isInteger(link.to)).toBe(true);
+      expect(UMBRA_STATION.waypoints[link.from], `link from ${link.from}`).toBeDefined();
+      expect(UMBRA_STATION.waypoints[link.to], `link to ${link.to}`).toBeDefined();
+      expect(['walk', 'jump', 'drop', 'launch']).toContain(link.traversal);
+    }
+    expect(reachableWaypointIndexes(UMBRA_STATION, 0).size).toBe(UMBRA_STATION.waypoints.length);
+    const launches = UMBRA_STATION.waypointLinks?.filter((link) => link.traversal === 'launch') ?? [];
+    const drops = UMBRA_STATION.waypointLinks?.filter((link) => link.traversal === 'drop') ?? [];
+    expect(launches).toHaveLength(UMBRA_STATION.jumpPads.length);
+    expect(drops).toHaveLength(UMBRA_STATION.jumpPads.length);
+    expect(launches.every((link) => !link.bidirectional)).toBe(true);
+    expect(drops.every((link) => !link.bidirectional)).toBe(true);
+  });
+
+  it('makes every authored walk and drop edge physically traversable by a player capsule', () => {
+    const failures: string[] = [];
+    for (const link of UMBRA_STATION.waypointLinks ?? []) {
+      if (link.traversal !== 'walk' && link.traversal !== 'drop') continue;
+      const directions = link.bidirectional
+        ? [[link.from, link.to], [link.to, link.from]] as const
+        : [[link.from, link.to]] as const;
+      for (const [fromIndex, toIndex] of directions) {
+        const from = UMBRA_STATION.waypoints[fromIndex]!;
+        const to = UMBRA_STATION.waypoints[toIndex]!;
+        const result = simulateGroundTraversal(UMBRA_STATION, from, to);
+        if (!result.reached) {
+          failures.push(
+            `${fromIndex}->${toIndex} (${link.traversal}) final=${JSON.stringify(result.final)} walls=${result.hitWallTicks}`,
+          );
+        }
+      }
+    }
+    expect(failures, failures.join('\n')).toEqual([]);
+  });
+
+  it('lets a standard movement capsule climb the exterior base stair onto the upper ring', () => {
+    let player = {
+      position: { x: -25.7, y: 0, z: -15 },
+      velocity: { x: 3, y: 0, z: 0 },
+      radius: 0.48,
+      height: 1.8,
+      grounded: true,
+    };
+    for (let tick = 0; tick < 175; tick += 1) {
+      const moved = moveCapsule(player, UMBRA_STATION, 1 / 60);
+      player = { ...player, ...moved, velocity: { ...moved.velocity, x: 3 } };
+    }
+
+    expect(player.position.x).toBeGreaterThan(-17.25);
+    expect(player.position.y).toBeCloseTo(2.95, 2);
+    expect(player.grounded).toBe(true);
+  });
+
+  it('offers two map-local grav lifts and never confuses them with Crater Ridge pads', () => {
+    expect(UMBRA_STATION.jumpPads).toHaveLength(2);
+    for (const pad of UMBRA_STATION.jumpPads) {
+      expect(isJumpPad(pad.center, UMBRA_STATION)).toBe(true);
+      expect(jumpPadAt(pad.center, UMBRA_STATION)?.id).toBe(pad.id);
+      expect(pad.launchVelocity.y).toBeGreaterThan(12);
+      expect(jumpPadAt(pad.center, CRATER_RIDGE)?.id).not.toBe(pad.id);
+    }
+  });
+
+  it('blocks the base-to-base sniper lane while retaining exposed diagonal bridge sightlines', () => {
+    const auroraEye = { ...UMBRA_STATION.flagBases.aurora, y: 1.55 };
+    const novaEye = { ...UMBRA_STATION.flagBases.nova, y: 1.55 };
+    expect(hasLineOfSight(auroraEye, novaEye, UMBRA_STATION)).toBe(false);
+    expect(hasLineOfSight(
+      { x: -22, y: 4.15, z: -11.6 },
+      { x: 22, y: 4.15, z: -11.6 },
+      UMBRA_STATION,
+    )).toBe(true);
+  });
+
+  it('screens the exposed north team starts from immediate cross-map spawn fire', () => {
+    const northStarts = (team: 'aurora' | 'nova') => UMBRA_STATION.spawns
+      .filter((spawn) => spawn.team === team && spawn.position.z <= -23)
+      .map((spawn) => ({ ...spawn.position, y: spawn.position.y + 1.55 }));
+    const aurora = northStarts('aurora');
+    const nova = northStarts('nova');
+    expect(aurora).toHaveLength(2);
+    expect(nova).toHaveLength(2);
+    for (const from of aurora) {
+      for (const to of nova) {
+        expect(hasLineOfSight(from, to, UMBRA_STATION), `${JSON.stringify(from)} -> ${JSON.stringify(to)}`).toBe(false);
+      }
+    }
+  });
+
+  it('aligns Towah capture, patrol and turret geometry with the raised central deck', () => {
+    const deck = UMBRA_STATION.obstacles.find((obstacle) => obstacle.id === 'tower-deck');
+    const cap = UMBRA_STATION.obstacles.find((obstacle) => obstacle.id === 'tower-cap');
+    expect(deck?.max.y).toBeGreaterThanOrEqual(UMBRA_STATION.towerZone.controlMinY);
+    expect(UMBRA_STATION.towerZone.controlMinY).toBeGreaterThan(deck?.min.y ?? 0);
+    expect(UMBRA_STATION.towerZone.patrolRadius).toBeLessThan(UMBRA_STATION.towerZone.radius);
+    expect(cap?.max.y).toBeCloseTo(
+      UMBRA_STATION.towerCenter.y + TOWER_TURRET_LAYOUT.platformTopOffset,
+      8,
+    );
   });
 });

@@ -20,7 +20,16 @@ import {
   recommendedTimeLimit,
   towerTurretFiringOrigin,
 } from '../game/simulation';
-import type { ClientMessage, GameMode, HostMessage, MatchConfig, MatchState, PlayerInput, Team } from '../game/types';
+import {
+  GAME_PROTOCOL_VERSION,
+  type ClientMessage,
+  type GameMode,
+  type HostMessage,
+  type MatchConfig,
+  type MatchState,
+  type PlayerInput,
+  type Team,
+} from '../game/types';
 import { WEAPONS } from '../game/weapons';
 import { InputController } from '../input/InputController';
 import { isValidMatchState } from '../network/matchStateValidation';
@@ -36,6 +45,7 @@ import { weaponReticle } from './weaponReticle';
 
 type WireMessage = ClientMessage | HostMessage;
 type SessionRole = 'local' | 'host' | 'guest';
+type MapId = MatchConfig['mapId'];
 
 const MODE_LABELS: Record<GameMode, string> = {
   deathmatch: 'Deathmatch',
@@ -51,6 +61,17 @@ const MODE_COPY: Record<GameMode, string> = {
   'capture-the-flag': 'Roba la bandera rival y regresa a base; la tuya debe estar a salvo para capturar.',
   juggernaut: 'Derriba al Coloso para heredar su armadura reforzada y puntuar mientras conservas el rol.',
   'towah-of-powah': 'Escopetas, sin escudos y una torreta letal: toma la cubierta superior de la torre.',
+};
+
+const MAP_PRESENTATION: Record<MapId, { code: string; description: string }> = {
+  'crater-ridge': {
+    code: 'CR',
+    description: 'Valle mineral · Torre central · Dos bases',
+  },
+  'umbra-station': {
+    code: 'UM',
+    description: 'Estación vertical · Pasarelas · Cuatro alas',
+  },
 };
 
 const TEAM_LABELS: Record<Team, string> = { aurora: 'Aurora', nova: 'Nova', neutral: 'Libre' };
@@ -145,6 +166,7 @@ export class AstralArenaApp {
 
   private renderMenu(): void {
     this.destroySession();
+    const selectedMapId = this.savedMapId();
     this.root.innerHTML = `
       <main class="menu-shell">
         <div class="menu-sky" aria-hidden="true">
@@ -154,7 +176,7 @@ export class AstralArenaApp {
           <div class="stars"></div>
         </div>
         <header class="brand-block">
-          <div class="brand-kicker"><span></span> SIMULACIÓN DE COMBATE / CR-07</div>
+          <div class="brand-kicker"><span></span> SIMULACIÓN DE COMBATE / <b id="brand-zone-code"></b>-07</div>
           <h1><span>ASTRAL</span> ARENA</h1>
           <p>Combate de arena. Astronautas. Conexión directa.</p>
         </header>
@@ -171,6 +193,11 @@ export class AstralArenaApp {
 
             <label class="field-label" for="player-name">INDICATIVO</label>
             <input id="player-name" class="text-input" maxlength="18" value="${escapeHtml(this.savedName())}" autocomplete="nickname" />
+
+            <label class="field-label" for="map-id">ZONA DE COMBATE</label>
+            <select id="map-id" class="select-input">
+              ${Object.values(MAPS).map((map) => `<option value="${map.id}"${map.id === selectedMapId ? ' selected' : ''}>${escapeHtml(map.name)}</option>`).join('')}
+            </select>
 
             <div class="field-label">FORMATO DEL MODO</div>
             <div id="mode-format" class="mode-format-card" aria-live="polite">
@@ -223,8 +250,8 @@ export class AstralArenaApp {
 
           <aside class="intel-panel">
             <div class="intel-card map-card">
-              <div class="map-orbit"><i></i><i></i><i></i><b>CR</b></div>
-              <div><span class="eyebrow">ZONA ACTIVA</span><h3>Cresta del Cráter</h3><p>Valle mineral · Torre central · Dos bases</p></div>
+              <div class="map-orbit"><i></i><i></i><i></i><b id="map-code"></b></div>
+              <div><span class="eyebrow">ZONA ACTIVA</span><h3 id="map-name"></h3><p id="map-description"></p></div>
             </div>
             <div class="intel-card feature-card">
               <span class="card-number">01</span><div><h3>Combate justo</h3><p>Sin clases ni ventajas. Dos armas, escudos, melee, granadas y pickups disputados.</p></div>
@@ -253,6 +280,7 @@ export class AstralArenaApp {
 
     const modeSelect = this.required<HTMLSelectElement>('#game-mode');
     const playerCountSelect = this.required<HTMLSelectElement>('#player-count');
+    const mapSelect = this.required<HTMLSelectElement>('#map-id');
     const updateModePresentation = (): void => {
       const mode = modeSelect.value as GameMode;
       const rules = rulesForMode(mode);
@@ -267,7 +295,18 @@ export class AstralArenaApp {
     };
     modeSelect.addEventListener('change', updateModePresentation);
     playerCountSelect.addEventListener('change', updateModePresentation);
+    const updateMapPresentation = (): void => {
+      const mapId = mapSelect.value as MapId;
+      const map = MAPS[mapId];
+      const presentation = MAP_PRESENTATION[mapId];
+      this.setText('#brand-zone-code', presentation.code);
+      this.setText('#map-code', presentation.code);
+      this.setText('#map-name', map.name);
+      this.setText('#map-description', presentation.description);
+    };
+    mapSelect.addEventListener('change', updateMapPresentation);
     updateModePresentation();
+    updateMapPresentation();
     this.required<HTMLButtonElement>('#local-play').addEventListener('click', () => this.startLocal());
     this.required<HTMLButtonElement>('#host-play').addEventListener('click', () => void this.startHostLobby());
     const joinPanel = this.required<HTMLElement>('#join-panel');
@@ -277,6 +316,10 @@ export class AstralArenaApp {
   }
 
   private startLocal(): void {
+    // `startGameView` performs asynchronous module/GLB preparation. Ignore a
+    // second activation while that first view is already starting so it
+    // cannot replace the simulation underneath a renderer for another map.
+    if (this.gameViewActive) return;
     this.audio.uiConfirm();
     const config = this.readConfig();
     this.role = 'local';
@@ -287,6 +330,7 @@ export class AstralArenaApp {
   }
 
   private async startHostLobby(): Promise<void> {
+    if (this.gameViewActive) return;
     this.audio.uiConfirm();
     const config = this.readConfig();
     this.role = 'host';
@@ -307,7 +351,7 @@ export class AstralArenaApp {
         <div class="lobby-backdrop"></div>
         <header class="lobby-header">
           <button id="lobby-back" class="icon-button" type="button">←</button>
-          <div><span class="eyebrow">SALA P2P / ANFITRIÓN</span><h1>${MODE_LABELS[state.config.mode]} <i>·</i> ${state.config.mode === 'deathmatch' ? `${state.config.playerCount} JUGADORES` : rulesForMode(state.config.mode).formatLabel}</h1></div>
+          <div><span class="eyebrow">SALA P2P / ANFITRIÓN · ${escapeHtml(MAPS[state.config.mapId].name)}</span><h1>${MODE_LABELS[state.config.mode]} <i>·</i> ${state.config.mode === 'deathmatch' ? `${state.config.playerCount} JUGADORES` : rulesForMode(state.config.mode).formatLabel}</h1></div>
           <span class="connection-badge"><i></i> DIRECTA</span>
         </header>
         <section class="lobby-grid">
@@ -381,6 +425,7 @@ export class AstralArenaApp {
   }
 
   private async connectAsGuest(): Promise<void> {
+    if (this.gameViewActive) return;
     const offer = this.root.querySelector<HTMLTextAreaElement>('#guest-offer')?.value.trim() ?? '';
     if (!offer) {
       this.showToast('Pega la oferta del anfitrión.');
@@ -429,7 +474,7 @@ export class AstralArenaApp {
       if (event.status === 'connected') {
         this.networkStatus = 'connected';
         if (this.role === 'guest') {
-          this.network?.sendToHost({ kind: 'hello', name: this.guestName, protocol: 2 });
+          this.network?.sendToHost({ kind: 'hello', name: this.guestName, protocol: GAME_PROTOCOL_VERSION });
           const status = this.root.querySelector<HTMLElement>('#guest-status');
           if (status) status.innerHTML = '<i></i> Canal abierto. Sincronizando arena…';
         } else {
@@ -461,13 +506,22 @@ export class AstralArenaApp {
       if (!this.simulation) return;
       if (message.kind === 'hello') {
         if (typeof message.name !== 'string') return;
+        if (message.protocol !== GAME_PROTOCOL_VERSION) {
+          this.network?.sendToPeer(peerId, { kind: 'error', message: 'La versión del juego no es compatible con esta sala.' });
+          return;
+        }
         this.remoteInputBuffer.delete(peerId);
         const player = this.simulation.addRemotePlayer(peerId, message.name);
         if (!player) {
           this.network?.sendToPeer(peerId, { kind: 'error', message: 'La arena está completa.' });
           return;
         }
-        this.network?.sendToPeer(peerId, { kind: 'welcome', playerId: player.id, config: this.simulation.state.config, protocol: 2 });
+        this.network?.sendToPeer(peerId, {
+          kind: 'welcome',
+          playerId: player.id,
+          config: this.simulation.state.config,
+          protocol: GAME_PROTOCOL_VERSION,
+        });
         this.network?.sendToPeer(peerId, this.createSnapshot());
         this.updateLobbyRoster();
       } else if (message.kind === 'input') {
@@ -480,6 +534,10 @@ export class AstralArenaApp {
 
     if (this.role === 'guest') {
       if (message.kind === 'welcome') {
+        if (message.protocol !== GAME_PROTOCOL_VERSION) {
+          this.showToast('La versión del anfitrión no es compatible.');
+          return;
+        }
         this.localPlayerId = message.playerId;
       } else if (message.kind === 'snapshot') {
         const receivedAt = performance.now();
@@ -509,6 +567,7 @@ export class AstralArenaApp {
   private async startGameView(state: MatchState): Promise<void> {
     if (this.gameViewActive) return;
     const viewGeneration = this.sessionGeneration;
+    const viewMatchId = state.matchId;
     this.gameViewActive = true;
     this.currentState = state;
     // Countdown events describe the match being entered (not stale history),
@@ -540,6 +599,13 @@ export class AstralArenaApp {
       return;
     }
     if (!this.gameViewActive || viewGeneration !== this.sessionGeneration) return;
+    if (this.currentState?.matchId !== viewMatchId) {
+      // A newer session superseded the async preparation without going
+      // through the usual teardown. Release the start guard so that session
+      // can build its own view instead of remaining permanently in limbo.
+      this.gameViewActive = false;
+      return;
+    }
     const [{ ArenaRenderer }, weaponAssets] = prepared;
     if (weaponAssets.failed.length > 0) {
       // Local files should succeed in normal operation. A procedural model is
@@ -1082,15 +1148,20 @@ export class AstralArenaApp {
     const name = this.root.querySelector<HTMLInputElement>('#player-name')?.value.trim() || 'Astronauta';
     const mode = (this.root.querySelector<HTMLSelectElement>('#game-mode')?.value ?? 'deathmatch') as GameMode;
     const difficulty = (this.root.querySelector<HTMLSelectElement>('#difficulty')?.value ?? 'veteran') as MatchConfig['difficulty'];
+    const mapId = (this.root.querySelector<HTMLSelectElement>('#map-id')?.value ?? 'crater-ridge') as MapId;
     const format = canonicalFormatForMode(mode);
     const requestedPlayerCount = Number(this.root.querySelector<HTMLSelectElement>('#player-count')?.value ?? 2);
-    try { localStorage.setItem('astral-player-name', name); } catch { /* Storage can be disabled. */ }
+    try {
+      localStorage.setItem('astral-player-name', name);
+      localStorage.setItem('astral-map-id', mapId);
+    } catch { /* Storage can be disabled. */ }
     return createDefaultConfig({
       playerName: name,
       mode,
       format,
       playerCount: mode === 'deathmatch' ? requestedPlayerCount : rulesForMode(mode).maxPlayers,
       difficulty,
+      mapId,
       scoreLimit: recommendedScoreLimit(mode, format),
       timeLimitSeconds: recommendedTimeLimit(mode, format),
     });
@@ -1098,6 +1169,15 @@ export class AstralArenaApp {
 
   private savedName(): string {
     try { return localStorage.getItem('astral-player-name') ?? 'Astronauta'; } catch { return 'Astronauta'; }
+  }
+
+  private savedMapId(): MapId {
+    try {
+      const stored = localStorage.getItem('astral-map-id');
+      return stored && Object.hasOwn(MAPS, stored) ? stored as MapId : 'umbra-station';
+    } catch {
+      return 'umbra-station';
+    }
   }
 
   private stunEnabled(): boolean {

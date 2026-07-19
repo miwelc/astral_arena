@@ -1,4 +1,7 @@
-import type { AabbObstacle, MapDefinition, Vec3 } from './types';
+import { createUmbraStation } from './maps/umbraStation';
+import type { AabbObstacle, JumpPadZone, MapDefinition, Vec3 } from './types';
+
+export type { JumpPadZone } from './types';
 
 const box = (
   id: string,
@@ -56,14 +59,6 @@ const COLORS = {
   terrain: 0x3f6860,
   terrainLight: 0x587a68,
 } as const;
-
-export interface JumpPadZone {
-  id: 'west-tower-lift' | 'east-tower-lift';
-  center: Vec3;
-  halfSize: { x: number; z: number };
-  /** Suggested launch velocity. Simulation owns the actual impulse. */
-  launchVelocity: Vec3;
-}
 
 /**
  * The old lifts used to relocate players directly onto the tower. They now
@@ -343,6 +338,7 @@ export const CRATER_RIDGE: MapDefinition = {
     point(-14, 0.05, 25), point(-6, 0.05, 26), point(0, 0.05, 26), point(0, 0.2, 32.2), point(6, 0.05, 26),
     point(14, 0.05, 25), point(18, 0.6, 30), point(30, 1.25, 29), point(34, 0.05, 35), point(43, 0.05, 25),
   ],
+  jumpPads: [...JUMP_PAD_ZONES],
   pickups: [
     { id: 'pickup-sniper', kind: 'weapon', weaponId: 'sniper', position: point(0, 6.38, -5.8), respawnSeconds: 50 },
     { id: 'pickup-rocket', kind: 'weapon', weaponId: 'rocket-launcher', position: point(0, 0.56, -33.3), respawnSeconds: 60 },
@@ -366,17 +362,22 @@ export const CRATER_RIDGE: MapDefinition = {
     nova: point(42.5, 0.72, 0),
   },
   towerCenter: point(0, TOWER_CENTER_Y, 0),
+  towerZone: { radius: 7, controlMinY: 5.15, patrolRadius: 5.45 },
 };
+
+export const UMBRA_STATION: MapDefinition = createUmbraStation(TOWER_TURRET_LAYOUT);
 
 export const MAPS: Record<MapDefinition['id'], MapDefinition> = {
   'crater-ridge': CRATER_RIDGE,
+  'umbra-station': UMBRA_STATION,
 };
 
-export const jumpPadAt = (position: Vec3): JumpPadZone | null =>
-  JUMP_PAD_ZONES.find((pad) =>
+export const jumpPadAt = (position: Vec3, map: MapDefinition = CRATER_RIDGE): JumpPadZone | null =>
+  map.jumpPads.find((pad) =>
     Math.abs(position.x - pad.center.x) <= pad.halfSize.x
     && Math.abs(position.z - pad.center.z) <= pad.halfSize.z
     && position.y < 1.8,
   ) ?? null;
 
-export const isJumpPad = (position: Vec3): boolean => jumpPadAt(position) !== null;
+export const isJumpPad = (position: Vec3, map: MapDefinition = CRATER_RIDGE): boolean =>
+  jumpPadAt(position, map) !== null;

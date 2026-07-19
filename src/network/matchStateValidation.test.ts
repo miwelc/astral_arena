@@ -58,6 +58,28 @@ describe('P2P MatchState validation', () => {
     expect(isValidMatchState(state)).toBe(true);
   });
 
+  it('accepts an Umbra Station snapshot with authored bot navigation memory', () => {
+    const simulation = new GameSimulation(
+      createDefaultConfig({ mode: 'capture-the-flag', mapId: 'umbra-station', botFill: true }),
+      [{ id: 'local-player', name: 'Lince' }],
+    );
+    simulation.state.phase = 'playing';
+    simulation.state.countdown = 0;
+    simulation.step(1 / 60);
+
+    expect(isValidMatchState(simulation.snapshot())).toBe(true);
+  });
+
+  it('keeps accepting legacy bot snapshots without authored navigation memory', () => {
+    const state = copy(makeState());
+    const memory = firstBotMemory(state) as Partial<BotMemory>;
+    delete memory.navigationRoute;
+    delete memory.navigationCursor;
+    delete memory.navigationGoalIndex;
+
+    expect(isValidMatchState(state)).toBe(true);
+  });
+
   it.each(modes)('keeps accepting authoritative %s snapshots during sustained play', (mode) => {
     const simulation = new GameSimulation(
       createDefaultConfig({ mode, format: 'squads', botFill: true }),
@@ -268,6 +290,17 @@ describe('P2P MatchState validation', () => {
     }],
     ['invalid bot radar contact time', (state: MatchState) => {
       firstBotMemory(state).radarContactAt = Number.NEGATIVE_INFINITY;
+    }],
+    ['invalid bot navigation node', (state: MatchState) => {
+      firstBotMemory(state).navigationRoute = [0, 512];
+    }],
+    ['bot navigation cursor past route', (state: MatchState) => {
+      const memory = firstBotMemory(state);
+      memory.navigationRoute = [0, 1];
+      memory.navigationCursor = memory.navigationRoute.length;
+    }],
+    ['incomplete bot navigation memory', (state: MatchState) => {
+      delete (firstBotMemory(state) as Partial<BotMemory>).navigationGoalIndex;
     }],
     ['duplicate bot pickup blacklist', (state: MatchState) => {
       firstBotMemory(state).pickupBlacklist = [

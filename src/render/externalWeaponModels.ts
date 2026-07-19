@@ -342,8 +342,20 @@ const installAnimationContract = (
       target.userData.sourceNodeName = target.name;
       used.add(target);
     }
+    // Imported nodes live below a normalization group that carries the
+    // source-to-game rotation and, often, a large scale factor. Animation
+    // offsets are authored in the weapon's normalized coordinate contract;
+    // leaving a part below that group both rotates and multiplies them (the
+    // sidearm magazine used to jump longitudinally for exactly this reason).
+    // Reparent while preserving its current transform so later offsets are
+    // applied directly in stable weapon-root space.
+    if (target.parent !== root) {
+      root.updateMatrixWorld(true);
+      root.attach(target);
+    }
     target.name = `weapon-part-${role}`;
     target.userData.animationRole = role;
+    target.userData.animationSpace = 'weapon-root';
   }
 };
 

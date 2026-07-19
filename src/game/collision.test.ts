@@ -18,12 +18,14 @@ const createMap = (obstacles: AabbObstacle[] = []): MapDefinition => ({
   obstacles,
   spawns: [],
   waypoints: [],
+  jumpPads: [],
   pickups: [],
   flagBases: {
     aurora: { x: -6, y: 0, z: 0 },
     nova: { x: 6, y: 0, z: 0 },
   },
   towerCenter: { x: 0, y: 0, z: 0 },
+  towerZone: { radius: 2, controlMinY: 0, patrolRadius: 1 },
 });
 
 const player = (

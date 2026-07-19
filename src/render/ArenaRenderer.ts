@@ -7,7 +7,7 @@ import { SMAAPass } from 'three/addons/postprocessing/SMAAPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 
-import { isJumpPad, JUMP_PAD_ZONES, TOWER_TURRET_LAYOUT } from '../game/map';
+import { isJumpPad, TOWER_TURRET_LAYOUT } from '../game/map';
 import { isTeamGameMode } from '../game/modeRules';
 import type {
   FlagState,
@@ -29,7 +29,7 @@ import {
   evaluateGrenade,
   evaluateLocomotionCycle,
   evaluateMelee,
-  evaluateReload,
+  evaluateWeaponReload,
   evaluateSwap,
   evaluateWeaponBob,
   normalizedTimer,
@@ -2020,13 +2020,13 @@ export class ArenaRenderer {
       }
     }
 
-    for (const jumpPad of JUMP_PAD_ZONES) {
+    for (const jumpPad of this.map.jumpPads) {
       const position: Vec3 = {
         x: jumpPad.center.x,
         y: this.map.bounds.floorY,
         z: jumpPad.center.z,
       };
-      if (!isJumpPad(position)) continue;
+      if (!isJumpPad(position, this.map)) continue;
       const launchDirection = new THREE.Vector3(
         this.map.towerCenter.x - position.x,
         0,
@@ -2629,7 +2629,7 @@ export class ArenaRenderer {
     if (activeWeapon && activeWeapon.reloadTimer > 0) {
       reloadProgress = normalizedTimer(activeWeapon.reloadTimer, WEAPONS[activeWeapon.id].reloadSeconds);
       actionKind = 'reload';
-      actionPose = evaluateReload(reloadProgress);
+      actionPose = evaluateWeaponReload(reloadProgress, activeWeapon.id).action;
     }
     if (rig.swapTimer > 0) {
       actionKind = 'swap';
@@ -2645,18 +2645,19 @@ export class ArenaRenderer {
     }
 
     const recoil = rig.recoil;
+    const sidearmReload = actionKind === 'reload' && rig.weaponId === 'sidearm';
     rig.actionPivot.position.set(
       (actionKind === 'melee' ? -actionPose.part * 0.08 : 0) + rig.hitDirection * hitWeight * 0.025,
-      breathing * 0.35 - actionPose.lower * (actionKind === 'swap' ? 0.38 : 0.14),
+      breathing * 0.35 - actionPose.lower * (actionKind === 'swap' ? 0.38 : sidearmReload ? 0.1 : 0.14),
       actionKind === 'melee' ? -actionPose.part * 0.2 : recoil * 0.065,
     );
     rig.actionPivot.rotation.set(
-      (actionKind === 'melee' ? -0.48 * actionPose.part : 0.15 * actionPose.lower)
+      (actionKind === 'melee' ? -0.48 * actionPose.part : (sidearmReload ? 0.1 : 0.15) * actionPose.lower)
         + (actionKind === 'grenade' ? -0.42 * actionPose.part : 0)
         + recoil * 0.1,
-      (actionKind === 'melee' ? -0.72 : actionKind === 'grenade' ? 0.36 : -0.12) * actionPose.twist
+      (actionKind === 'melee' ? -0.72 : actionKind === 'grenade' ? 0.36 : sidearmReload ? -0.075 : -0.12) * actionPose.twist
         - recoil * 0.018,
-      (actionKind === 'swap' ? 0.54 : actionKind === 'reload' ? 0.31 : 0.2) * actionPose.twist
+      (actionKind === 'swap' ? 0.54 : actionKind === 'reload' ? (sidearmReload ? 0.2 : 0.31) : 0.2) * actionPose.twist
         + recoil * 0.022,
     );
     rig.weaponMount.position.set(0.03, -0.13, -0.27);
@@ -2729,30 +2730,33 @@ export class ArenaRenderer {
     fireProgress: number,
     recoil: number,
   ): void {
-    const reloadPose = evaluateReload(reloadProgress);
+    const reloadPose = evaluateWeaponReload(reloadProgress, weaponId);
     const magazine = parts.magazine;
     if (magazine) {
-      magazine.object.position.y -= reloadPose.part * 0.38;
-      magazine.object.position.x -= reloadPose.part * 0.06;
+      magazine.object.position.x += reloadPose.magazineOffsetX;
+      magazine.object.position.y += reloadPose.magazineOffsetY;
+      magazine.object.position.z += reloadPose.magazineOffsetZ;
       magazine.object.quaternion.multiply(
-        new THREE.Quaternion().setFromEuler(new THREE.Euler(0, 0, reloadPose.part * 0.18)),
+        new THREE.Quaternion().setFromEuler(new THREE.Euler(0, 0, reloadPose.magazineRoll)),
       );
     }
     const energyCell = parts['energy-cell'];
     if (energyCell) {
-      energyCell.object.position.x += reloadPose.part * 0.22;
-      energyCell.object.position.y -= reloadPose.part * 0.08;
+      energyCell.object.position.x += reloadPose.action.part * 0.22;
+      energyCell.object.position.y -= reloadPose.action.part * 0.08;
       const pulse = 1 + recoil * 0.08;
       energyCell.object.scale.copy(energyCell.baseScale).multiplyScalar(pulse);
     }
     const cassette = parts['launcher-cassette'];
     if (cassette) {
-      cassette.object.position.z += reloadPose.part * 0.42;
-      cassette.object.rotation.x += reloadPose.part * 0.16;
+      cassette.object.position.z += reloadPose.action.part * 0.42;
+      cassette.object.rotation.x += reloadPose.action.part * 0.16;
     }
 
-    if (!weaponId || fireProgress <= 0 || fireProgress >= 1) return;
     const slide = parts.slide;
+    if (slide) slide.object.position.z += reloadPose.slideOffsetZ;
+
+    if (!weaponId || fireProgress <= 0 || fireProgress >= 1) return;
     if (slide) slide.object.position.z += trianglePulse(fireProgress, 0, 0.1, 0.34) * 0.17;
     const bolt = parts.bolt;
     if (bolt) {
@@ -4875,7 +4879,7 @@ export class ArenaRenderer {
       if (activeWeapon && activeWeapon.reloadTimer > 0) {
         reloadProgress = normalizedTimer(activeWeapon.reloadTimer, WEAPONS[activeWeapon.id].reloadSeconds);
         actionKind = 'reload';
-        actionPose = evaluateReload(reloadProgress);
+        actionPose = evaluateWeaponReload(reloadProgress, activeWeapon.id).action;
       }
       if (localRig.swapTimer > 0) {
         actionKind = 'swap';
@@ -4916,20 +4920,23 @@ export class ArenaRenderer {
           - localRig.strafeBlend * 0.012 * bobAmount * steadying,
       );
 
+      const sidearmReload = actionKind === 'reload' && activeWeapon?.id === 'sidearm';
       this.viewActionPivot.position.set(
         this.viewSwayYaw * 0.14 * steadying + (actionKind === 'melee' ? -actionPose.part * 0.08 : 0),
-        this.viewSwayPitch * 0.1 * steadying - actionPose.lower * (actionKind === 'swap' ? 0.48 : 0.2) - recoil * 0.012,
+        this.viewSwayPitch * 0.1 * steadying
+          - actionPose.lower * (actionKind === 'swap' ? 0.48 : sidearmReload ? 0.13 : 0.2)
+          - recoil * 0.012,
         recoil * 0.07 + (actionKind === 'melee' ? -actionPose.part * 0.25 : 0),
       );
       this.viewActionPivot.rotation.set(
         this.viewSwayPitch * steadying
           + recoil * 0.11
-          + (actionKind === 'melee' ? -0.58 * actionPose.part : 0.18 * actionPose.lower)
+          + (actionKind === 'melee' ? -0.58 * actionPose.part : (sidearmReload ? 0.11 : 0.18) * actionPose.lower)
           + (actionKind === 'grenade' ? -0.34 * actionPose.part : 0),
         this.viewSwayYaw * steadying
-          + (actionKind === 'melee' ? -0.82 : actionKind === 'grenade' ? 0.28 : -0.12) * actionPose.twist
+          + (actionKind === 'melee' ? -0.82 : actionKind === 'grenade' ? 0.28 : sidearmReload ? -0.075 : -0.12) * actionPose.twist
           - recoil * 0.022,
-        (actionKind === 'swap' ? 0.68 : actionKind === 'reload' ? 0.52 : 0.24) * actionPose.twist
+        (actionKind === 'swap' ? 0.68 : actionKind === 'reload' ? (sidearmReload ? 0.28 : 0.52) : 0.24) * actionPose.twist
           + recoil * 0.018,
       );
 

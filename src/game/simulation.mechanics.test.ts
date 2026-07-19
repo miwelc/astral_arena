@@ -25,12 +25,12 @@ const player = (simulation: GameSimulation, id: string): PlayerState => {
 };
 
 const findJumpPad = (map: MapDefinition): Vec3 => {
-  const waypoint = map.waypoints.find((candidate) => isJumpPad({ ...candidate, y: map.bounds.floorY }));
+  const waypoint = map.waypoints.find((candidate) => isJumpPad({ ...candidate, y: map.bounds.floorY }, map));
   if (waypoint) return { x: waypoint.x, y: map.bounds.floorY, z: waypoint.z };
   for (let z = map.bounds.minZ; z <= map.bounds.maxZ; z += 0.5) {
     for (let x = map.bounds.minX; x <= map.bounds.maxX; x += 0.5) {
       const candidate = { x, y: map.bounds.floorY, z };
-      if (isJumpPad(candidate)) return candidate;
+      if (isJumpPad(candidate, map)) return candidate;
     }
   }
   throw new Error('The map has no detectable jump pad');

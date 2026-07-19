@@ -9,6 +9,7 @@ import {
   isPlayerRevealedToBotRadar,
   updateBotInputs,
 } from './bots';
+import { UMBRA_STATION } from './map';
 import { createDefaultConfig, GameSimulation } from './simulation';
 import type { Difficulty, GameMode, PickupState, PlayerState, Vec3 } from './types';
 import { WEAPONS } from './weapons';
@@ -444,5 +445,70 @@ describe('bot situational awareness and safety', () => {
     expect(assault).toBeGreaterThanOrEqual(0.9);
     expect(defensiveRecovery).toBeLessThan(0.4);
     expect(assault).toBeGreaterThan(defensiveRecovery);
+  });
+});
+
+describe('bot navigation on stacked authored maps', () => {
+  const startUmbraCtfBot = (): GameSimulation => {
+    const simulation = new GameSimulation(
+      createDefaultConfig({
+        mode: 'capture-the-flag',
+        mapId: 'umbra-station',
+        difficulty: 'veteran',
+        botFill: false,
+      }),
+      [{ id: 'umbra-bot', name: 'Umbra Bot', kind: 'bot' }],
+    );
+    simulation.state.phase = 'playing';
+    simulation.state.countdown = 0;
+    return simulation;
+  };
+
+  it('plans and retains a directed multi-node route instead of steering at a visible floor above', () => {
+    const simulation = startUmbraCtfBot();
+    const bot = botPlayer(simulation, 'umbra-bot');
+    bot.position = { x: 0, y: 0.05, z: -18.5 };
+    bot.bot!.decisionTimer = 0;
+
+    updateBotInputs(simulation.state, simulation.map, 0.05, () => false);
+
+    const firstRoute = [...bot.bot!.navigationRoute];
+    expect(simulation.map).toBe(UMBRA_STATION);
+    expect(firstRoute.length).toBeGreaterThan(3);
+    expect(bot.bot!.navigationGoalIndex).not.toBeNull();
+    expect(firstRoute.every((index) => UMBRA_STATION.waypoints[index] !== undefined)).toBe(true);
+    const currentTarget = UMBRA_STATION.waypoints[firstRoute[bot.bot!.navigationCursor]!]!;
+    expect(currentTarget.y).toBeLessThan(1.5);
+
+    bot.bot!.decisionTimer = 0;
+    simulation.state.elapsed += 0.25;
+    updateBotInputs(simulation.state, simulation.map, 0.05, () => false);
+    expect(bot.bot!.navigationRoute).toEqual(firstRoute);
+  });
+
+  it('uses the authored one-way drop from the Towah deck without injecting a random jump', () => {
+    const simulation = startUmbraCtfBot();
+    const bot = botPlayer(simulation, 'umbra-bot');
+    const towerWestIndex = UMBRA_STATION.waypoints.findIndex((waypoint) =>
+      waypoint.y > 5.8 && waypoint.x < -5 && Math.abs(waypoint.z) < 1,
+    );
+    const towerWest = UMBRA_STATION.waypoints[towerWestIndex]!;
+    bot.position = { ...towerWest };
+    bot.grounded = true;
+    bot.bot!.decisionTimer = 0;
+    const enemyFlag = simulation.state.flags.find((candidate) => candidate.team !== bot.team)!;
+    enemyFlag.status = 'dropped';
+    enemyFlag.position = { ...UMBRA_STATION.jumpPads[0]!.center, y: 0.05 };
+
+    updateBotInputs(simulation.state, simulation.map, 0.05, () => false);
+
+    const route = bot.bot!.navigationRoute;
+    const from = route[Math.max(0, bot.bot!.navigationCursor - 1)]!;
+    const to = route[bot.bot!.navigationCursor]!;
+    const link = UMBRA_STATION.waypointLinks?.find((candidate) =>
+      candidate.from === from && candidate.to === to,
+    );
+    expect(link?.traversal).toBe('drop');
+    expect(bot.input.jump).toBe(false);
   });
 });
