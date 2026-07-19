@@ -53,7 +53,7 @@ const isValidPlayerInput = (input: unknown): input is PlayerInput => {
   if (!input || typeof input !== 'object') return false;
   const candidate = input as Partial<PlayerInput>;
   const numbers = [candidate.moveX, candidate.moveZ, candidate.yaw, candidate.pitch];
-  const buttons = [candidate.fire, candidate.aim, candidate.jump, candidate.reload, candidate.swap, candidate.melee, candidate.grenade, candidate.use];
+  const buttons = [candidate.fire, candidate.aim, candidate.jump, candidate.reload, candidate.swap, candidate.melee, candidate.grenade, candidate.crouch, candidate.use];
   return Number.isSafeInteger(candidate.sequence)
     && (candidate.sequence ?? -1) >= 0
     && numbers.every((value) => typeof value === 'number' && Number.isFinite(value))
@@ -134,8 +134,8 @@ export class AstralArenaApp {
             <div class="field-label">FORMATO DEL MODO</div>
             <div id="mode-format" class="mode-format-card" aria-live="polite">
               <span id="mode-format-icon" class="format-icon">◈</span>
-              <div><strong id="mode-format-label">1 V 1</strong><small id="mode-format-detail">DUELO · TODOS CONTRA TODOS</small></div>
-              <b>FIJO</b>
+              <div><strong id="mode-format-label">2 JUGADORES</strong><small id="mode-format-detail">TODOS CONTRA TODOS · SIN EQUIPOS</small></div>
+              <b id="mode-format-lock">AJUSTABLE</b>
             </div>
 
             <div class="select-row">
@@ -154,6 +154,13 @@ export class AstralArenaApp {
                 </select>
               </label>
             </div>
+
+            <label id="player-count-field">
+              <span class="field-label">JUGADORES EN DEATHMATCH</span>
+              <select id="player-count" class="select-input">
+                ${Array.from({ length: 7 }, (_, index) => index + 2).map((count) => `<option value="${count}">${count} jugadores · todos contra todos</option>`).join('')}
+              </select>
+            </label>
 
             <div id="mode-brief" class="mode-brief">
               <span class="mode-glyph">◎</span>
@@ -182,12 +189,12 @@ export class AstralArenaApp {
               <span class="card-number">01</span><div><h3>Combate justo</h3><p>Sin clases ni ventajas. Dos armas, escudos, melee, granadas y pickups disputados.</p></div>
             </div>
             <div class="intel-card feature-card">
-              <span class="card-number">02</span><div><h3>Bots de relleno</h3><p>La arena completa automáticamente 2 u 8 plazas, también en una partida totalmente local.</p></div>
+              <span class="card-number">02</span><div><h3>Bots de relleno</h3><p>La arena completa automáticamente las plazas elegidas, de 2 a 8, también en una partida totalmente local.</p></div>
             </div>
             <div class="intel-card feature-card">
               <span class="card-number">03</span><div><h3>P2P sin backend</h3><p>El anfitrión simula la partida. Oferta y respuesta se intercambian como códigos copiables.</p></div>
             </div>
-            <div class="controls-strip"><kbd>WASD</kbd> MOVER · <kbd>RATÓN</kbd> APUNTAR · <kbd>E</kbd> USAR · <kbd>F</kbd> MELEE · <kbd>G</kbd> GRANADA</div>
+            <div class="controls-strip"><kbd>WASD</kbd> MOVER · <kbd>C / CTRL</kbd> AGACHARSE · <kbd>RATÓN</kbd> APUNTAR · <kbd>E</kbd> USAR · <kbd>F</kbd> MELEE · <kbd>G</kbd> GRANADA</div>
           </aside>
         </section>
 
@@ -204,15 +211,21 @@ export class AstralArenaApp {
       </main>`;
 
     const modeSelect = this.required<HTMLSelectElement>('#game-mode');
+    const playerCountSelect = this.required<HTMLSelectElement>('#player-count');
     const updateModePresentation = (): void => {
       const mode = modeSelect.value as GameMode;
       const rules = rulesForMode(mode);
+      const deathmatch = mode === 'deathmatch';
+      const playerCount = Number(playerCountSelect.value);
       this.required<HTMLElement>('#mode-brief p').textContent = MODE_COPY[mode];
-      this.setText('#mode-format-label', rules.formatLabel);
+      this.setText('#mode-format-label', deathmatch ? `${playerCount} JUGADORES` : rules.formatLabel);
       this.setText('#mode-format-detail', rules.formatDetail);
       this.setText('#mode-format-icon', rules.teamBased ? '✦' : mode === 'juggernaut' ? '⬢' : '◈');
+      this.setText('#mode-format-lock', deathmatch ? 'AJUSTABLE' : 'FIJO');
+      this.required<HTMLElement>('#player-count-field').classList.toggle('hidden', !deathmatch);
     };
     modeSelect.addEventListener('change', updateModePresentation);
+    playerCountSelect.addEventListener('change', updateModePresentation);
     updateModePresentation();
     this.required<HTMLButtonElement>('#local-play').addEventListener('click', () => this.startLocal());
     this.required<HTMLButtonElement>('#host-play').addEventListener('click', () => void this.startHostLobby());
@@ -253,7 +266,7 @@ export class AstralArenaApp {
         <div class="lobby-backdrop"></div>
         <header class="lobby-header">
           <button id="lobby-back" class="icon-button" type="button">←</button>
-          <div><span class="eyebrow">SALA P2P / ANFITRIÓN</span><h1>${MODE_LABELS[state.config.mode]} <i>·</i> ${rulesForMode(state.config.mode).formatLabel}</h1></div>
+          <div><span class="eyebrow">SALA P2P / ANFITRIÓN</span><h1>${MODE_LABELS[state.config.mode]} <i>·</i> ${state.config.mode === 'deathmatch' ? `${state.config.playerCount} JUGADORES` : rulesForMode(state.config.mode).formatLabel}</h1></div>
           <span class="connection-badge"><i></i> DIRECTA</span>
         </header>
         <section class="lobby-grid">
@@ -366,6 +379,7 @@ export class AstralArenaApp {
     this.network?.close();
     this.networkStatus = 'connecting';
     this.network = new P2PNetwork<WireMessage>({
+      maxPeers: this.role === 'host' ? Math.max(1, (this.simulation?.maxPlayers ?? 8) - 1) : 7,
       rtcConfiguration: useStun
         ? { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] }
         : { iceServers: [] },
@@ -512,7 +526,7 @@ export class AstralArenaApp {
         <div id="pause-panel" class="pause-panel glass-panel hidden">
           <span class="eyebrow">MENÚ DE MISIÓN</span><h2>Partida en curso</h2>
           <p>La simulación continúa mientras el ratón está libre.</p>
-          <div class="control-grid"><span><kbd>WASD</kbd>Mover</span><span><kbd>ESPACIO</kbd>Saltar</span><span><kbd>E</kbd>Usar / torreta</span><span><kbd>Q</kbd>Cambiar</span><span><kbd>R</kbd>Recargar</span><span><kbd>F</kbd>Melee</span><span><kbd>G</kbd>Granada</span><span><kbd>RMB</kbd>Apuntar</span><span><kbd>Z / RUEDA</kbd>Zoom sniper</span></div>
+          <div class="control-grid"><span><kbd>WASD</kbd>Mover</span><span><kbd>ESPACIO</kbd>Saltar</span><span><kbd>C / CTRL</kbd>Agacharse</span><span><kbd>E</kbd>Usar / torreta</span><span><kbd>Q</kbd>Cambiar</span><span><kbd>R</kbd>Recargar</span><span><kbd>F</kbd>Melee</span><span><kbd>G</kbd>Granada</span><span><kbd>RMB</kbd>Apuntar</span><span><kbd>Z / RUEDA</kbd>Zoom sniper</span></div>
           <button id="resume-game" class="primary-action compact" type="button"><span>Volver a la arena</span><b>→</b></button>
           <button id="exit-game" class="text-button danger" type="button">Abandonar partida</button>
         </div>
@@ -876,7 +890,7 @@ export class AstralArenaApp {
       if (blips.innerHTML !== markup) blips.innerHTML = markup;
     }
     const local = state.players[this.localPlayerId];
-    const moving = Boolean(local && Math.hypot(local.velocity.x, local.velocity.y, local.velocity.z) >= 0.55);
+    const moving = Boolean(local && !local.crouched && Math.hypot(local.velocity.x, local.velocity.y, local.velocity.z) >= 0.55);
     this.root.querySelector('#motion-radar')?.classList.toggle('local-moving', moving);
   }
 
@@ -998,11 +1012,13 @@ export class AstralArenaApp {
     const mode = (this.root.querySelector<HTMLSelectElement>('#game-mode')?.value ?? 'deathmatch') as GameMode;
     const difficulty = (this.root.querySelector<HTMLSelectElement>('#difficulty')?.value ?? 'veteran') as MatchConfig['difficulty'];
     const format = canonicalFormatForMode(mode);
+    const requestedPlayerCount = Number(this.root.querySelector<HTMLSelectElement>('#player-count')?.value ?? 2);
     try { localStorage.setItem('astral-player-name', name); } catch { /* Storage can be disabled. */ }
     return createDefaultConfig({
       playerName: name,
       mode,
       format,
+      playerCount: mode === 'deathmatch' ? requestedPlayerCount : rulesForMode(mode).maxPlayers,
       difficulty,
       scoreLimit: recommendedScoreLimit(mode, format),
       timeLimitSeconds: recommendedTimeLimit(mode, format),

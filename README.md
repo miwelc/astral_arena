@@ -2,9 +2,9 @@
 
 Astral Arena es un prototipo de *arena shooter* 3D para navegador, inspirado en el ritmo de combate, los escudos recargables, el control de armas del mapa y los modos competitivos de los shooters de consola de principios de los 2000. Su identidad propia, **Arctic Orbital Dusk**, combina astronautas *hard-surface*, un campus científico extraterrestre de cerámica blanca/grafito/lima y un bosque frío que invade la instalación. Conserva una composición atmosférica estilizada, pero usa materiales PBR, vegetación densa y una iluminación de sol cálido contra sombras cian.
 
-El diseño mantiene formatos cerrados por modo, para que las reglas no puedan combinarse de forma incoherente:
+El diseño mantiene reglas coherentes por modo sin limitar el todos-contra-todos a un único tamaño:
 
-- **Deathmatch:** duelo 1 contra 1.
+- **Deathmatch:** todos contra todos configurable de 2 a 8 participantes.
 - **Team Deathmatch, Capture the Flag y Towah of Powah:** escuadras 4 contra 4.
 - **Juggernaut / Coloso:** ocho jugadores, todos contra el Coloso y sin equipos.
 
@@ -17,11 +17,11 @@ El repositorio contiene una **primera vertical jugable completa**, no una versi�
 - simulación determinista del combate, movimiento, colisiones, escudos, reapariciones, proyectiles, granadas, cuerpo a cuerpo, puntuación y objetivos;
 - un mapa inicial, **Cresta del Cráter**, de 104 × 84 m, con tres rutas, dos edificios base con interiores, torre central, puestos logísticos, relay meteorológico, laboratorio hidropónico, terrazas, bermas físicas, coberturas y armas recogibles;
 - seis armas, bots con tres dificultades moderadas, evaluación de utilidad de pickups, memoria antiatasco, controles de teclado/ratón y mando, hitboxes anatómicos ampliados y audio procedural multicapa por arma;
-- una capa de presentación Three.js con terreno PBR húmedo de barro, musgo, raíces, piedras, relieve, césped denso y charcos; UV antirrepetición, tintado macroscópico, bosque instanciado, niebla local, puertas, cristales, rampas, barandillas, cajas, iluminación interior, sombras, bloom moderado, profundidad de campo, aberración cromática, astronautas articulados y seis armas *hard-surface* con fogonazo, trazadoras e impactos;
+- una capa de presentación Three.js con terreno PBR húmedo de barro, musgo, raíces, piedras, relieve, césped denso y charcos; UV antirrepetición, tintado macroscópico, bosque instanciado, niebla local, puertas, cristales, rampas, barandillas, cajas, iluminación interior, sombras, bloom moderado, profundidad de campo, aberración cromática, astronautas articulados y seis armas GLB CC0 adaptadas al estilo *hard-surface*, con fallback procedural, fogonazo, trazadoras e impactos;
 - animación procedural compartida entre primera y tercera persona: locomoción ligada a la distancia recorrida y diferenciada por dirección, respiración, salto, caída, aterrizaje, muerte/reaparición, retroceso, recarga, cambio de arma, cuerpo a cuerpo y lanzamiento de granada, con rodillas, pies, manos y piezas de arma móviles;
 - menús con formato canónico por modo, lobby manual P2P, HUD contextual para armas y torreta, radar de movimiento de 25 m, IFF aliado/enemigo, avisos contextuales, voz de objetivos, audio y pantalla de resultado integrados;
 - transporte WebRTC P2P nativo con señalización manual, mensajes tipados y un host con hasta siete invitados;
-- 279 pruebas automatizadas para combate, daño de precisión, ráfagas y balística, dispersión y retículas, transiciones de input P2P, interacciones manuales, movimiento, auto-step de rampas y deslizamiento por paredes, hitboxes, perfiles de bots, balance inicial, objetivos, radar, avisos contextuales, regeneración, validación de snapshots P2P, regresiones, navegación e interiores del mapa, pads de salto, acceso y manejo de la torreta, puntuación, determinismo, audio, curvas de animación, antirrepetición de materiales, arquitectura y piezas móviles de armamento.
+- 315 pruebas automatizadas para combate, daño de precisión, ráfagas y balística, drops con munición, dispersión y retículas, transiciones de input P2P, agachado, movimiento, auto-step y deslizamiento por paredes, hitboxes, perfiles y objetivos de bots, radar, regeneración, snapshots P2P, navegación, relieve y arquitectura del mapa, pads de salto, torreta, puntuación, determinismo, audio, animación, materiales y modelos de armamento externos.
 
 El proyecto pasa `typecheck`, tests y build de producción. Aun así, el flujo WebRTC debe probarse con varios navegadores y redes reales antes de declarar soporte público 4v4; tampoco hay matchmaking, persistencia, cuentas, backend, migración de host ni anti-cheat.
 
@@ -71,6 +71,7 @@ Haz clic sobre el área de juego para capturar el puntero. `Esc` libera el punte
 | Activar óptica compatible | Botón derecho |
 | Cambiar zoom del sniper | `Z` o rueda mientras se apunta (`5×` / `10×`) |
 | Saltar | `Espacio` |
+| Agacharse / andar agachado | Mantener `C` o `Ctrl` |
 | Recargar | `R` |
 | Cambiar de arma | `Q`, `1`, `2` o botón central |
 | Golpe cuerpo a cuerpo | `F` |
@@ -96,13 +97,14 @@ Se lee el primer mando que exponga el navegador. La nomenclatura siguiente corre
 | Cambiar de arma | `Y` |
 | Golpe cuerpo a cuerpo | Bumper derecho (`RB`) |
 | Lanzar granada | Bumper izquierdo (`LB`) |
+| Agacharse / andar agachado | Pulsar stick izquierdo (`LS`) |
 | Usar torreta / recoger arma / salir de torreta | `B` |
 
 El soporte se basa en la API Gamepad del navegador; nombres, orden de botones y disponibilidad pueden variar en mandos sin mapeo estándar.
 
 ## Formatos, bots y modos
 
-Deathmatch admite dos participantes; los modos de equipo y Juggernaut admiten ocho. No existe un selector genérico 1v1/4v4: cada modo impone su composición canónica también al validar snapshots P2P. Con el relleno de bots activo, la simulación ocupa automáticamente las plazas libres. Cuando entra un jugador remoto, sustituye a un bot; al salir, puede volver a ocupar su plaza un bot. Las dificultades disponibles son Recluta, Veterano y Leyenda.
+Deathmatch permite elegir de 2 a 8 participantes y siempre conserva equipos neutrales: es un todos contra todos real, no un 4v4 encubierto. Los modos de equipo y Juggernaut mantienen sus ocho plazas canónicas también al validar snapshots P2P. Con el relleno de bots activo, la simulación ocupa automáticamente las plazas libres. Cuando entra un jugador remoto, sustituye a un bot; al salir, puede volver a ocupar su plaza un bot. Las dificultades disponibles son Recluta, Veterano y Leyenda.
 
 Los cinco modos están modelados en la simulación:
 
@@ -116,7 +118,7 @@ Los límites recomendados de puntos y tiempo cambian según modo y formato. El h
 
 ## Armas y combate
 
-El equipamiento inicial normal es rifle de pulso y pistola. Las armas de poder aparecen en el mapa y reaparecen después de un tiempo. Pasar sobre ellas no altera el inventario: se muestra qué ranura sería sustituida y hay que pulsar `E`:
+El equipamiento inicial normal es rifle de pulso y pistola. Las armas de poder aparecen en el mapa y reaparecen después de un tiempo. Al morir, cada combatiente deja durante 20 segundos su arma activa con el cargador y la reserva que conservaba, además de todas sus granadas restantes. Las armas caídas siguen exigiendo `E`; los racks fijos entregan dos granadas respetando el máximo de dos. Pasar sobre un arma no altera el inventario: se muestra qué ranura sería sustituida y hay que pulsar `E`:
 
 | Arma | Función |
 | --- | --- |
@@ -132,6 +134,8 @@ El modelo de daño separa barrera y salud: una cabeza no multiplica mágicamente
 También hay granadas con núcleo letal, fusible y rebote: la mecha empieza con el primer impacto contra el escenario, nunca detonan suspendidas en el aire y explotan inmediatamente al tocar a un personaje. Hay munición, sobreescudo y una recarga de escudo más cercana al ritmo clásico tras dejar de recibir daño. Los valores siguen necesitando *playtesting* competitivo.
 
 Los dos accesos laterales a la torre son pads de salto físicos. Al pisarlos aplican un arco balístico continuo, conservan el impulso hacia la cubierta y permiten corrección lateral en vuelo; no trasladan instantáneamente al jugador.
+
+Agacharse reduce de forma autoritativa tanto la cápsula de colisión como la velocidad. El jugador no puede levantarse dentro de un hueco sin altura suficiente y caminar agachado no genera contacto en el radar de movimiento; disparar sí revela temporalmente la posición.
 
 ## Multijugador P2P con señalización manual
 
@@ -195,7 +199,7 @@ La vertical se construyó en seis capas verificables, actualmente completadas:
 2. **Arena shooter:** movimiento, colisiones, escudos, salud, respawn, dos armas, pickups, melee, granadas, hitscan y proyectiles.
 3. **Contenido competitivo:** mapa Cresta del Cráter, seis armas, formatos de 2/8 plazas y reglas de los cinco modos.
 4. **Oponentes:** percepción limitada, memoria, dificultad, navegación, desatasco y conducta específica por objetivo.
-5. **Presentación y red:** arte 3D procedural, astronautas, cámara FPS, HUD/audio, host autoritativo y señalización WebRTC manual.
+5. **Presentación y red:** arte 3D procedural combinado con modelos CC0, astronautas, cámara FPS, HUD/audio, host autoritativo y señalización WebRTC manual.
 6. **Endurecimiento de la vertical:** validación de inputs, backpressure de snapshots, regresiones y simulaciones largas de bots.
 
 Para convertir la vertical en un lanzamiento público, el orden recomendado es: pruebas reales Chrome/Firefox/Safari; sesiones sostenidas de ocho navegadores sobre varias redes; snapshots no fiables y predicción/reconciliación del cliente; segundo mapa específico de duelo; captura de movimiento y audio finales; opciones de accesibilidad; y, solo si se acepta infraestructura, señalización automática, TURN y/o migración de host.
@@ -206,6 +210,7 @@ Para convertir la vertical en un lanzamiento público, el orden recomendado es: 
 .
 ├── index.html                 # Documento de entrada de Vite
 ├── package.json               # Scripts y dependencias
+├── public/models/weapons      # Seis GLB CC0 y registro de procedencia
 ├── vite.config.ts             # Desarrollo y preview en el puerto 4173
 ├── tsconfig.json              # TypeScript estricto para navegador
 └── src
@@ -242,7 +247,9 @@ Para convertir la vertical en un lanzamiento público, el orden recomendado es: 
     │   ├── DepthFocusPass.ts  # Profundidad de campo ligera por depth buffer
     │   ├── facilityEnvironment.test.ts # Contratos del entorno instanciado
     │   ├── facilityEnvironment.ts # Bosque y arquitectura modular procedural
+    │   ├── externalWeaponModels.ts # Carga GLB, PBR, caché y fallback
     │   ├── landscapeGeometry.ts # Crestas y vegetación procedural
+    │   ├── terrainArchitecture.ts # Rocas, montículos, jardineras y carga
     │   ├── visualTextures.ts  # Entorno, terreno y máscaras procedurales
     │   ├── visualTextures.test.ts # Determinismo y rangos PBR del terreno
     │   ├── weaponModels.test.ts # Contratos de piezas móviles y anclajes
@@ -272,3 +279,5 @@ GitHub Pages, Cloudflare Pages, Netlify, Vercel estático o cualquier servidor H
 ## Alcance e identidad
 
 Astral Arena toma referencias de un género y una época, no pretende ser una recreación de una propiedad existente. Nombres, personajes, mapa, código, arte y audio deben mantenerse originales; no deben incorporarse modelos, sonidos, marcas ni otros recursos extraídos de juegos comerciales.
+
+Los modelos externos incluidos son CC0: los rifles proceden de **Sci‑Fi Modular Gun Pack** de Quaternius y la pistola, sniper, escopeta y lanzacohetes de **Guns Asset Pack** de Styloo. El registro por archivo, enlaces y licencia está junto a los binarios en `public/models/weapons/README.md`; la presentación del juego modifica orientación, escala, respuesta PBR y luces de identificación sin alterar la simulación.

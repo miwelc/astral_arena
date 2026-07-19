@@ -15,6 +15,8 @@ export interface Vec3 {
 export interface MatchConfig {
   mode: GameMode;
   format: MatchFormat;
+  /** Authoritative roster size. Deathmatch accepts 2-8; authored team modes use 8. */
+  playerCount: number;
   difficulty: Difficulty;
   scoreLimit: number;
   timeLimitSeconds: number;
@@ -36,6 +38,8 @@ export interface PlayerInput {
   swap: boolean;
   melee: boolean;
   grenade: boolean;
+  /** Held stance control. Crouched movement stays off the motion tracker. */
+  crouch: boolean;
   /** Context action: take a weapon or enter/leave an emplaced turret. */
   use: boolean;
 }
@@ -67,6 +71,7 @@ export interface PlayerState {
   pitch: number;
   radius: number;
   height: number;
+  crouched: boolean;
   grounded: boolean;
   alive: boolean;
   health: number;
@@ -142,6 +147,13 @@ export interface PickupState {
   kind: PickupKind;
   position: Vec3;
   weaponId?: WeaponId;
+  /** Exact ammunition retained by a weapon dropped on death. */
+  weaponState?: WeaponState;
+  /** Number of grenades granted; fixed grenade racks carry a pair. */
+  amount: number;
+  /** Temporary death drops are removed instead of entering a respawn cycle. */
+  temporary: boolean;
+  despawnTimer: number;
   available: boolean;
   respawnTimer: number;
   respawnSeconds: number;
@@ -296,7 +308,7 @@ export interface MapDefinition {
   obstacles: AabbObstacle[];
   spawns: SpawnPoint[];
   waypoints: Vec3[];
-  pickups: Omit<PickupState, 'available' | 'respawnTimer'>[];
+  pickups: Omit<PickupState, 'available' | 'respawnTimer' | 'weaponState' | 'amount' | 'temporary' | 'despawnTimer'>[];
   flagBases: Record<Exclude<Team, 'neutral'>, Vec3>;
   towerCenter: Vec3;
 }

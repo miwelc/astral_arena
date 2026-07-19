@@ -14,6 +14,24 @@ const CONTACT_EPSILON = 0.0001;
 const MAX_AUTO_STEP_HEIGHT = 0.42;
 type HorizontalAxis = 'x' | 'z';
 
+/**
+ * Checks whether a capsule can occupy a stance at its current feet position.
+ * Used before standing up so a low ceiling can never push or trap the player.
+ */
+export const canOccupyCapsule = (
+  position: Vec3,
+  radius: number,
+  height: number,
+  map: MapDefinition,
+): boolean => {
+  if (height <= 0 || position.y < map.bounds.floorY - CONTACT_EPSILON) return false;
+  if (position.y + height > map.bounds.ceilingY - CONTACT_EPSILON) return false;
+  return !map.obstacles.some((obstacle) =>
+    overlapsVertical(position.y, height, obstacle)
+    && insideHorizontal(position, obstacle, radius),
+  );
+};
+
 export const COMBAT_HITBOX_TUNING = Object.freeze({
   pelvisRadiusPadding: 0.045,
   torsoRadiusPadding: 0.09,

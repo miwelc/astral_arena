@@ -126,17 +126,25 @@ describe('gameplay regressions', () => {
 });
 
 describe('bot objective smoke tests', () => {
-  it('gets at least one bot onto the Towah deck through a grav lift', () => {
+  it('keeps both bot teams assaulting and clearing the Towah deck instead of camping opposite sides', () => {
     const simulation = new GameSimulation(
       createDefaultConfig({ mode: 'towah-of-powah', format: 'squads', difficulty: 'veteran', botFill: true }),
     );
     start(simulation);
-    let occupied = false;
-    for (let index = 0; index < 1_200 && !occupied; index += 1) {
+    const deckVisitors = {
+      aurora: new Set<string>(),
+      nova: new Set<string>(),
+    };
+    for (let index = 0; index < 1_200; index += 1) {
       simulation.step(0.05);
-      occupied = Object.values(simulation.state.players).some((player) => player.position.y >= 5.15);
+      for (const player of Object.values(simulation.state.players)) {
+        if (player.position.y >= 5.15 && player.team !== 'neutral') deckVisitors[player.team].add(player.id);
+      }
     }
-    expect(occupied).toBe(true);
+
+    expect(deckVisitors.aurora.size).toBeGreaterThanOrEqual(3);
+    expect(deckVisitors.nova.size).toBeGreaterThanOrEqual(3);
+    expect(simulation.state.teamScores.aurora + simulation.state.teamScores.nova).toBeGreaterThan(10);
   });
 
   it('produces flag play during a two-minute all-bot CTF simulation', () => {

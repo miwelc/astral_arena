@@ -26,6 +26,7 @@ import type {
   WeaponId,
   WeaponState,
 } from './types';
+import { JUMP_PAD_ZONES } from './map';
 import { WEAPONS } from './weapons';
 
 export type LineOfSightTest = (from: Vec3, to: Vec3) => boolean;
@@ -108,6 +109,12 @@ const PICKUP_PROGRESS_TIMEOUT = 4.5;
 const PICKUP_INTERACTION_TIMEOUT = 1.4;
 const PICKUP_RETRY_DELAY = 9;
 const MAX_PICKUP_BLACKLIST = 4;
+const MOTION_RADAR_RADIUS = 25;
+const MOTION_RADAR_THRESHOLD = 0.55;
+const MOTION_RADAR_SHOT_REVEAL_SECONDS = 0.8;
+const TOWER_DECK_MIN_Y = 5.15;
+const TOWER_PATROL_RADIUS = 5.45;
+const TOWER_PATROL_STEP_SECONDS = 2.4;
 
 const WEAPON_PICKUP_RATING: Readonly<Record<WeaponId, number>> = {
   'pulse-rifle': 2.5,
@@ -202,6 +209,50 @@ const acquireVisibleTarget = (
     }
   }
   return best;
+};
+
+const firedRecently = (state: MatchState, playerId: string): boolean => {
+  for (let index = state.events.length - 1; index >= 0; index -= 1) {
+    const event = state.events[index];
+    if (!event || state.elapsed - event.time > MOTION_RADAR_SHOT_REVEAL_SECONDS) break;
+    if (event.type === 'shot' && event.actorId === playerId && event.time <= state.elapsed) return true;
+  }
+  return false;
+};
+
+/**
+ * Mirrors the information available on the player motion tracker: movement is
+ * detectable through cover at short range, but crouch-walking is silent and a
+ * stationary/crouched target is only exposed briefly by firing. Keeping this
+ * predicate independent from line of sight prevents accidental wall shooting;
+ * radar contacts are navigation clues, never valid firing solutions.
+ */
+export const isPlayerRevealedToBotRadar = (
+  state: MatchState,
+  observer: PlayerState,
+  target: PlayerState,
+): boolean => {
+  if (!isEnemy(state, observer, target)) return false;
+  if (horizontalDistance(observer.position, target.position) > MOTION_RADAR_RADIUS) return false;
+  if (firedRecently(state, target.id)) return true;
+  if (target.crouched) return false;
+  return Math.hypot(target.velocity.x, target.velocity.y, target.velocity.z) >= MOTION_RADAR_THRESHOLD;
+};
+
+const acquireMotionRadarContact = (state: MatchState, observer: PlayerState): PlayerState | null => {
+  let selected: PlayerState | null = null;
+  let bestScore = Number.POSITIVE_INFINITY;
+  for (const candidate of orderedPlayers(state)) {
+    if (!isPlayerRevealedToBotRadar(state, observer, candidate)) continue;
+    let score = horizontalDistance(observer.position, candidate.position);
+    if (candidate.id === observer.bot?.targetId) score -= 3;
+    if (firedRecently(state, candidate.id)) score -= 4;
+    if (score < bestScore) {
+      selected = candidate;
+      bestScore = score;
+    }
+  }
+  return selected;
 };
 
 const ownTeam = (team: Team): Exclude<Team, 'neutral'> | null => (team === 'neutral' ? null : team);
@@ -343,21 +394,91 @@ const juggernautPlan = (state: MatchState, player: PlayerState): ObjectivePlan =
   return { goal: juggernaut.position, urgent: true };
 };
 
+const isOnTowerDeck = (state: MatchState, player: PlayerState): boolean =>
+  player.position.y >= TOWER_DECK_MIN_Y &&
+  horizontalDistance(player.position, state.tower.center) <= state.tower.radius + 0.75;
+
+/**
+ * Produces a risk appetite from public objective state, health and score. The
+ * bot does not count hidden enemies or read their health: it only knows whether
+ * its team owns the hill, the same scoreboard a human sees, and its own status.
+ */
+export const botTowerCommitment = (state: MatchState, player: PlayerState): number => {
+  if (state.config.mode !== 'towah-of-powah') return 0;
+  const team = ownTeam(player.team);
+  if (!team) return 0.5;
+
+  let commitment = state.tower.controllingTeam === team
+    ? 0.42
+    : state.tower.controllingTeam === 'neutral'
+      ? 0.82
+      : 0.96;
+  const enemyTeam = opposingTeam(team);
+  if (state.teamScores[team] < state.teamScores[enemyTeam]) commitment += 0.08;
+  if (player.health >= 70) commitment += 0.08;
+  else if (player.health <= 35) commitment -= state.tower.controllingTeam === team ? 0.2 : 0.1;
+  if (state.elapsed - player.lastDamageAt < 0.8) commitment -= 0.06;
+  return clamp(commitment, 0.28, 1);
+};
+
+const nearestTowerPad = (player: PlayerState) => {
+  const preferredSide = player.position.x < -0.5
+    ? -1
+    : player.position.x > 0.5
+      ? 1
+      : hashString(player.id) % 2 === 0 ? -1 : 1;
+  return JUMP_PAD_ZONES.find((pad) => Math.sign(pad.center.x) === preferredSide) ?? JUMP_PAD_ZONES[0]!;
+};
+
+const towahPlan = (state: MatchState, player: PlayerState): ObjectivePlan => {
+  player.bot!.objective = 'tower';
+  const commitment = botTowerCommitment(state, player);
+  const teamOwnsTower = state.tower.controllingTeam === player.team;
+  const urgent = commitment >= 0.64;
+  const pad = nearestTowerPad(player);
+
+  if (!isOnTowerDeck(state, player)) {
+    // Once a launch has begun, keep steering toward the deck instead of asking
+    // the airborne bot to turn back toward the pad it just left.
+    if (player.position.y > 1.8 && !player.grounded) {
+      const landingSide = Math.sign(pad.center.x);
+      return {
+        goal: {
+          x: state.tower.center.x + landingSide * TOWER_PATROL_RADIUS,
+          y: state.tower.center.y,
+          z: state.tower.center.z,
+        },
+        urgent: true,
+      };
+    }
+    return {
+      goal: { x: pad.center.x, y: pad.center.y + 0.05, z: pad.center.z },
+      urgent: true,
+    };
+  }
+
+  const slot = hashString(player.id) % 8;
+  const direction = player.team === 'nova' ? -1 : 1;
+  // A neutral/enemy hill must be cleared. Advancing the ring slot prevents the
+  // old stalemate where both teams stopped forever on opposite sides of the
+  // opaque turret cap. Defenders rotate more slowly and keep useful coverage.
+  const stepSeconds = teamOwnsTower ? TOWER_PATROL_STEP_SECONDS * 3 : TOWER_PATROL_STEP_SECONDS;
+  const phase = Math.floor(state.elapsed / stepSeconds);
+  const angle = (slot + direction * phase) * Math.PI / 4;
+  return {
+    goal: {
+      x: state.tower.center.x + Math.cos(angle) * TOWER_PATROL_RADIUS,
+      y: state.tower.center.y,
+      z: state.tower.center.z + Math.sin(angle) * TOWER_PATROL_RADIUS,
+    },
+    urgent,
+  };
+};
+
 const objectivePlan = (state: MatchState, player: PlayerState, map: MapDefinition): ObjectivePlan => {
   if (state.config.mode === 'capture-the-flag') return ctfPlan(state, player, map);
   if (state.config.mode === 'juggernaut') return juggernautPlan(state, player);
-  if (state.config.mode === 'towah-of-powah') {
-    player.bot!.objective = 'tower';
-    const angle = (hashString(player.id) % 628) / 100;
-    return {
-      goal: {
-        x: state.tower.center.x + Math.cos(angle) * 4.4,
-        y: state.tower.center.y,
-        z: state.tower.center.z + Math.sin(angle) * 4.4,
-      },
-      urgent: state.tower.controllingTeam !== player.team,
-    };
-  }
+  if (state.config.mode === 'towah-of-powah') return towahPlan(state, player);
 
   const pickup = nearestAvailablePickup(state, player);
   if (pickup && horizontalDistance(player.position, pickup.position) <= 30) {
@@ -507,6 +628,24 @@ const combatMovement = (
   const strafe = { x: -toTarget.z * strafeSign, y: 0, z: toTarget.x * strafeSign };
 
   let radial = vec3();
+  if (state.config.mode === 'towah-of-powah') {
+    const commitment = botTowerCommitment(state, player);
+    if (targetRange > 5.5) radial = {
+      x: toTarget.x * commitment,
+      y: 0,
+      z: toTarget.z * commitment,
+    };
+    else if (targetRange < 2.5 && commitment < 0.72) radial = {
+      x: -toTarget.x * (0.72 - commitment),
+      y: 0,
+      z: -toTarget.z * (0.72 - commitment),
+    };
+    return normalize({
+      x: radial.x * 0.9 + strafe.x * 0.42 + navigationDirection.x * (0.95 + commitment),
+      y: 0,
+      z: radial.z * 0.9 + strafe.z * 0.42 + navigationDirection.z * (0.95 + commitment),
+    });
+  }
   if (targetRange > preferred * 1.18) radial = toTarget;
   else if (targetRange < preferred * 0.72) radial = { x: -toTarget.x, y: 0, z: -toTarget.z };
 
@@ -690,12 +829,26 @@ export const updateBotInputs = (
       ? { ...profile, visionRange: Math.max(70, profile.visionRange), fieldOfView: Math.PI * 2 }
       : profile;
     const visibleTarget = updatePerception(state, player, perceptionProfile, hasLineOfSight, decisionDue);
+    if (!visibleTarget && decisionDue) {
+      const motionContact = acquireMotionRadarContact(state, player);
+      if (motionContact) {
+        if (motionContact.id !== memory.targetId) {
+          memory.reactionTimer = randomRange(state, profile.reaction * 0.9, profile.reaction * 1.2);
+        }
+        memory.targetId = motionContact.id;
+        memory.lastSeenPosition = { ...motionContact.position };
+        memory.lastSeenAt = state.elapsed;
+      }
+    }
     let plan = objectivePlan(state, player, map);
     if (pickupPlanHasStalled(state, player, plan)) plan = objectivePlan(state, player, map);
     const rememberedGoal = memory.lastSeenPosition && state.elapsed - memory.lastSeenAt <= profile.memorySeconds
       ? memory.lastSeenPosition
       : null;
-    const strategicGoal = plan.goal ?? rememberedGoal;
+    const trackingRadarContactOnDeck = state.config.mode === 'towah-of-powah' &&
+      isOnTowerDeck(state, player) &&
+      rememberedGoal !== null;
+    const strategicGoal = trackingRadarContactOnDeck ? rememberedGoal : plan.goal ?? rememberedGoal;
     const fallbackWaypoint = map.waypoints[memory.waypointIndex % Math.max(1, map.waypoints.length)] ?? player.position;
     const goal = strategicGoal ?? fallbackWaypoint;
     const navigationTarget = selectWaypoint(player, memory, goal, map, hasLineOfSight);
@@ -716,12 +869,6 @@ export const updateBotInputs = (
 
     if (visibleTarget && !player.carryingFlagTeam) {
       navigationDirection = combatMovement(state, player, visibleTarget, navigationDirection, plan.urgent);
-    } else if (
-      state.config.mode === 'towah-of-powah' &&
-      horizontalDistance(player.position, state.tower.center) <= Math.max(1, state.tower.radius * 0.7) &&
-      player.position.y >= 5.15
-    ) {
-      navigationDirection = vec3();
     }
     if (memory.unstickTimer > 0) {
       const sign = memory.aimError.z < 0 ? -1 : 1;
@@ -763,6 +910,12 @@ export const updateBotInputs = (
     const combatMovementScale = visibleTarget && !plan.urgent ? profile.combatMovementScale : 1;
     input.moveX = localMovement.moveX * combatMovementScale;
     input.moveZ = localMovement.moveZ * combatMovementScale;
+    input.crouch = state.config.mode === 'towah-of-powah' &&
+      player.grounded &&
+      isOnTowerDeck(state, player) &&
+      state.tower.controllingTeam === player.team &&
+      visibleTarget === null &&
+      player.health <= 45;
 
     if (desiredWeaponIndex !== player.activeWeapon && desiredWeapon && weaponUsable(desiredWeapon)) {
       input.swap = true;
@@ -825,6 +978,7 @@ export const updateBotInputs = (
       input.aim = false;
       input.melee = false;
       input.grenade = false;
+      input.crouch = false;
       input.fire = aligned && memory.reactionTimer <= 0;
     } else if (
       decisionDue &&

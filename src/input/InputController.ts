@@ -70,6 +70,7 @@ export class InputController {
     let swap = this.buttons.swap || this.keys.has('KeyQ') || this.keys.has('Digit1') || this.keys.has('Digit2');
     let melee = this.buttons.melee || this.keys.has('KeyF');
     let grenade = this.buttons.grenade || this.keys.has('KeyG');
+    let crouch = this.keys.has('ControlLeft') || this.keys.has('ControlRight') || this.keys.has('KeyC');
     let use = this.keys.has('KeyE');
 
     const gamepad = navigator.getGamepads?.()[0];
@@ -86,10 +87,11 @@ export class InputController {
       swap ||= gamepad.buttons[3]?.pressed ?? false;
       melee ||= gamepad.buttons[5]?.pressed ?? false;
       grenade ||= gamepad.buttons[4]?.pressed ?? false;
+      crouch ||= gamepad.buttons[10]?.pressed ?? false;
       use ||= gamepad.buttons[1]?.pressed ?? false;
     }
 
-    return { sequence, moveX, moveZ, yaw: this.yaw, pitch: this.pitch, fire, aim, jump, reload, swap, melee, grenade, use };
+    return { sequence, moveX, moveZ, yaw: this.yaw, pitch: this.pitch, fire, aim, jump, reload, swap, melee, grenade, crouch, use };
   }
 
   public dispose(): void {
@@ -165,6 +167,9 @@ export class InputController {
       || code === 'Digit2'
       || code === 'KeyF'
       || code === 'KeyG'
+      || code === 'KeyC'
+      || code === 'ControlLeft'
+      || code === 'ControlRight'
       || code === 'KeyE';
   }
 

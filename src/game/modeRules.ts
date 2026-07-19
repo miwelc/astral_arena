@@ -6,16 +6,16 @@ export interface ModeRules {
   /** Human-readable format; unlike MatchFormat this never implies teams in FFA. */
   formatLabel: string;
   formatDetail: string;
-  maxPlayers: 2 | 8;
+  maxPlayers: 8;
   teamBased: boolean;
 }
 
 export const MODE_RULES: Readonly<Record<GameMode, Readonly<ModeRules>>> = Object.freeze({
   deathmatch: Object.freeze({
     format: 'duel',
-    formatLabel: '1 V 1',
-    formatDetail: 'DUELO · TODOS CONTRA TODOS',
-    maxPlayers: 2,
+    formatLabel: '2–8 JUGADORES',
+    formatDetail: 'TODOS CONTRA TODOS · SIN EQUIPOS',
+    maxPlayers: 8,
     teamBased: false,
   }),
   'team-deathmatch': Object.freeze({

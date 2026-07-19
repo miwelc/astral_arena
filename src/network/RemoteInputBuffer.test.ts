@@ -32,4 +32,14 @@ describe('RemoteInputBuffer', () => {
 
     expect(Array.from({ length: 4 }, () => buffer.next('guest')?.fire)).toEqual([true, false, true, false]);
   });
+
+  it('preserves quick crouch transitions for authoritative stance and radar state', () => {
+    const buffer = new RemoteInputBuffer();
+    buffer.push('guest', { ...emptyInput(), sequence: 1 });
+    buffer.push('guest', { ...emptyInput(), sequence: 2, crouch: true });
+    buffer.push('guest', { ...emptyInput(), sequence: 3, crouch: false });
+
+    expect(buffer.next('guest')).toMatchObject({ sequence: 2, crouch: true });
+    expect(buffer.next('guest')).toMatchObject({ sequence: 3, crouch: false });
+  });
 });

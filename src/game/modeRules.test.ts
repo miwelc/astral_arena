@@ -6,11 +6,12 @@ import { canonicalFormatForMode, isTeamGameMode, MODE_RULES } from './modeRules'
 const modes = Object.keys(MODE_RULES) as GameMode[];
 
 describe('mode-specific roster rules', () => {
-  it('uses 1v1 only for plain Deathmatch', () => {
+  it('allows a configurable 2-8-player free-for-all only for plain Deathmatch', () => {
     expect(MODE_RULES.deathmatch).toMatchObject({
       format: 'duel',
-      maxPlayers: 2,
+      maxPlayers: 8,
       teamBased: false,
+      formatLabel: '2–8 JUGADORES',
     });
   });
 

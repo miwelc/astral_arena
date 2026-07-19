@@ -83,6 +83,29 @@ describe('P2P MatchState validation', () => {
       fuse: -0.05,
       alive: true,
     });
+    state.pickups.push({
+      id: 'drop-fixture',
+      kind: 'weapon',
+      weaponId: 'sniper',
+      weaponState: {
+        id: 'sniper',
+        magazine: 2,
+        reserve: 5,
+        cooldown: 0,
+        reloadTimer: 0,
+        bloom: 0,
+        burstRemaining: 0,
+        burstRoundIndex: 0,
+        burstTimer: 0,
+      },
+      amount: 1,
+      temporary: true,
+      despawnTimer: 12,
+      available: true,
+      respawnTimer: 0,
+      respawnSeconds: 20,
+      position: { x: 3, y: 0.3, z: 4 },
+    });
     state.projectiles.push({
       id: 'bullet-fixture',
       kind: 'bullet',
@@ -149,6 +172,8 @@ describe('P2P MatchState validation', () => {
     ['map', (state: MatchState) => { (state.config as { mapId: string }).mapId = 'unknown-map'; }],
     ['mode', (state: MatchState) => { (state.config as { mode: string }).mode = 'racing'; }],
     ['format', (state: MatchState) => { (state.config as { format: string }).format = 'sixteen'; }],
+    ['player count', (state: MatchState) => { state.config.playerCount = 9; }],
+    ['noncanonical team player count', (state: MatchState) => { state.config.playerCount = 5; }],
     ['mode-incompatible format', (state: MatchState) => { state.config.format = 'duel'; }],
     ['phase', (state: MatchState) => { (state as { phase: string }).phase = 'paused'; }],
     ['missing tower', (state: MatchState) => { delete (state as Partial<MatchState>).tower; }],
@@ -163,6 +188,7 @@ describe('P2P MatchState validation', () => {
     const state = copy(makeState('team-deathmatch'));
     state.config.mode = 'deathmatch';
     state.config.format = 'duel';
+    state.config.playerCount = 2;
 
     expect(Object.keys(state.players)).toHaveLength(8);
     expect(isValidMatchState(state)).toBe(false);
@@ -176,12 +202,16 @@ describe('P2P MatchState validation', () => {
     ['missing input', (state: MatchState) => { delete (firstPlayer(state) as Partial<PlayerState>).input; }],
     ['invalid input number', (state: MatchState) => { firstPlayer(state).input.yaw = Number.POSITIVE_INFINITY; }],
     ['invalid use input', (state: MatchState) => { (firstPlayer(state).input as unknown as { use: string }).use = 'yes'; }],
+    ['invalid crouch input', (state: MatchState) => { (firstPlayer(state).input as unknown as { crouch: string }).crouch = 'yes'; }],
     ['invalid weapon', (state: MatchState) => { firstPlayer(state).inventory[0]!.id = 'laser' as WeaponId; }],
     ['invalid weapon bloom', (state: MatchState) => { firstPlayer(state).inventory[0]!.bloom = 1.5; }],
     ['invalid burst counter', (state: MatchState) => { firstPlayer(state).inventory[0]!.burstRemaining = 99; }],
     ['invalid burst round index', (state: MatchState) => { firstPlayer(state).inventory[0]!.burstRoundIndex = 99; }],
     ['invalid aim suppression', (state: MatchState) => {
       (firstPlayer(state) as unknown as { aimSuppressed: string }).aimSuppressed = 'yes';
+    }],
+    ['inconsistent crouch height', (state: MatchState) => {
+      firstPlayer(state).crouched = true;
     }],
     ['invalid active weapon', (state: MatchState) => { firstPlayer(state).activeWeapon = 99; }],
     ['invalid bot memory', (state: MatchState) => {
@@ -207,6 +237,12 @@ describe('P2P MatchState validation', () => {
     ['projectiles shape', (state: MatchState) => { state.projectiles = {} as MatchState['projectiles']; }],
     ['pickups shape', (state: MatchState) => { state.pickups = null as unknown as MatchState['pickups']; }],
     ['pickup field', (state: MatchState) => { (state.pickups[0] as unknown as { available: string }).available = 'yes'; }],
+    ['pickup amount', (state: MatchState) => { state.pickups[0]!.amount = 0; }],
+    ['pickup weapon mismatch', (state: MatchState) => {
+      const pickup = state.pickups.find((candidate) => candidate.kind === 'weapon');
+      if (!pickup) throw new Error('Missing weapon pickup fixture');
+      pickup.weaponState = { ...firstPlayer(state).inventory[0]!, id: 'sidearm' };
+    }],
     ['flags length', (state: MatchState) => { state.flags.pop(); }],
     ['duplicate flag team', (state: MatchState) => { state.flags[1]!.team = state.flags[0]!.team; }],
     ['events shape', (state: MatchState) => { state.events = {} as MatchState['events']; }],

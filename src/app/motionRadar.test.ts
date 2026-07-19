@@ -120,6 +120,25 @@ describe('movement radar contact projection', () => {
     expect(buildMotionRadarContacts(state, local.id)).toEqual([]);
   });
 
+  it('hides a moving crouched player unless that player fires', () => {
+    const state = createState({ mode: 'deathmatch' });
+    const local = player(state, 'local');
+    const target = player(state, 'target');
+    place(local, { x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 0 });
+    place(target, { x: 0, y: 0, z: -8 }, { x: 3, y: 0, z: 0 });
+    target.crouched = true;
+    target.height = 1.22;
+
+    expect(buildMotionRadarContacts(state, local.id)).toEqual([]);
+
+    state.elapsed = 4;
+    state.events.push({ id: 1, time: 4, type: 'shot', actorId: target.id });
+    expect(buildMotionRadarContacts(state, local.id)[0]).toMatchObject({
+      playerId: target.id,
+      revealedBy: 'motion',
+    });
+  });
+
   it('marks vertical separation and can detect vertical-only movement', () => {
     const state = createState(
       { mode: 'team-deathmatch', format: 'squads' },

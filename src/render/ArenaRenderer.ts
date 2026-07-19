@@ -47,6 +47,13 @@ import {
   type ScatterExclusion,
 } from './facilityEnvironment';
 import { createBaseArchitecture, type BaseArchitectureBundle } from './baseArchitecture';
+import {
+  artificialSurfaceColor,
+  classifyObstacleVisual,
+  createChamferedCargoGeometry,
+  createIndustrialPlanterVisual,
+  createOrganicObstacleGeometry,
+} from './terrainArchitecture';
 import { DepthFocusPass } from './DepthFocusPass';
 import {
   createColdEnvironmentTexture,
@@ -69,11 +76,15 @@ import {
   visualRecoilImpulse,
 } from './combatPresentation';
 import {
-  createWeaponModel,
   getWeaponAnchor,
   WEAPON_VIEW_POSES,
   type WeaponAnimationRole,
 } from './weaponModels';
+import {
+  createPreferredWeaponModel,
+  onExternalWeaponModelReady,
+  preloadExternalWeaponModels,
+} from './externalWeaponModels';
 
 const UP = new THREE.Vector3(0, 1, 0);
 const DOWN = new THREE.Vector3(0, -1, 0);
@@ -148,6 +159,7 @@ interface PlayerRig {
   lastTick: number;
   locomotionPhase: number;
   moveBlend: number;
+  crouchBlend: number;
   groundBlend: number;
   forwardBlend: number;
   strafeBlend: number;
@@ -188,6 +200,9 @@ interface PickupVisual {
   display: THREE.Group;
   baseY: number;
   phase: number;
+  temporary: boolean;
+  amount: number;
+  weaponId?: WeaponId;
 }
 
 interface ProjectileVisual {
@@ -330,44 +345,6 @@ const applyGeometrySurfaceTint = (
   geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
 };
 
-const createEarthworkGeometry = (
-  size: THREE.Vector3,
-  seed: number,
-  rocky: boolean,
-): THREE.BufferGeometry => {
-  const bevel = Math.min(
-    rocky ? 0.46 : 0.32,
-    Math.max(0.08, Math.min(size.x, size.y, size.z) * (rocky ? 0.3 : 0.18)),
-  );
-  const geometry = new RoundedBoxGeometry(size.x, size.y, size.z, rocky ? 6 : 5, bevel);
-  const positions = geometry.getAttribute('position');
-  const seedPhase = (seed % 997) * 0.017;
-  const halfHeight = Math.max(0.001, size.y * 0.5);
-  const maximumSurfaceNoise = Math.min(rocky ? 0.16 : 0.09, size.y * (rocky ? 0.13 : 0.08));
-  for (let index = 0; index < positions.count; index += 1) {
-    const x = positions.getX(index);
-    const y = positions.getY(index);
-    const z = positions.getZ(index);
-    const upperWeight = THREE.MathUtils.smoothstep(y, -halfHeight * 0.2, halfHeight * 0.72);
-    const noise = (
-      Math.sin(x * 0.71 + z * 0.43 + seedPhase)
-      + Math.cos(z * 0.83 - x * 0.31 + seedPhase * 1.7)
-    ) * 0.5;
-    const sideNoise = rocky ? upperWeight * Math.min(0.08, Math.min(size.x, size.z) * 0.012) : 0;
-    positions.setXYZ(
-      index,
-      x + Math.sin(z * 0.92 + seedPhase) * sideNoise,
-      y + noise * maximumSurfaceNoise * upperWeight,
-      z + Math.cos(x * 0.79 - seedPhase) * sideNoise,
-    );
-  }
-  positions.needsUpdate = true;
-  geometry.computeVertexNormals();
-  geometry.computeBoundingBox();
-  geometry.computeBoundingSphere();
-  return geometry;
-};
-
 const sampleGroundRelief = (map: MapDefinition, worldX: number, worldZ: number): number => {
   const depth = map.bounds.maxZ - map.bounds.minZ;
   const centerX = (map.bounds.minX + map.bounds.maxX) * 0.5;
@@ -445,6 +422,7 @@ export class ArenaRenderer {
   private readonly explosionShockGeometry = new THREE.TorusGeometry(1, 0.032, 7, 40);
   private readonly explosionGroundFlashGeometry = new THREE.CircleGeometry(1, 32);
   private readonly weaponTemplates = new Map<WeaponId, THREE.Group>();
+  private readonly retiredWeaponTemplates = new Set<THREE.Group>();
   private readonly worldDecorations: THREE.Object3D[] = [];
   private readonly ownedTextures = new Set<THREE.Texture>();
   private environmentTarget: THREE.WebGLRenderTarget | null = null;
@@ -498,6 +476,7 @@ export class ArenaRenderer {
   private viewSwayYaw = 0;
   private viewSwayPitch = 0;
   private viewAimBlend = 0;
+  private viewEyeHeight = 1.8 * 0.86;
   private previousViewYaw: number | null = null;
   private previousViewPitch: number | null = null;
   private localViewAim = false;
@@ -507,6 +486,7 @@ export class ArenaRenderer {
   private visualClockInitialized = false;
   private elapsedRenderTime = 0;
   private disposed = false;
+  private unsubscribeExternalWeapons: (() => void) | null = null;
 
   public constructor(container: HTMLElement, map: MapDefinition) {
     this.container = container;
@@ -654,6 +634,14 @@ export class ArenaRenderer {
     this.createViewModel();
     this.damageOverlay = this.createDamageOverlay();
 
+    this.unsubscribeExternalWeapons = onExternalWeaponModelReady((id) => {
+      this.refreshExternalWeaponPresentation(id);
+    });
+    // Decoding happens off the critical startup path. Procedural hard-surface
+    // models remain an immediate fallback and are swapped atomically as each
+    // local CC0 GLB becomes ready.
+    void preloadExternalWeaponModels();
+
     this.resize();
     this.resizeObserver =
       typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(() => this.resize());
@@ -769,6 +757,8 @@ export class ArenaRenderer {
     if (this.disposed) return;
     this.disposed = true;
     this.resizeObserver?.disconnect();
+    this.unsubscribeExternalWeapons?.();
+    this.unsubscribeExternalWeapons = null;
 
     // The environment bundle owns its instanced geometry, sign textures and
     // shared material kit. Dispose it before traversing the remaining scene so
@@ -803,6 +793,7 @@ export class ArenaRenderer {
     collect(this.scene);
     collect(this.viewScene);
     for (const template of this.weaponTemplates.values()) collect(template);
+    for (const template of this.retiredWeaponTemplates) collect(template);
     geometries.add(this.shotFlashGeometry);
     geometries.add(this.muzzleConeGeometry);
     geometries.add(this.shotSmokeGeometry);
@@ -1323,17 +1314,18 @@ export class ArenaRenderer {
       },
     });
     const raisedEarthworks = this.map.obstacles.filter((obstacle) =>
-      !obstacle.id.includes('outcrop')
-      && (
-        obstacle.id.includes('earth-')
-        || obstacle.id.includes('ridge')
-        || obstacle.id.includes('planter')
-      ));
-    const raisedEarthworkAt = (x: number, z: number) => raisedEarthworks.find((obstacle) =>
-      x > obstacle.min.x + 0.28
-      && x < obstacle.max.x - 0.28
-      && z > obstacle.min.z + 0.28
-      && z < obstacle.max.z - 0.28);
+      classifyObstacleVisual(obstacle) === 'earth');
+    const raisedEarthworkAt = (x: number, z: number) => raisedEarthworks.reduce<(typeof raisedEarthworks)[number] | undefined>(
+      (highest, obstacle) => {
+        const inside = x > obstacle.min.x + 0.28
+          && x < obstacle.max.x - 0.28
+          && z > obstacle.min.z + 0.28
+          && z < obstacle.max.z - 0.28;
+        if (!inside || (highest && highest.max.y >= obstacle.max.y)) return highest;
+        return obstacle;
+      },
+      undefined,
+    );
     const raisedUnderstory = createUnderstoryField({
       seed: 0xe47a1,
       bounds: playableBounds,
@@ -1344,8 +1336,8 @@ export class ArenaRenderer {
       densityAt: (x, z) => {
         const obstacle = raisedEarthworkAt(x, z);
         if (!obstacle) return 0;
-        if (obstacle.id.includes('approach') || obstacle.id.includes('step')) return 0.38;
-        return obstacle.id.includes('planter') ? 0.98 : 0.78;
+        if (/approach|step|shoulder/.test(obstacle.id)) return 0.38;
+        return obstacle.id.includes('berm') ? 0.86 : 0.68;
       },
       castShadow: false,
     });
@@ -1730,6 +1722,42 @@ export class ArenaRenderer {
       envMapIntensity: 0.48,
       vertexColors: true,
     });
+    const planterShellMaterial = new THREE.MeshPhysicalMaterial({
+      name: 'hydroponics-weathered-alloy',
+      color: 0x526c70,
+      map: this.facilityPanelTexture,
+      normalMap: this.technicalNormalTexture,
+      normalScale: new THREE.Vector2(0.32, 0.32),
+      roughnessMap: this.technicalRoughnessTexture,
+      roughness: 0.48,
+      metalness: 0.32,
+      clearcoat: 0.16,
+      clearcoatRoughness: 0.42,
+      envMapIntensity: 0.82,
+    });
+    const planterFrameMaterial = new THREE.MeshStandardMaterial({
+      name: 'hydroponics-graphite-frame',
+      color: 0x18282d,
+      roughness: 0.35,
+      metalness: 0.68,
+      envMapIntensity: 1.04,
+    });
+    const planterAccentMaterial = new THREE.MeshStandardMaterial({
+      name: 'hydroponics-status-light',
+      color: 0x7adbd0,
+      emissive: 0x2bbcaf,
+      emissiveIntensity: 1.45,
+      roughness: 0.2,
+      metalness: 0.24,
+      toneMapped: false,
+    });
+    const planterFoliageMaterial = new THREE.MeshStandardMaterial({
+      name: 'hydroponics-ordered-crops',
+      color: 0x73a85f,
+      roughness: 0.82,
+      metalness: 0,
+      side: THREE.DoubleSide,
+    });
 
     for (const obstacle of this.map.obstacles) {
       const size = new THREE.Vector3(
@@ -1745,10 +1773,11 @@ export class ArenaRenderer {
       // These collision volumes are rendered as segmented walls/skylights by
       // baseArchitecture so their glass reveals the playable interiors.
       if (ARCHITECTURE_AUTHORED_SHELLS.has(obstacle.id)) continue;
-      const isRockyOutcrop = obstacle.id.includes('outcrop') || /^(north|south)-mid-cover/.test(obstacle.id);
-      const isEarthwork = isRockyOutcrop || obstacle.id.includes('earth-') || obstacle.id.includes('ridge') || obstacle.id.includes('planter');
-      if (isEarthwork) {
-        const geometry = createEarthworkGeometry(size, hashString(obstacle.id), isRockyOutcrop);
+      const visualClass = classifyObstacleVisual(obstacle);
+      if (visualClass === 'authored') continue;
+      if (visualClass === 'earth' || visualClass === 'rock') {
+        const isRockyOutcrop = visualClass === 'rock';
+        const geometry = createOrganicObstacleGeometry(size, hashString(obstacle.id), isRockyOutcrop);
         applyGeometryUvTransform(
           geometry,
           computeSurfaceUvTransform(
@@ -1773,6 +1802,16 @@ export class ArenaRenderer {
         this.scene.add(terrain);
         continue;
       }
+      if (visualClass === 'planter') {
+        this.scene.add(createIndustrialPlanterVisual(obstacle, {
+          shell: planterShellMaterial,
+          frame: planterFrameMaterial,
+          soil: earthworkMaterial,
+          foliage: planterFoliageMaterial,
+          accent: planterAccentMaterial,
+        }));
+        continue;
+      }
       const authoredPropDetail = /cover|crate|console|screen|slab/.test(obstacle.id);
       const isCompactDetailedProp = authoredPropDetail
         && obstacle.kind === 'cover'
@@ -1780,20 +1819,17 @@ export class ArenaRenderer {
         && size.y <= 4.5
         && size.z <= 8.5
         && !obstacle.id.includes('growbed');
-      const baseColor = obstacle.kind === 'tower'
-        ? new THREE.Color(0x172327)
-        : obstacle.id.includes('base-back')
-          ? new THREE.Color(0x9fbd47)
-          : obstacle.id.includes('ridge')
-            ? new THREE.Color(0xc7d1cc)
-            : new THREE.Color(0xdce3df);
+      const baseColor = new THREE.Color(artificialSurfaceColor(obstacle));
       const material = paintMaterial.clone();
       material.color.copy(baseColor);
       material.roughness = obstacle.kind === 'tower' ? 0.32 : 0.38;
       material.metalness = obstacle.kind === 'tower' ? 0.48 : 0.08;
       const minimum = Math.min(size.x, size.y, size.z);
       const bevel = Math.min(0.16, Math.max(0.035, minimum * 0.12));
-      const geometry = new RoundedBoxGeometry(size.x, size.y, size.z, 3, bevel);
+      const isCargoPod = /^cover-(?:nw|ne|sw|se)-(?:a|b)$/.test(obstacle.id);
+      const geometry = isCargoPod
+        ? createChamferedCargoGeometry(size)
+        : new RoundedBoxGeometry(size.x, size.y, size.z, 3, bevel);
       applyGeometryUvTransform(
         geometry,
         computeSurfaceUvTransform(
@@ -2455,6 +2491,7 @@ export class ArenaRenderer {
     const strafeSpeed = player.velocity.x * rightX + player.velocity.z * rightZ;
     const locomotion = evaluateLocomotionCycle(horizontalSpeed, forwardSpeed, strafeSpeed, delta);
     rig.moveBlend = damp(rig.moveBlend, locomotion.moveBlend, 13, delta);
+    rig.crouchBlend = damp(rig.crouchBlend, player.crouched ? 1 : 0, player.crouched ? 15 : 11, delta);
     rig.groundBlend = damp(rig.groundBlend, player.grounded ? 1 : 0, player.grounded ? 19 : 13, delta);
     rig.forwardBlend = damp(rig.forwardBlend, locomotion.forwardBlend, 10, delta);
     rig.strafeBlend = damp(rig.strafeBlend, locomotion.strafeBlend, 10, delta);
@@ -2480,23 +2517,29 @@ export class ArenaRenderer {
     const jumpWeight = trianglePulse(jumpProgress, 0, 0.18, 1);
     const hitWeight = trianglePulse(normalizedTimer(rig.hitTimer, 0.24), 0, 0.18, 1);
 
-    const leftHipX = gait.leftHipPitch * groundedWeight + leftAirHip * airborneWeight - jumpWeight * 0.08;
-    const rightHipX = gait.rightHipPitch * groundedWeight + rightAirHip * airborneWeight - jumpWeight * 0.02;
+    const crouchHip = rig.crouchBlend * 0.68;
+    const crouchKnee = rig.crouchBlend * 1.35;
+    const leftHipX = gait.leftHipPitch * groundedWeight + leftAirHip * airborneWeight - jumpWeight * 0.08 + crouchHip;
+    const rightHipX = gait.rightHipPitch * groundedWeight + rightAirHip * airborneWeight - jumpWeight * 0.02 + crouchHip;
     const airKnee = rise * 0.52 + fall * 0.12;
-    const leftKneeX = gait.leftKnee * groundedWeight + airKnee * airborneWeight + landingWeight * 0.72;
-    const rightKneeX = gait.rightKnee * groundedWeight + airKnee * airborneWeight + landingWeight * 0.72;
+    const leftKneeX = gait.leftKnee * groundedWeight + airKnee * airborneWeight + landingWeight * 0.72 + crouchKnee;
+    const rightKneeX = gait.rightKnee * groundedWeight + airKnee * airborneWeight + landingWeight * 0.72 + crouchKnee;
 
+    rig.leftLeg.position.y = 1.075 - rig.crouchBlend * 0.36;
+    rig.rightLeg.position.y = 1.075 - rig.crouchBlend * 0.36;
     rig.leftLeg.rotation.set(leftHipX, 0, gait.leftHipRoll * groundedWeight);
     rig.rightLeg.rotation.set(rightHipX, 0, gait.rightHipRoll * groundedWeight);
     rig.leftKnee.rotation.set(-leftKneeX, 0, 0);
     rig.rightKnee.rotation.set(-rightKneeX, 0, 0);
     rig.leftFoot.rotation.set(
-      THREE.MathUtils.lerp(gait.leftFootPitch, -leftHipX + leftKneeX * 0.78, airborneWeight),
+      THREE.MathUtils.lerp(gait.leftFootPitch, -leftHipX + leftKneeX * 0.78, airborneWeight)
+        + rig.crouchBlend * 0.3,
       0,
       -gait.leftHipRoll * 0.34 * groundedWeight,
     );
     rig.rightFoot.rotation.set(
-      THREE.MathUtils.lerp(gait.rightFootPitch, -rightHipX + rightKneeX * 0.78, airborneWeight),
+      THREE.MathUtils.lerp(gait.rightFootPitch, -rightHipX + rightKneeX * 0.78, airborneWeight)
+        + rig.crouchBlend * 0.3,
       0,
       -gait.rightHipRoll * 0.34 * groundedWeight,
     );
@@ -2510,14 +2553,15 @@ export class ArenaRenderer {
     const lateralSway = Math.cos(rig.locomotionPhase) * 0.018 * rig.moveBlend * groundedWeight;
     rig.torso.position.set(
       lateralSway,
-      ASTRONAUT_WAIST_HEIGHT + breathing + gaitBob - landingWeight * 0.12,
+      ASTRONAUT_WAIST_HEIGHT + breathing + gaitBob - landingWeight * 0.12 - rig.crouchBlend * 0.36,
       0,
     );
     rig.torso.rotation.set(
       player.pitch * 0.075
         + gait.torsoPitch * groundedWeight
         + landingWeight * 0.1
-        + fall * airborneWeight * 0.055,
+        + fall * airborneWeight * 0.055
+        + rig.crouchBlend * 0.08,
       0,
       (gait.torsoRoll + gait.pelvisRoll * 0.42) * groundedWeight
         - cycle * 0.012 * rig.moveBlend * groundedWeight
@@ -2533,6 +2577,11 @@ export class ArenaRenderer {
       Math.sin(visualTime * 0.43) * 0.012 * (1 - rig.moveBlend),
       rig.strafeBlend * 0.025 * rig.moveBlend,
     );
+    rig.head.position.y = 1.63 - ASTRONAUT_WAIST_HEIGHT - rig.crouchBlend * 0.18;
+    rig.friendlyMarker.position.y = THREE.MathUtils.lerp(2.55, 1.92, rig.crouchBlend);
+    rig.shield.position.y = THREE.MathUtils.lerp(0.92, 0.61, rig.crouchBlend);
+    rig.shield.scale.y = THREE.MathUtils.lerp(1.35, 0.83, rig.crouchBlend);
+    rig.juggernautRing.position.y = THREE.MathUtils.lerp(2.18, 1.55, rig.crouchBlend);
 
     let actionKind: 'none' | 'reload' | 'swap' | 'melee' | 'grenade' = 'none';
     let actionPose: ActionPoseWeights = { lower: 0, twist: 0, part: 0, hand: 0 };
@@ -3173,6 +3222,7 @@ export class ArenaRenderer {
       lastTick: -1,
       locomotionPhase: (hashString(player.id) % 628) * 0.01,
       moveBlend: 0,
+      crouchBlend: player.crouched ? 1 : 0,
       groundBlend: player.grounded ? 1 : 0,
       forwardBlend: 0,
       strafeBlend: 0,
@@ -3305,10 +3355,36 @@ export class ArenaRenderer {
     forearm.quaternion.setFromUnitVectors(DOWN, localLowerDirection);
   }
 
+  private refreshExternalWeaponPresentation(id: WeaponId): void {
+    if (this.disposed) return;
+    const previousTemplate = this.weaponTemplates.get(id);
+    if (previousTemplate) {
+      this.retiredWeaponTemplates.add(previousTemplate);
+      this.weaponTemplates.delete(id);
+    }
+
+    for (const rig of this.playerRigs.values()) {
+      if (rig.weaponId !== id) continue;
+      rig.weaponId = null;
+      this.setRigWeapon(rig, id);
+      rig.swapTimer = 0;
+    }
+    if (this.viewWeaponId === id) {
+      this.viewWeaponId = null;
+      this.setViewWeapon(id);
+    }
+    for (const [pickupId, visual] of this.pickupVisuals) {
+      if (visual.weaponId !== id) continue;
+      visual.root.removeFromParent();
+      disposeObject(visual.root);
+      this.pickupVisuals.delete(pickupId);
+    }
+  }
+
   private getWeaponTemplate(id: WeaponId): THREE.Group {
     const cached = this.weaponTemplates.get(id);
     if (cached) return cached;
-    const group = createWeaponModel(id);
+    const group = createPreferredWeaponModel(id);
     group.traverse((object) => {
       object.userData.sharedVisualTemplate = true;
       if (!(object instanceof THREE.Mesh)) return;
@@ -3331,6 +3407,12 @@ export class ArenaRenderer {
     for (const pickup of pickups) {
       present.add(pickup.id);
       let visual = this.pickupVisuals.get(pickup.id);
+      if (visual && visual.amount !== pickup.amount) {
+        visual.root.removeFromParent();
+        disposeObject(visual.root);
+        this.pickupVisuals.delete(pickup.id);
+        visual = undefined;
+      }
       if (!visual) {
         visual = this.createPickup(pickup);
         this.pickupVisuals.set(pickup.id, visual);
@@ -3342,11 +3424,26 @@ export class ArenaRenderer {
         visual.baseY,
         pickup.position.z,
       );
-      visual.display.position.y = Math.sin(worldTime * 2.15 + visual.phase) * 0.13;
-      visual.display.rotation.y = worldTime * 0.72 + visual.phase;
+      if (visual.temporary) {
+        // Equipment dropped on death stays where it fell instead of presenting
+        // itself like a pristine rack spawn. A small authored yaw keeps piles
+        // readable without the arcade-like hover and continuous rotation.
+        visual.display.position.y = 0;
+        visual.display.rotation.y = visual.phase;
+      } else {
+        visual.display.position.y = Math.sin(worldTime * 2.15 + visual.phase) * 0.13;
+        visual.display.rotation.y = worldTime * 0.72 + visual.phase;
+      }
     }
     for (const [id, visual] of this.pickupVisuals) {
-      if (!present.has(id)) visual.root.visible = false;
+      if (present.has(id)) continue;
+      // Weapon/grenade death drops are intentionally short-lived. Their
+      // weapon meshes clone shared templates while rings/grenade shells are
+      // owned per pickup. disposeObject skips the former and releases the
+      // latter, avoiding both broken templates and a long-session GPU leak.
+      visual.root.removeFromParent();
+      disposeObject(visual.root);
+      this.pickupVisuals.delete(id);
     }
   }
 
@@ -3355,50 +3452,53 @@ export class ArenaRenderer {
     const display = new THREE.Group();
     root.add(display);
     const glowColor = pickup.weaponId ? WEAPONS[pickup.weaponId].tint : pickup.kind === 'overshield' ? 0x65f1e5 : 0x9ebfd2;
-    const pedestal = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.48, 0.62, 0.16, 20),
-      new THREE.MeshStandardMaterial({
-        color: 0x102531,
-        roughness: 0.38,
-        metalness: 0.68,
-        envMapIntensity: 1.05,
-      }),
-    );
-    pedestal.position.y = -0.36;
-    pedestal.castShadow = true;
-    pedestal.receiveShadow = true;
-    root.add(pedestal);
-    const pedestalLight = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.37, 0.44, 0.055, 20),
-      new THREE.MeshStandardMaterial({
-        color: glowColor,
-        emissive: glowColor,
-        emissiveIntensity: 1.8,
-        roughness: 0.22,
-        metalness: 0.24,
-      }),
-    );
-    pedestalLight.position.y = -0.25;
-    root.add(pedestalLight);
+    if (!pickup.temporary) {
+      const pedestal = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.48, 0.62, 0.16, 20),
+        new THREE.MeshStandardMaterial({
+          color: 0x102531,
+          roughness: 0.38,
+          metalness: 0.68,
+          envMapIntensity: 1.05,
+        }),
+      );
+      pedestal.position.y = -0.36;
+      pedestal.castShadow = true;
+      pedestal.receiveShadow = true;
+      root.add(pedestal);
+      const pedestalLight = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.37, 0.44, 0.055, 20),
+        new THREE.MeshStandardMaterial({
+          color: glowColor,
+          emissive: glowColor,
+          emissiveIntensity: 1.8,
+          roughness: 0.22,
+          metalness: 0.24,
+        }),
+      );
+      pedestalLight.position.y = -0.25;
+      root.add(pedestalLight);
+    }
     const ring = new THREE.Mesh(
-      new THREE.TorusGeometry(0.46, 0.025, 6, 20),
+      new THREE.TorusGeometry(pickup.temporary ? 0.37 : 0.46, pickup.temporary ? 0.012 : 0.025, 6, 20),
       new THREE.MeshBasicMaterial({
         color: glowColor,
         transparent: true,
-        opacity: 0.62,
+        opacity: pickup.temporary ? 0.24 : 0.62,
         blending: THREE.AdditiveBlending,
         depthWrite: false,
       }),
     );
     ring.rotation.x = Math.PI / 2;
+    ring.position.y = pickup.temporary ? -0.2 : 0;
     display.add(ring);
 
     if (pickup.kind === 'weapon' && pickup.weaponId) {
       const weapon = this.getWeaponTemplate(pickup.weaponId).clone(true);
       const pickupScale = pickup.weaponId === 'sidearm' ? 0.44 : pickup.weaponId === 'rocket-launcher' ? 0.3 : 0.34;
       weapon.scale.setScalar(pickupScale);
-      weapon.rotation.z = 0.18;
-      weapon.position.y = 0.17;
+      weapon.rotation.z = pickup.temporary ? 0.08 : 0.18;
+      weapon.position.y = pickup.temporary ? -0.02 : 0.17;
       display.add(weapon);
     } else if (pickup.kind === 'overshield') {
       const core = new THREE.Mesh(
@@ -3420,19 +3520,21 @@ export class ArenaRenderer {
       shell.position.y = 0.18;
       display.add(shell);
     } else if (pickup.kind === 'grenade') {
-      const grenade = new THREE.Mesh(
-        new THREE.IcosahedronGeometry(0.25, 1),
-        new THREE.MeshStandardMaterial({ color: 0x466d6f, roughness: 0.54, metalness: 0.42 }),
-      );
-      grenade.position.y = 0.16;
-      display.add(grenade);
-      const cap = new THREE.Mesh(
-        new THREE.TorusGeometry(0.1, 0.025, 5, 10),
-        new THREE.MeshStandardMaterial({ color: 0xb3ded5, metalness: 0.6, roughness: 0.3 }),
-      );
-      cap.position.y = 0.43;
-      cap.rotation.x = Math.PI / 2;
-      display.add(cap);
+      const grenadeMaterial = new THREE.MeshStandardMaterial({ color: 0x466d6f, roughness: 0.54, metalness: 0.42 });
+      const capMaterial = new THREE.MeshStandardMaterial({ color: 0xb3ded5, metalness: 0.6, roughness: 0.3 });
+      const visibleAmount = Math.min(2, Math.max(1, pickup.amount));
+      for (let index = 0; index < visibleAmount; index += 1) {
+        const offset = visibleAmount === 1 ? 0 : (index === 0 ? -0.16 : 0.16);
+        const grenade = new THREE.Mesh(new THREE.IcosahedronGeometry(0.22, 1), grenadeMaterial);
+        grenade.position.set(offset, pickup.temporary ? -0.02 : 0.14, index * 0.035);
+        grenade.rotation.z = pickup.temporary ? (index === 0 ? -0.38 : 0.42) : 0;
+        display.add(grenade);
+        const cap = new THREE.Mesh(new THREE.TorusGeometry(0.085, 0.022, 5, 10), capMaterial);
+        cap.position.set(offset, pickup.temporary ? 0.21 : 0.38, index * 0.035);
+        cap.rotation.x = Math.PI / 2;
+        cap.rotation.z = grenade.rotation.z;
+        display.add(cap);
+      }
     } else {
       const crate = new THREE.Mesh(
         new THREE.BoxGeometry(0.58, 0.34, 0.42),
@@ -3454,7 +3556,15 @@ export class ArenaRenderer {
       if (object instanceof THREE.Mesh && !(object.material instanceof THREE.MeshBasicMaterial)) object.castShadow = true;
     });
     root.position.set(pickup.position.x, pickup.position.y, pickup.position.z);
-    return { root, display, baseY: pickup.position.y, phase: (hashString(pickup.id) % 628) / 100 };
+    return {
+      root,
+      display,
+      baseY: pickup.position.y,
+      phase: (hashString(pickup.id) % 628) / 100,
+      temporary: pickup.temporary,
+      amount: pickup.amount,
+      weaponId: pickup.weaponId,
+    };
   }
 
   private syncFlags(flags: FlagState[], state: MatchState, worldTime: number): void {
@@ -4666,8 +4776,14 @@ export class ArenaRenderer {
       ) * localRig.landingStrength;
       const jumpWeight = trianglePulse(normalizedTimer(localRig.jumpTimer, 0.32), 0, 0.18, 1);
       const eyeHeight = localPlayer.height * 0.86;
+      this.viewEyeHeight = damp(
+        this.viewEyeHeight,
+        eyeHeight,
+        localPlayer.crouched ? 15 : 11,
+        delta,
+      );
       this.camera.position.copy(localRig.root.position);
-      this.camera.position.y += eyeHeight
+      this.camera.position.y += this.viewEyeHeight
         + weaponBob.y * 0.62
         - landingWeight * 0.085
         + jumpWeight * 0.024;

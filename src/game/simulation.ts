@@ -1,4 +1,4 @@
-import { hasLineOfSight, moveCapsule, raycastWorld } from './collision';
+import { canOccupyCapsule, hasLineOfSight, moveCapsule, raycastWorld } from './collision';
 import { isJumpPad, MAPS } from './map';
 import { canonicalFormatForMode, isTeamGameMode, rulesForMode } from './modeRules';
 import { damageScaleAtDistance, sampleDirectionInCone, shotSpread } from './gunplay';
@@ -38,6 +38,7 @@ import { createWeaponState, DEFAULT_LOADOUT, TOWER_LOADOUT, WEAPONS } from './we
 import { createBotMemory, updateBotInputs } from './bots';
 
 const FIXED_PLAYER_HEIGHT = 1.8;
+const CROUCHED_PLAYER_HEIGHT = 1.22;
 const FIXED_PLAYER_RADIUS = 0.48;
 const PROJECTILE_GRAVITY = 18;
 export const PLAYER_MOVEMENT_TUNING = Object.freeze({
@@ -47,7 +48,10 @@ export const PLAYER_MOVEMENT_TUNING = Object.freeze({
   airAcceleration: 4.8,
   gravity: 15.5,
   jumpVelocity: 6.85,
+  crouchSpeedScale: 0.56,
 });
+export const MAX_PLAYER_GRENADES = 2;
+export const DROPPED_PICKUP_LIFETIME_SECONDS = 20;
 const SHIELD_RECHARGE_DELAY = 5;
 const SHIELD_RECHARGE_RATE = 100 / 1.75;
 const MAX_HEALTH = 70;
@@ -132,6 +136,12 @@ const horizontalDistanceSquared = (from: Vec3, to: Vec3): number => {
   return x * x + z * z;
 };
 
+const normalizedPlayerCount = (mode: MatchConfig['mode'], requested: number | undefined): number => {
+  if (mode !== 'deathmatch') return rulesForMode(mode).maxPlayers;
+  const finiteRequested = requested !== undefined && Number.isFinite(requested) ? Math.floor(requested) : 2;
+  return clamp(finiteRequested, 2, rulesForMode(mode).maxPlayers);
+};
+
 /** Shared by simulation and HUD prompts so the usable control deck is unambiguous. */
 export const canUseTowerTurret = (player: PlayerState, tower: MatchState['tower']): boolean =>
   player.alive
@@ -198,11 +208,13 @@ export class GameSimulation {
   private resolvingMeleeHits = false;
   private pendingJuggernautSuccessorId: string | null = null;
   private projectileSequence = 0;
+  private pickupSequence = 0;
 
   public constructor(config: MatchConfig, initialHumans: Array<{ id: string; name: string; kind?: PlayerKind }> = []) {
     const normalizedConfig: MatchConfig = {
       ...config,
       format: canonicalFormatForMode(config.mode),
+      playerCount: normalizedPlayerCount(config.mode, config.playerCount),
     };
     this.map = MAPS[normalizedConfig.mapId];
     const seed = hashString(`${normalizedConfig.mode}:${normalizedConfig.format}:${Date.now()}`);
@@ -220,7 +232,15 @@ export class GameSimulation {
       projectiles: [],
       pickups: this.map.pickups
         .filter((pickup) => normalizedConfig.mode !== 'towah-of-powah' || (pickup.kind !== 'overshield' && (pickup.kind !== 'weapon' || pickup.weaponId === 'shotgun')))
-        .map((pickup) => ({ ...pickup, position: cloneVec3(pickup.position), available: true, respawnTimer: 0 })),
+        .map((pickup) => ({
+          ...pickup,
+          position: cloneVec3(pickup.position),
+          amount: pickup.kind === 'grenade' ? 2 : 1,
+          temporary: false,
+          despawnTimer: 0,
+          available: true,
+          respawnTimer: 0,
+        })),
       flags: [
         {
           team: 'aurora',
@@ -261,7 +281,7 @@ export class GameSimulation {
   }
 
   public get maxPlayers(): number {
-    return rulesForMode(this.state.config.mode).maxPlayers;
+    return this.state.config.playerCount;
   }
 
   public setInput(playerId: string, input: PlayerInput): void {
@@ -383,6 +403,7 @@ export class GameSimulation {
       pitch: 0,
       radius: FIXED_PLAYER_RADIUS,
       height: FIXED_PLAYER_HEIGHT,
+      crouched: false,
       grounded: false,
       alive: true,
       health: MAX_HEALTH,
@@ -394,7 +415,7 @@ export class GameSimulation {
       spawnProtection: 1,
       inventory: loadout.map(createWeaponState),
       activeWeapon: 0,
-      grenades: 2,
+      grenades: MAX_PLAYER_GRENADES,
       meleeCooldown: 0,
       grenadeCooldown: 0,
       equipTimer: 0,
@@ -543,11 +564,14 @@ export class GameSimulation {
   }
 
   private updateMovement(player: PlayerState, dt: number, jumpPressed: boolean): void {
+    this.updateCrouchStance(player);
     const forward = { x: -Math.sin(player.yaw), y: 0, z: -Math.cos(player.yaw) };
     const right = { x: Math.cos(player.yaw), y: 0, z: -Math.sin(player.yaw) };
     let wish = add(scale(right, player.input.moveX), scale(forward, player.input.moveZ));
     if (dot(wish, wish) > 1) wish = normalize(wish);
-    const speedModifier = (player.isJuggernaut ? 0.95 : 1) * (player.carryingFlagTeam ? 0.95 : 1);
+    const speedModifier = (player.isJuggernaut ? 0.95 : 1)
+      * (player.carryingFlagTeam ? 0.95 : 1)
+      * (player.crouched ? PLAYER_MOVEMENT_TUNING.crouchSpeedScale : 1);
     const hasMovementInput = dot(wish, wish) >= 0.01;
     const desired = scale(wish, PLAYER_MOVEMENT_TUNING.moveSpeed * speedModifier);
     // Ground movement stays responsive, but reaches its top speed progressively
@@ -594,6 +618,26 @@ export class GameSimulation {
     player.velocity = movement.velocity;
     player.grounded = movement.grounded;
     if (movement.grounded) this.jumpPadMomentum.delete(player.id);
+  }
+
+  private updateCrouchStance(player: PlayerState): void {
+    if (player.input.crouch) {
+      player.crouched = true;
+      player.height = CROUCHED_PLAYER_HEIGHT;
+      return;
+    }
+    if (!player.crouched) {
+      player.height = FIXED_PLAYER_HEIGHT;
+      return;
+    }
+    if (canOccupyCapsule(player.position, player.radius, FIXED_PLAYER_HEIGHT, this.map)) {
+      player.crouched = false;
+      player.height = FIXED_PLAYER_HEIGHT;
+    } else {
+      // Keep the compact capsule until there is genuine headroom. Feet never
+      // move, so releasing crouch beneath a beam cannot clip into geometry.
+      player.height = CROUCHED_PLAYER_HEIGHT;
+    }
   }
 
   private updateShieldRecharge(player: PlayerState, dt: number): void {
@@ -1124,6 +1168,7 @@ export class GameSimulation {
     metadata: Pick<GameEvent, 'headshot' | 'backStrike'> = {},
   ): void {
     if (!victim.alive) return;
+    this.dropDeathEquipment(victim);
     victim.alive = false;
     victim.health = 0;
     victim.deaths += 1;
@@ -1185,6 +1230,66 @@ export class GameSimulation {
       const successor = Object.values(this.state.players).find((player) => player.alive && player.id !== victim.id);
       if (successor) this.makeJuggernaut(successor);
     }
+  }
+
+  private dropDeathEquipment(victim: PlayerState): void {
+    const activeWeapon = victim.inventory[victim.activeWeapon];
+    const right = { x: Math.cos(victim.yaw), y: 0, z: -Math.sin(victim.yaw) };
+    if (activeWeapon) {
+      const droppedWeapon = {
+        ...activeWeapon,
+        cooldown: 0,
+        reloadTimer: 0,
+        bloom: 0,
+        burstRemaining: 0,
+        burstRoundIndex: 0,
+        burstTimer: 0,
+      };
+      this.addDeathPickup({
+        kind: 'weapon',
+        position: add(victim.position, add(scale(right, -0.38), vec3(0, 0.28, 0))),
+        weaponId: activeWeapon.id,
+        weaponState: droppedWeapon,
+        amount: 1,
+      });
+      // The authoritative copy now lives in the pickup. Clearing the corpse
+      // prevents a later system from duplicating its ammunition before respawn.
+      activeWeapon.magazine = 0;
+      activeWeapon.reserve = 0;
+    }
+    if (victim.grenades > 0) {
+      this.addDeathPickup({
+        kind: 'grenade',
+        position: add(victim.position, add(scale(right, 0.38), vec3(0, 0.24, 0))),
+        amount: victim.grenades,
+      });
+      victim.grenades = 0;
+    }
+  }
+
+  private addDeathPickup(
+    drop: Pick<PickupState, 'kind' | 'position' | 'amount'>
+      & Pick<Partial<PickupState>, 'weaponId' | 'weaponState'>,
+  ): void {
+    // Bound temporary state so an unusually long or highly lethal session can
+    // never exceed the P2P snapshot budget.
+    if (this.state.pickups.length >= 112) {
+      const oldestDropIndex = this.state.pickups.findIndex((pickup) => pickup.temporary);
+      if (oldestDropIndex >= 0) this.state.pickups.splice(oldestDropIndex, 1);
+    }
+    this.state.pickups.push({
+      id: `drop-${this.state.tick}-${++this.pickupSequence}`,
+      kind: drop.kind,
+      position: cloneVec3(drop.position),
+      weaponId: drop.weaponId,
+      weaponState: drop.weaponState ? { ...drop.weaponState } : undefined,
+      amount: drop.amount,
+      temporary: true,
+      despawnTimer: DROPPED_PICKUP_LIFETIME_SECONDS,
+      available: true,
+      respawnTimer: 0,
+      respawnSeconds: DROPPED_PICKUP_LIFETIME_SECONDS,
+    });
   }
 
   private awardJuggernautPoint(player: PlayerState): void {
@@ -1395,18 +1500,28 @@ export class GameSimulation {
   }
 
   private updatePickups(dt: number): void {
+    const remainingPickups: PickupState[] = [];
     for (const pickup of this.state.pickups) {
+      if (pickup.temporary) {
+        pickup.despawnTimer = Math.max(0, pickup.despawnTimer - dt);
+        if (pickup.despawnTimer === 0) continue;
+      }
       if (!pickup.available) {
         pickup.respawnTimer = Math.max(0, pickup.respawnTimer - dt);
         if (pickup.respawnTimer === 0) pickup.available = true;
+        remainingPickups.push(pickup);
         continue;
       }
+      let removeTemporaryPickup = false;
       for (const player of Object.values(this.state.players)) {
         if (!player.alive || distanceSquared(player.position, pickup.position) > 2.2) continue;
         let consumed = false;
-        if (pickup.kind === 'grenade' && player.grenades < 2) {
-          player.grenades += 1;
-          consumed = true;
+        let grantedAmount = 0;
+        if (pickup.kind === 'grenade' && player.grenades < MAX_PLAYER_GRENADES) {
+          const before = player.grenades;
+          player.grenades = Math.min(MAX_PLAYER_GRENADES, player.grenades + pickup.amount);
+          grantedAmount = player.grenades - before;
+          consumed = grantedAmount > 0;
         } else if (pickup.kind === 'overshield' && !player.isJuggernaut && player.maxShield > 0 && player.shield < 175) {
           player.shield = Math.min(175, player.shield + 75);
           player.overshieldDecayDelay = 10;
@@ -1423,26 +1538,66 @@ export class GameSimulation {
         } else if (canUseWeaponPickup(player, pickup) && pickup.weaponId && this.hasUnconsumedUse(player.id)) {
           const existing = player.inventory.find((weapon) => weapon.id === pickup.weaponId);
           if (existing) {
-            const previousReserve = existing.reserve;
-            existing.reserve = Math.min(WEAPONS[existing.id].maxReserve, existing.reserve + WEAPONS[existing.id].magazineSize);
-            consumed = existing.reserve > previousReserve;
+            const definition = WEAPONS[existing.id];
+            const ammunition = pickup.weaponState
+              ? pickup.weaponState.magazine + pickup.weaponState.reserve
+              : definition.magazineSize;
+            const reserveGrant = Math.min(Math.max(0, definition.maxReserve - existing.reserve), ammunition);
+            existing.reserve += reserveGrant;
+            grantedAmount = reserveGrant;
+            consumed = grantedAmount > 0;
           } else if (player.inventory.length < 2) {
-            player.inventory.push(createWeaponState(pickup.weaponId));
+            player.inventory.push(this.weaponFromPickup(pickup));
             consumed = true;
           } else {
-            player.inventory[player.activeWeapon] = createWeaponState(pickup.weaponId);
+            player.inventory[player.activeWeapon] = this.weaponFromPickup(pickup);
+            player.equipTimer = WEAPON_EQUIP_SECONDS;
             consumed = true;
           }
         }
         if (consumed) {
           if (pickup.kind === 'weapon') this.consumeUse(player.id);
-          pickup.available = false;
-          pickup.respawnTimer = pickup.respawnSeconds;
-          this.pushEvent({ type: 'pickup', actorId: player.id, weaponId: pickup.weaponId, position: cloneVec3(pickup.position) });
+          if (pickup.temporary && pickup.kind === 'grenade') {
+            // A two-grenade death pile can be shared: a player carrying one
+            // takes only the free slot and leaves the second grenade behind.
+            pickup.amount = Math.max(0, pickup.amount - grantedAmount);
+            removeTemporaryPickup = pickup.amount === 0;
+          } else if (pickup.temporary) removeTemporaryPickup = true;
+          else {
+            pickup.available = false;
+            pickup.respawnTimer = pickup.respawnSeconds;
+          }
+          this.pushEvent({
+            type: 'pickup',
+            actorId: player.id,
+            weaponId: pickup.weaponId,
+            position: cloneVec3(pickup.position),
+            amount: grantedAmount || undefined,
+          });
           break;
         }
       }
+      if (!removeTemporaryPickup) remainingPickups.push(pickup);
     }
+    this.state.pickups = remainingPickups;
+  }
+
+  private weaponFromPickup(pickup: PickupState): PlayerState['inventory'][number] {
+    if (!pickup.weaponId) throw new Error('A weapon pickup must identify its weapon');
+    if (!pickup.weaponState) return createWeaponState(pickup.weaponId);
+    const definition = WEAPONS[pickup.weaponId];
+    return {
+      ...pickup.weaponState,
+      id: pickup.weaponId,
+      magazine: clamp(Math.floor(pickup.weaponState.magazine), 0, definition.magazineSize),
+      reserve: clamp(Math.floor(pickup.weaponState.reserve), 0, definition.maxReserve),
+      cooldown: 0,
+      reloadTimer: 0,
+      bloom: 0,
+      burstRemaining: 0,
+      burstRoundIndex: 0,
+      burstTimer: 0,
+    };
   }
 
   private hasUnconsumedUse(playerId: string): boolean {
@@ -1677,6 +1832,8 @@ export class GameSimulation {
     if (!selection) return;
     player.position = cloneVec3(selection.position);
     player.velocity = vec3();
+    player.height = FIXED_PLAYER_HEIGHT;
+    player.crouched = false;
     player.yaw = selection.yaw;
     player.pitch = 0;
     player.alive = true;
@@ -1684,7 +1841,7 @@ export class GameSimulation {
     player.maxShield = this.state.config.mode === 'towah-of-powah' ? 0 : player.isJuggernaut ? 150 : 100;
     player.shield = player.maxShield;
     player.overshieldDecayDelay = 0;
-    player.grenades = 2;
+    player.grenades = MAX_PLAYER_GRENADES;
     player.meleeCooldown = 0;
     player.grenadeCooldown = 0;
     player.equipTimer = 0;
@@ -1756,6 +1913,7 @@ export const createDefaultConfig = (overrides: Partial<MatchConfig> = {}): Match
   return {
     mode,
     format,
+    playerCount: normalizedPlayerCount(mode, overrides.playerCount),
     difficulty: overrides.difficulty ?? ('veteran' satisfies Difficulty),
     scoreLimit: overrides.scoreLimit ?? recommendedScoreLimit(mode, format),
     timeLimitSeconds: overrides.timeLimitSeconds ?? recommendedTimeLimit(mode, format),

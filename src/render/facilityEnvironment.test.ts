@@ -95,6 +95,49 @@ describe('facility environment geometry', () => {
     expect(block.getObjectByName('access-light')).toBeInstanceOf(THREE.Mesh);
   });
 
+  it('assigns distinct manufactured facade families instead of repeating white and lime everywhere', () => {
+    const materials = makeKit();
+    const ceramic = createFacilityBlock({
+      seed: 81,
+      materials,
+      width: 8,
+      height: 5,
+      depth: 6,
+    });
+    const sage = createFacilityBlock({
+      seed: 82,
+      materials,
+      width: 8,
+      height: 5,
+      depth: 6,
+    });
+    const blue = createFacilityBlock({
+      seed: 83,
+      materials,
+      width: 8,
+      height: 5,
+      depth: 6,
+    });
+
+    expect([ceramic.userData.facadeStyle, sage.userData.facadeStyle, blue.userData.facadeStyle])
+      .toEqual(['ceramic', 'sage-alloy', 'desaturated-blue']);
+    const materialsUsed = (group: THREE.Group): Set<THREE.Material> => {
+      const result = new Set<THREE.Material>();
+      group.traverse((object) => {
+        if (!(object instanceof THREE.Mesh)) return;
+        const meshMaterials = Array.isArray(object.material) ? object.material : [object.material];
+        for (const material of meshMaterials) result.add(material);
+      });
+      return result;
+    };
+    expect(materialsUsed(ceramic).has(materials.panelLight)).toBe(true);
+    expect(materialsUsed(sage).has(materials.panelSage)).toBe(true);
+    expect(materialsUsed(blue).has(materials.panelBlue)).toBe(true);
+    expect(materials.panelLight.map).toBeInstanceOf(THREE.DataTexture);
+    expect(materials.panelSage.normalMap).toBe(materials.panelLight.normalMap);
+    expect(materials.panelBlue.roughnessMap).toBe(materials.panelLight.roughnessMap);
+  });
+
   it('builds rails with endpoint posts, handrail and sagging cable', () => {
     const rail = createFacilityRail({
       start: [0, 1, 0],

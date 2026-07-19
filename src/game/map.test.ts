@@ -144,11 +144,12 @@ describe('Crater Ridge competitive layout', () => {
 
   it('adds shallow physical earth relief away from flat facility corridors', () => {
     const earthworks = CRATER_RIDGE.obstacles.filter((obstacle) => obstacle.id.includes('earth-'));
-    expect(earthworks.length).toBeGreaterThanOrEqual(12);
+    expect(earthworks.length).toBeGreaterThanOrEqual(24);
     expect(earthworks.some((obstacle) => obstacle.id.includes('berm'))).toBe(true);
+    expect(earthworks.some((obstacle) => obstacle.id.includes('knoll'))).toBe(true);
     expect(earthworks.some((obstacle) => obstacle.id.includes('outcrop'))).toBe(true);
 
-    expect(earthworks.every((obstacle) => obstacle.max.x <= -41 || obstacle.min.x >= 41)).toBe(true);
+    expect(earthworks.every((obstacle) => obstacle.max.x <= -35.8 || obstacle.min.x >= 35.8)).toBe(true);
     for (const obstacle of earthworks.filter((candidate) => candidate.kind === 'platform')) {
       expect(obstacle.max.y - obstacle.min.y, obstacle.id).toBeLessThanOrEqual(0.4);
     }

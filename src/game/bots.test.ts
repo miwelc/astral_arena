@@ -3,8 +3,10 @@ import { describe, expect, it } from 'vitest';
 import {
   BOT_DIFFICULTY_PROFILES,
   botPickupUtility,
+  botTowerCommitment,
   createBotMemory,
   isBotGrenadeSafe,
+  isPlayerRevealedToBotRadar,
   updateBotInputs,
 } from './bots';
 import { createDefaultConfig, GameSimulation } from './simulation';
@@ -44,6 +46,9 @@ const pickup = (
   available: true,
   respawnTimer: 0,
   respawnSeconds: 20,
+  amount: kind === 'grenade' ? 2 : 1,
+  temporary: false,
+  despawnTimer: 0,
 });
 
 describe('bot difficulty profiles', () => {
@@ -259,5 +264,64 @@ describe('bot situational awareness and safety', () => {
 
     expect(bot.bot?.targetId).toBe(enemy.id);
     expect(fired).toBe(true);
+  });
+
+  it('uses motion-tracker contacts to investigate through cover without firing through walls', () => {
+    const simulation = startBotSimulation('towah-of-powah', [
+      { id: 'bot', name: 'Bot', kind: 'bot' },
+      { id: 'enemy', name: 'Enemy', kind: 'human' },
+    ]);
+    const bot = botPlayer(simulation);
+    const enemy = simulation.state.players.enemy!;
+    bot.position = { ...simulation.state.tower.center };
+    enemy.position = { x: 0, y: simulation.state.tower.center.y, z: 12 };
+    enemy.velocity = { x: 1.2, y: 0, z: 0 };
+    enemy.crouched = false;
+    bot.bot!.decisionTimer = 0;
+
+    updateBotInputs(simulation.state, simulation.map, 0.05, () => false);
+
+    expect(isPlayerRevealedToBotRadar(simulation.state, bot, enemy)).toBe(true);
+    expect(bot.bot?.targetId).toBe(enemy.id);
+    expect(bot.bot?.lastSeenPosition).toEqual(enemy.position);
+    expect(bot.input.fire).toBe(false);
+  });
+
+  it('does not detect crouch-walking on radar, but a shot briefly reveals it', () => {
+    const simulation = startBotSimulation('towah-of-powah', [
+      { id: 'bot', name: 'Bot', kind: 'bot' },
+      { id: 'enemy', name: 'Enemy', kind: 'human' },
+    ]);
+    const bot = botPlayer(simulation);
+    const enemy = simulation.state.players.enemy!;
+    bot.position = { x: 0, y: 0, z: 0 };
+    enemy.position = { x: 0, y: 0, z: 14 };
+    enemy.velocity = { x: 2, y: 0, z: 0 };
+    enemy.crouched = true;
+
+    expect(isPlayerRevealedToBotRadar(simulation.state, bot, enemy)).toBe(false);
+
+    simulation.state.elapsed = 5;
+    simulation.state.events.push({ id: 91, time: 4.5, type: 'shot', actorId: enemy.id });
+    expect(isPlayerRevealedToBotRadar(simulation.state, bot, enemy)).toBe(true);
+
+    simulation.state.elapsed = 5.31;
+    expect(isPlayerRevealedToBotRadar(simulation.state, bot, enemy)).toBe(false);
+  });
+
+  it('commits harder to an enemy-controlled hill than a safe friendly hold', () => {
+    const simulation = startBotSimulation('towah-of-powah');
+    const bot = botPlayer(simulation);
+    bot.health = 80;
+    simulation.state.tower.controllingTeam = bot.team === 'aurora' ? 'nova' : 'aurora';
+    const assault = botTowerCommitment(simulation.state, bot);
+
+    simulation.state.tower.controllingTeam = bot.team;
+    bot.health = 30;
+    const defensiveRecovery = botTowerCommitment(simulation.state, bot);
+
+    expect(assault).toBeGreaterThanOrEqual(0.9);
+    expect(defensiveRecovery).toBeLessThan(0.4);
+    expect(assault).toBeGreaterThan(defensiveRecovery);
   });
 });

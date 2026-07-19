@@ -81,7 +81,7 @@ const isPlayerInput = (value: unknown): boolean => {
     && isFiniteNumber(value.moveZ) && Math.abs(value.moveZ) <= 1
     && isFiniteNumber(value.yaw) && Math.abs(value.yaw) <= Math.PI + 0.001
     && isFiniteNumber(value.pitch) && Math.abs(value.pitch) <= 1.481
-    && [value.fire, value.aim, value.jump, value.reload, value.swap, value.melee, value.grenade, value.use]
+    && [value.fire, value.aim, value.jump, value.reload, value.swap, value.melee, value.grenade, value.crouch, value.use]
       .every((button) => typeof button === 'boolean');
 };
 
@@ -152,9 +152,12 @@ const isPlayerState = (value: unknown, recordId: string): boolean => {
   if (Math.abs(value.yaw as number) > Math.PI + 0.001 || Math.abs(value.pitch as number) > 1.481) return false;
   if ((value.radius as number) <= 0 || (value.height as number) <= 0) return false;
   if (typeof value.grounded !== 'boolean'
+    || typeof value.crouched !== 'boolean'
     || typeof value.alive !== 'boolean'
     || typeof value.isJuggernaut !== 'boolean'
     || typeof value.aimSuppressed !== 'boolean') return false;
+  const expectedHeight = value.crouched ? 1.22 : 1.8;
+  if (Math.abs((value.height as number) - expectedHeight) > 0.001) return false;
 
   if (!Array.isArray(value.inventory) || value.inventory.length === 0 || value.inventory.length > 2) return false;
   const weaponIds = new Set<string>();
@@ -175,6 +178,8 @@ const isMatchConfig = (value: unknown): boolean => {
   if (!isRecord(value)) return false;
   if (!isEnumValue(GAME_MODES, value.mode) || !isEnumValue(MATCH_FORMATS, value.format)) return false;
   if (value.format !== canonicalFormatForMode(value.mode as GameMode)) return false;
+  if (!isSafeNonNegativeInteger(value.playerCount) || value.playerCount < 2 || value.playerCount > MAX_PLAYERS) return false;
+  if (value.mode !== 'deathmatch' && value.playerCount !== rulesForMode(value.mode as GameMode).maxPlayers) return false;
   return isEnumValue(DIFFICULTIES, value.difficulty)
     && isSafeNonNegativeInteger(value.scoreLimit) && value.scoreLimit > 0 && value.scoreLimit <= 10_000
     && isSafeNonNegativeInteger(value.timeLimitSeconds) && value.timeLimitSeconds > 0 && value.timeLimitSeconds <= 86_400
@@ -207,7 +212,22 @@ const isPickup = (value: unknown): boolean => {
   if (!isIdentifier(value.id) || !isEnumValue(PICKUP_KINDS, value.kind) || !isVec3(value.position)) return false;
   if (value.kind === 'weapon') {
     if (!isEnumValue(WEAPON_IDS, value.weaponId)) return false;
+    if (!(value.weaponState === undefined || (
+      isWeaponState(value.weaponState)
+      && isRecord(value.weaponState)
+      && value.weaponState.id === value.weaponId
+    ))) return false;
   } else if (value.weaponId !== undefined) {
+    return false;
+  } else if (value.weaponState !== undefined) {
+    return false;
+  }
+  if (!isSafeNonNegativeInteger(value.amount)) return false;
+  if (value.kind === 'grenade' ? value.amount < 1 || value.amount > 2 : value.amount !== 1) return false;
+  if (typeof value.temporary !== 'boolean' || !isNonNegativeNumber(value.despawnTimer)) return false;
+  if (value.temporary) {
+    if (!value.available || value.despawnTimer <= 0 || value.despawnTimer > 60 || value.respawnTimer !== 0) return false;
+  } else if (value.despawnTimer !== 0 || value.weaponState !== undefined) {
     return false;
   }
   return typeof value.available === 'boolean'
@@ -288,7 +308,7 @@ const validateMatchState = (value: unknown): boolean => {
   if (!isRecord(value.players)) return false;
   const playerIds = Object.keys(value.players);
   const config = value.config as UnknownRecord;
-  if (playerIds.length > MAX_PLAYERS || playerIds.length > rulesForMode(config.mode as GameMode).maxPlayers) return false;
+  if (playerIds.length > MAX_PLAYERS || playerIds.length > (config.playerCount as number)) return false;
   for (const playerId of playerIds) {
     if (!isIdentifier(playerId) || !isPlayerState(value.players[playerId], playerId)) return false;
   }

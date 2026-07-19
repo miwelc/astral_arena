@@ -73,5 +73,6 @@ export const emptyInput = (): import('./types').PlayerInput => ({
   swap: false,
   melee: false,
   grenade: false,
+  crouch: false,
   use: false,
 });

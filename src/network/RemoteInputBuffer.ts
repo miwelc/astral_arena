@@ -8,6 +8,7 @@ const DIGITAL_INPUT_KEYS = [
   'swap',
   'melee',
   'grenade',
+  'crouch',
   'use',
 ] as const satisfies readonly (keyof PlayerInput)[];
 

@@ -126,6 +126,9 @@ export const buildMotionRadarContacts = (
 
     const speed = Math.hypot(target.velocity.x, target.velocity.y, target.velocity.z);
     const firedRecently = recentlyFiring.has(target.id);
+    // Like Halo's motion tracker, a crouch-walking contact stays hidden. Firing
+    // still reveals it briefly so stealth has a clear, readable counterplay.
+    if (target.crouched && !firedRecently) continue;
     if (speed < motionThreshold && !firedRecently) continue;
 
     const deltaX = target.position.x - local.position.x;

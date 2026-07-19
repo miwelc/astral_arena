@@ -87,6 +87,26 @@ afterEach(() => {
 });
 
 describe('bot fill and team assignment', () => {
+  it.each([2, 3, 5, 8])('fills Deathmatch to the selected %i-player FFA roster', (playerCount) => {
+    const simulation = createSimulation(
+      { mode: 'deathmatch', playerCount, botFill: true },
+      ['local'],
+    );
+    const roster = Object.values(simulation.state.players);
+
+    expect(simulation.maxPlayers).toBe(playerCount);
+    expect(simulation.state.config.playerCount).toBe(playerCount);
+    expect(roster).toHaveLength(playerCount);
+    expect(roster.every((member) => member.team === 'neutral')).toBe(true);
+    expect(roster.filter((member) => member.kind === 'bot')).toHaveLength(playerCount - 1);
+  });
+
+  it('clamps Deathmatch composition and keeps authored modes at eight players', () => {
+    expect(createDefaultConfig({ mode: 'deathmatch', playerCount: 1 }).playerCount).toBe(2);
+    expect(createDefaultConfig({ mode: 'deathmatch', playerCount: 99 }).playerCount).toBe(8);
+    expect(createDefaultConfig({ mode: 'capture-the-flag', playerCount: 3 }).playerCount).toBe(8);
+  });
+
   it('normalizes Team Deathmatch to 4v4 even if a stale caller requests a duel', () => {
     const simulation = createSimulation(
       { mode: 'team-deathmatch', format: 'duel', botFill: true },

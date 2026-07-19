@@ -194,6 +194,15 @@ export const CRATER_RIDGE: MapDefinition = {
     box('north-earth-approach-east', [45, 0, -34.8], [49, 0.18, -33.2], 'platform', COLORS.terrainLight),
     box('north-earth-berm-east', [41, 0, -39.5], [49, 0.38, -34.8], 'platform', COLORS.terrain),
     box('north-earth-outcrop-east', [44.2, 0.38, -38.5], [47.6, 1.55, -36.1], 'cover', COLORS.terrainLight),
+    // The boundary berm flows into a second, shallow knoll instead of ending
+    // as a flat rectangular island. Both shelves stay within auto-step height;
+    // the irregular renderer surface shares these collision extrema.
+    box('north-earth-shoulder-west', [-41, 0, -37.6], [-38.6, 0.18, -34.2], 'platform', COLORS.terrainLight),
+    box('north-earth-knoll-west', [-41, 0, -40.2], [-35.8, 0.38, -35.2], 'platform', COLORS.terrain),
+    box('north-earth-knoll-outcrop-west', [-39.9, 0.38, -39.4], [-37, 1.7, -36.3], 'cover', COLORS.terrainLight),
+    box('north-earth-shoulder-east', [38.6, 0, -37.6], [41, 0.18, -34.2], 'platform', COLORS.terrainLight),
+    box('north-earth-knoll-east', [35.8, 0, -40.2], [41, 0.38, -35.2], 'platform', COLORS.terrain),
+    box('north-earth-knoll-outcrop-east', [37, 0.38, -39.4], [39.9, 1.7, -36.3], 'cover', COLORS.terrainLight),
 
     // South hydroponics lane: denser, lower cover for shotgun fights and flag
     // flanks. Beyond the earth planters is a roofed greenhouse laboratory with
@@ -228,6 +237,12 @@ export const CRATER_RIDGE: MapDefinition = {
     box('south-earth-approach-east', [45, 0, 33.2], [49, 0.16, 34.8], 'platform', COLORS.terrainLight),
     box('south-earth-berm-east', [41, 0, 34.8], [49, 0.34, 39.5], 'platform', COLORS.terrain),
     box('south-earth-outcrop-east', [44, 0.34, 36], [47.4, 1.42, 38.4], 'cover', COLORS.terrainLight),
+    box('south-earth-shoulder-west', [-41, 0, 34.2], [-38.6, 0.18, 37.6], 'platform', COLORS.terrainLight),
+    box('south-earth-knoll-west', [-41, 0, 35.2], [-35.8, 0.38, 40.2], 'platform', COLORS.terrain),
+    box('south-earth-knoll-outcrop-west', [-39.9, 0.38, 36.3], [-37, 1.7, 39.4], 'cover', COLORS.terrainLight),
+    box('south-earth-shoulder-east', [38.6, 0, 34.2], [41, 0.18, 37.6], 'platform', COLORS.terrainLight),
+    box('south-earth-knoll-east', [35.8, 0, 35.2], [41, 0.38, 40.2], 'platform', COLORS.terrain),
+    box('south-earth-knoll-outcrop-east', [37, 0.38, 36.3], [39.9, 1.7, 39.4], 'cover', COLORS.terrainLight),
 
     // Four compact cover constellations protect rotations between lanes while
     // leaving generous diagonal gaps for combat readability.

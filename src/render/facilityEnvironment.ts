@@ -23,9 +23,13 @@ const requirePositive = (value: number, label: string): void => {
 
 export interface FacilityPalette {
   panelLight: THREE.ColorRepresentation;
+  panelSage: THREE.ColorRepresentation;
+  panelBlue: THREE.ColorRepresentation;
   panelDark: THREE.ColorRepresentation;
   structural: THREE.ColorRepresentation;
   accent: THREE.ColorRepresentation;
+  accentOrange: THREE.ColorRepresentation;
+  accentBlue: THREE.ColorRepresentation;
   glass: THREE.ColorRepresentation;
   bark: THREE.ColorRepresentation;
   canopy: THREE.ColorRepresentation;
@@ -37,19 +41,23 @@ export interface FacilityPalette {
 }
 
 /**
- * Cool, high-contrast palette matching the white/gunmetal/lime facility and
- * blue-green forest language. Clone before changing individual colors.
+ * Cool human-facility palette with distinct ceramic/alloy families. Clone
+ * before changing individual colors.
  */
 export const DEFAULT_FACILITY_PALETTE: Readonly<FacilityPalette> = Object.freeze({
   panelLight: 0xdce4df,
+  panelSage: 0x718984,
+  panelBlue: 0x526d7a,
   panelDark: 0x091218,
   structural: 0x15242a,
   accent: 0xa4e83f,
+  accentOrange: 0xd47a45,
+  accentBlue: 0x4c9db6,
   glass: 0x6fbcc7,
   bark: 0x101b19,
-  canopy: 0x28452e,
-  fern: 0x467d3e,
-  grass: 0x6c9b50,
+  canopy: 0x3b6242,
+  fern: 0x568c4d,
+  grass: 0x769f58,
   wetRock: 0x263c3b,
   lichen: 0x748e58,
   emissive: 0x4bd9ff,
@@ -57,9 +65,13 @@ export const DEFAULT_FACILITY_PALETTE: Readonly<FacilityPalette> = Object.freeze
 
 export interface FacilityMaterialKit {
   panelLight: THREE.MeshPhysicalMaterial;
+  panelSage: THREE.MeshPhysicalMaterial;
+  panelBlue: THREE.MeshPhysicalMaterial;
   panelDark: THREE.MeshPhysicalMaterial;
   structural: THREE.MeshStandardMaterial;
   accent: THREE.MeshPhysicalMaterial;
+  accentOrange: THREE.MeshPhysicalMaterial;
+  accentBlue: THREE.MeshPhysicalMaterial;
   glass: THREE.MeshPhysicalMaterial;
   bark: THREE.MeshStandardMaterial;
   canopy: THREE.MeshStandardMaterial;
@@ -77,25 +89,116 @@ export interface FacilityMaterialOptions {
   emissiveIntensity?: number;
 }
 
+interface FacilitySkinTextures {
+  albedo: THREE.DataTexture;
+  normal: THREE.DataTexture;
+  roughness: THREE.DataTexture;
+}
+
+const createFacilitySkinTextures = (): FacilitySkinTextures => {
+  const size = 64;
+  const albedo = new Uint8Array(size * size * 4);
+  const normal = new Uint8Array(size * size * 4);
+  const roughness = new Uint8Array(size * size * 4);
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      const index = (y * size + x) * 4;
+      const localX = x % 32;
+      const localY = y % 16;
+      const seamX = localX === 0 || localX === 31;
+      const seamY = localY === 0 || localY === 15;
+      const seam = seamX || seamY;
+      const shoulder = localX === 1 || localX === 30 || localY === 1 || localY === 14;
+      const fastener = (localX === 4 || localX === 27) && (localY === 3 || localY === 12);
+      const brushed = Math.sin((x * 0.71 + y * 2.13) * Math.PI) * 4;
+      const scratch = ((x * 17 + y * 31) % 149) < 2;
+      const value = seam ? 72 : fastener ? 92 : shoulder ? 190 : 225 + brushed - (scratch ? 25 : 0);
+      albedo[index] = Math.max(0, Math.min(255, Math.round(value)));
+      albedo[index + 1] = Math.max(0, Math.min(255, Math.round(value + (scratch ? 4 : 0))));
+      albedo[index + 2] = Math.max(0, Math.min(255, Math.round(value - (scratch ? 8 : 0))));
+      albedo[index + 3] = 255;
+
+      normal[index] = seamX ? (localX === 0 ? 94 : 162) : 128;
+      normal[index + 1] = seamY ? (localY === 0 ? 94 : 162) : 128;
+      normal[index + 2] = fastener ? 188 : seam ? 206 : scratch ? 224 : 252;
+      normal[index + 3] = 255;
+
+      const roughnessValue = seam ? 226 : fastener ? 112 : scratch ? 94 : 151 + brushed * 2.2;
+      const roughnessByte = Math.max(0, Math.min(255, Math.round(roughnessValue)));
+      roughness[index] = roughnessByte;
+      roughness[index + 1] = roughnessByte;
+      roughness[index + 2] = roughnessByte;
+      roughness[index + 3] = 255;
+    }
+  }
+  const configure = (pixels: Uint8Array, color = false): THREE.DataTexture => {
+    const texture = new THREE.DataTexture(pixels, size, size, THREE.RGBAFormat);
+    texture.wrapS = THREE.RepeatWrapping;
+    texture.wrapT = THREE.RepeatWrapping;
+    texture.repeat.set(1, 1);
+    texture.magFilter = THREE.LinearFilter;
+    texture.minFilter = THREE.LinearMipmapLinearFilter;
+    texture.generateMipmaps = true;
+    texture.anisotropy = 4;
+    if (color) texture.colorSpace = THREE.SRGBColorSpace;
+    texture.needsUpdate = true;
+    return texture;
+  };
+  return {
+    albedo: configure(albedo, true),
+    normal: configure(normal),
+    roughness: configure(roughness),
+  };
+};
+
 /** Creates a shareable PBR material kit. Call `disposeFacilityMaterialKit` when it is no longer used. */
 export const createFacilityMaterialKit = (
   options: FacilityMaterialOptions = {},
 ): FacilityMaterialKit => {
   const palette: FacilityPalette = { ...DEFAULT_FACILITY_PALETTE, ...options.palette };
   const emissiveIntensity = Math.max(0, options.emissiveIntensity ?? 2.2);
+  const textures = createFacilitySkinTextures();
+  const texturedSurface = {
+    map: textures.albedo,
+    normalMap: textures.normal,
+    normalScale: new THREE.Vector2(0.48, 0.48),
+    roughnessMap: textures.roughness,
+  };
 
   return {
     panelLight: new THREE.MeshPhysicalMaterial({
       name: 'facility-panel-light',
       color: palette.panelLight,
+      ...texturedSurface,
       metalness: 0.34,
       roughness: 0.3,
       clearcoat: 0.2,
       clearcoatRoughness: 0.36,
     }),
+    panelSage: new THREE.MeshPhysicalMaterial({
+      name: 'facility-panel-sage-alloy',
+      color: palette.panelSage,
+      ...texturedSurface,
+      metalness: 0.38,
+      roughness: 0.44,
+      clearcoat: 0.14,
+      clearcoatRoughness: 0.42,
+    }),
+    panelBlue: new THREE.MeshPhysicalMaterial({
+      name: 'facility-panel-desaturated-blue',
+      color: palette.panelBlue,
+      ...texturedSurface,
+      metalness: 0.46,
+      roughness: 0.35,
+      clearcoat: 0.2,
+      clearcoatRoughness: 0.34,
+    }),
     panelDark: new THREE.MeshPhysicalMaterial({
       name: 'facility-panel-dark',
       color: palette.panelDark,
+      normalMap: textures.normal,
+      normalScale: new THREE.Vector2(0.36, 0.36),
+      roughnessMap: textures.roughness,
       metalness: 0.62,
       roughness: 0.2,
       clearcoat: 0.28,
@@ -114,6 +217,22 @@ export const createFacilityMaterialKit = (
       roughness: 0.3,
       clearcoat: 0.42,
       clearcoatRoughness: 0.2,
+    }),
+    accentOrange: new THREE.MeshPhysicalMaterial({
+      name: 'facility-service-orange-accent',
+      color: palette.accentOrange,
+      metalness: 0.28,
+      roughness: 0.38,
+      clearcoat: 0.3,
+      clearcoatRoughness: 0.28,
+    }),
+    accentBlue: new THREE.MeshPhysicalMaterial({
+      name: 'facility-service-blue-accent',
+      color: palette.accentBlue,
+      metalness: 0.34,
+      roughness: 0.33,
+      clearcoat: 0.38,
+      clearcoatRoughness: 0.24,
     }),
     glass: new THREE.MeshPhysicalMaterial({
       name: 'facility-smoked-glass',
@@ -194,7 +313,14 @@ export const createFacilityMaterialKit = (
 };
 
 export const disposeFacilityMaterialKit = (kit: FacilityMaterialKit): void => {
-  for (const material of Object.values(kit)) material.dispose();
+  const textures = new Set<THREE.Texture>();
+  for (const material of Object.values(kit)) {
+    for (const texture of [material.map, material.normalMap, material.roughnessMap]) {
+      if (texture) textures.add(texture);
+    }
+    material.dispose();
+  }
+  for (const texture of textures) texture.dispose();
 };
 
 export interface ScatterBounds {
@@ -377,7 +503,7 @@ export const createTallTreeGrove = (options: TallTreeGroveOptions): THREE.Group 
     leanX: (random() - 0.5) * 0.075,
     leanZ: (random() - 0.5) * 0.075,
     branchCount: 2 + Math.floor(random() * 3),
-    crownCount: 2 + Math.floor(random() * 3),
+    crownCount: 3 + Math.floor(random() * 3),
   }));
   const totalBranches = treeRecords.reduce((sum, tree) => sum + tree.branchCount, 0);
   const totalCrowns = treeRecords.reduce((sum, tree) => sum + tree.crownCount, 0);
@@ -396,7 +522,7 @@ export const createTallTreeGrove = (options: TallTreeGroveOptions): THREE.Group 
   branches.castShadow = castShadow;
   branches.receiveShadow = true;
 
-  const crownGeometry = new THREE.DodecahedronGeometry(0.5, 1);
+  const crownGeometry = new THREE.IcosahedronGeometry(0.5, 2);
   const crowns = new THREE.InstancedMesh(crownGeometry, options.materials.canopy, totalCrowns);
   crowns.name = 'tree-crowns';
   crowns.castShadow = castShadow;
@@ -448,7 +574,11 @@ export const createTallTreeGrove = (options: TallTreeGroveOptions): THREE.Group 
         composeMatrix(
           crownPosition,
           new THREE.Euler((random() - 0.5) * 0.22, random() * TAU, (random() - 0.5) * 0.18),
-          new THREE.Vector3(crownWidth, crownWidth * (0.34 + random() * 0.16), crownWidth * (0.8 + random() * 0.35)),
+          new THREE.Vector3(
+            crownWidth * (0.85 + random() * 0.3),
+            crownWidth * (0.52 + random() * 0.26),
+            crownWidth * (0.8 + random() * 0.38),
+          ),
         ),
       );
       setInstanceColor(crowns, crownIndex, (random() - 0.5) * 0.08);
@@ -959,6 +1089,19 @@ export const createFacilityBlock = (options: FacilityBlockOptions): THREE.Group 
   const height = options.height;
   const depth = options.depth;
   const skin = Math.min(0.13, Math.min(width, depth) * 0.025);
+  const panelPalette = [
+    options.materials.panelLight,
+    options.materials.panelSage,
+    options.materials.panelBlue,
+  ] as const;
+  const styleIndex = Math.abs(Math.trunc(options.seed)) % panelPalette.length;
+  const primaryPanel = panelPalette[styleIndex]!;
+  const secondaryPanel = panelPalette[(styleIndex + 1) % panelPalette.length]!;
+  const signalAccent = styleIndex === 0
+    ? options.materials.accent
+    : styleIndex === 1
+      ? options.materials.accentOrange
+      : options.materials.accentBlue;
 
   addBox(
     group,
@@ -985,7 +1128,7 @@ export const createFacilityBlock = (options: FacilityBlockOptions): THREE.Group 
   for (const side of [-1, 1] as const) {
     for (let bay = 0; bay < bayCount; bay += 1) {
       const x = -width * 0.5 + bayWidth * (bay + 0.5);
-      const panelMaterial = bay % 5 === (side > 0 ? 3 : 1) ? options.materials.accent : options.materials.panelLight;
+      const panelMaterial = bay % 5 === (side > 0 ? 3 : 1) ? signalAccent : primaryPanel;
       addBox(
         group,
         `facade-${side > 0 ? 'front' : 'back'}-lower-${bay}`,
@@ -999,7 +1142,7 @@ export const createFacilityBlock = (options: FacilityBlockOptions): THREE.Group 
         `facade-${side > 0 ? 'front' : 'back'}-upper-${bay}`,
         new THREE.Vector3(bayWidth - skin * 0.45, upperHeight, skin),
         new THREE.Vector3(x, height * 0.72 + upperHeight * 0.5, side * (depth * 0.5 + skin * 0.5)),
-        bay % 4 === 0 ? options.materials.panelDark : options.materials.panelLight,
+        bay % 4 === 0 ? options.materials.panelDark : secondaryPanel,
         castShadow,
       );
     }
@@ -1025,7 +1168,7 @@ export const createFacilityBlock = (options: FacilityBlockOptions): THREE.Group 
         `side-panel-${side > 0 ? 'east' : 'west'}-${bay}`,
         new THREE.Vector3(skin, height * 0.76, sideBayDepth - skin * 0.45),
         new THREE.Vector3(side * (width * 0.5 + skin * 0.5), height * 0.5, z),
-        bay === sideBayCount - 1 ? options.materials.accent : options.materials.panelLight,
+        bay === sideBayCount - 1 ? signalAccent : primaryPanel,
         castShadow,
       );
     }
@@ -1048,7 +1191,7 @@ export const createFacilityBlock = (options: FacilityBlockOptions): THREE.Group 
     'lime-roof-fascia',
     new THREE.Vector3(width * 1.045, height * 0.075, depth * 1.045),
     new THREE.Vector3(0, height * 0.93, 0),
-    options.materials.accent,
+    signalAccent,
     castShadow,
   );
   addBox(
@@ -1056,7 +1199,7 @@ export const createFacilityBlock = (options: FacilityBlockOptions): THREE.Group 
     'roof-cap',
     new THREE.Vector3(width * 1.015, height * 0.07, depth * 1.015),
     new THREE.Vector3(0, height + height * 0.035, 0),
-    options.materials.panelLight,
+    secondaryPanel,
     castShadow,
   );
 
@@ -1113,6 +1256,7 @@ export const createFacilityBlock = (options: FacilityBlockOptions): THREE.Group 
   }
   group.userData.seed = options.seed;
   group.userData.bounds = { width, height, depth };
+  group.userData.facadeStyle = ['ceramic', 'sage-alloy', 'desaturated-blue'][styleIndex];
   return group;
 };
 

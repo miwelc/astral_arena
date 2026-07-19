@@ -43,7 +43,13 @@ export const interactionPromptFor = (
     .filter((candidate) => {
       if (!canUseWeaponPickup(player, candidate) || !candidate.weaponId) return false;
       const existing = player.inventory.find((weapon) => weapon.id === candidate.weaponId);
-      return !existing || existing.reserve < WEAPONS[existing.id].maxReserve;
+      if (!existing) return true;
+      const definition = WEAPONS[existing.id];
+      const capacity = definition.maxReserve - existing.reserve;
+      const offered = candidate.weaponState
+        ? candidate.weaponState.magazine + candidate.weaponState.reserve
+        : definition.magazineSize;
+      return capacity > 0 && offered > 0;
     })
     .sort((left, right) => distanceSquared(player.position, left.position) - distanceSquared(player.position, right.position))[0];
   if (!pickup?.weaponId) return null;
@@ -51,11 +57,14 @@ export const interactionPromptFor = (
   const definition = WEAPONS[pickup.weaponId];
   const existing = player.inventory.find((weapon) => weapon.id === pickup.weaponId);
   if (existing) {
+    const offered = pickup.weaponState
+      ? pickup.weaponState.magazine + pickup.weaponState.reserve
+      : definition.magazineSize;
     return {
       action: 'pickup-weapon',
       key: 'E',
       label: `REABASTECER ${definition.label.toUpperCase()}`,
-      detail: `MUNICIÓN ${existing.reserve} / ${WEAPONS[existing.id].maxReserve}`,
+      detail: `${pickup.temporary ? 'ARMA CAÍDA' : 'MUNICIÓN'} · +${offered} PROYECTILES`,
     };
   }
 
@@ -65,7 +74,7 @@ export const interactionPromptFor = (
     key: 'E',
     label: `RECOGER ${definition.label.toUpperCase()}`,
     detail: replaced
-      ? `SUSTITUYE ${WEAPONS[replaced.id].label.toUpperCase()}`
+      ? `${pickup.temporary ? `${pickup.weaponState?.magazine ?? 0} + ${pickup.weaponState?.reserve ?? 0} PROYECTILES · ` : ''}SUSTITUYE ${WEAPONS[replaced.id].label.toUpperCase()}`
       : 'AÑADIR AL EQUIPO',
   };
 };
