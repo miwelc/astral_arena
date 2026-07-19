@@ -53,6 +53,14 @@ const JUMP_PAD_RETRIGGER_DELAY = 0.85;
 const GRENADE_FUSE_SECONDS = 1.7;
 const GRENADE_OWNER_GRACE_SECONDS = 0.22;
 const BOT_NAMES = ['Orion', 'Vega', 'Lyra', 'Atlas', 'Sol', 'Mira', 'Pulsar', 'Cosmo'];
+const PRIORITY_EVENT_TYPES = new Set<GameEvent['type']>([
+  'kill',
+  'flag',
+  'score',
+  'match-end',
+  'shield-recharge-start',
+  'shield-recharge-complete',
+]);
 
 interface ButtonState {
   fire: boolean;
@@ -110,6 +118,8 @@ export class GameSimulation {
   private readonly previousButtons = new Map<string, ButtonState>();
   private readonly jumpPadReadyAt = new Map<string, number>();
   private readonly jumpPadMomentum = new Map<string, JumpPadMomentum>();
+  /** Tracks the transition, not every recharge tick, so audiovisual events never spam. */
+  private readonly shieldRechargeActive = new Set<string>();
   private projectileSequence = 0;
 
   public constructor(config: MatchConfig, initialHumans: Array<{ id: string; name: string; kind?: PlayerKind }> = []) {
@@ -174,7 +184,8 @@ export class GameSimulation {
   public setInput(playerId: string, input: PlayerInput): void {
     const player = this.state.players[playerId];
     if (!player || player.kind === 'bot') return;
-    if (![input.sequence, input.moveX, input.moveZ, input.yaw, input.pitch].every(Number.isFinite)) return;
+    if (!Number.isSafeInteger(input.sequence) || input.sequence < 0) return;
+    if (![input.moveX, input.moveZ, input.yaw, input.pitch].every(Number.isFinite)) return;
     player.input = {
       ...input,
       moveX: clamp(input.moveX, -1, 1),
@@ -201,6 +212,7 @@ export class GameSimulation {
       if (replacement) {
         inheritedTeam = replacement.team;
         inheritedJuggernaut = replacement.isJuggernaut;
+        this.dropCarriedFlag(replacement);
         if (inheritedJuggernaut) this.state.juggernautId = null;
         delete this.state.players[replacement.id];
         this.previousButtons.delete(replacement.id);
@@ -224,6 +236,7 @@ export class GameSimulation {
     this.previousButtons.delete(id);
     this.jumpPadReadyAt.delete(id);
     this.jumpPadMomentum.delete(id);
+    this.shieldRechargeActive.delete(id);
     if (this.state.config.botFill && this.state.phase !== 'finished') this.fillWithBots();
     if (wasJuggernaut && this.state.config.mode === 'juggernaut') {
       const successor = Object.values(this.state.players).find((candidate) => candidate.alive);
@@ -342,17 +355,13 @@ export class GameSimulation {
     }
 
     if (!player.alive) {
+      this.shieldRechargeActive.delete(player.id);
       player.respawnTimer -= dt;
       if (player.respawnTimer <= 0) this.spawnPlayer(player, false);
       return;
     }
 
-    if (player.shield > player.maxShield) {
-      player.overshieldDecayDelay = Math.max(0, player.overshieldDecayDelay - dt);
-      if (player.overshieldDecayDelay === 0) player.shield = Math.max(player.maxShield, player.shield - 5 * dt);
-    } else if (player.maxShield > 0 && this.state.elapsed - player.lastDamageAt >= (player.isJuggernaut ? 5 : SHIELD_RECHARGE_DELAY)) {
-      player.shield = Math.min(player.maxShield, player.shield + SHIELD_RECHARGE_RATE * dt);
-    }
+    this.updateShieldRecharge(player, dt);
 
     player.yaw = player.input.yaw;
     player.pitch = clamp(player.input.pitch, -1.48, 1.48);
@@ -435,6 +444,47 @@ export class GameSimulation {
     player.velocity = movement.velocity;
     player.grounded = movement.grounded;
     if (movement.grounded) this.jumpPadMomentum.delete(player.id);
+  }
+
+  private updateShieldRecharge(player: PlayerState, dt: number): void {
+    if (player.shield > player.maxShield) {
+      this.shieldRechargeActive.delete(player.id);
+      player.overshieldDecayDelay = Math.max(0, player.overshieldDecayDelay - dt);
+      if (player.overshieldDecayDelay === 0) player.shield = Math.max(player.maxShield, player.shield - 5 * dt);
+      return;
+    }
+
+    const rechargeDelay = player.isJuggernaut ? 5 : SHIELD_RECHARGE_DELAY;
+    const canRecharge = player.maxShield > 0
+      && player.shield < player.maxShield
+      && this.state.elapsed - player.lastDamageAt >= rechargeDelay;
+    if (!canRecharge) {
+      this.shieldRechargeActive.delete(player.id);
+      return;
+    }
+
+    // A zero-length diagnostic step must not manufacture a transition event.
+    if (dt <= 0) return;
+    if (!this.shieldRechargeActive.has(player.id)) {
+      this.shieldRechargeActive.add(player.id);
+      this.pushEvent({
+        type: 'shield-recharge-start',
+        targetId: player.id,
+        position: cloneVec3(player.position),
+        message: `${player.name}: barrera regenerándose`,
+      });
+    }
+
+    player.shield = Math.min(player.maxShield, player.shield + SHIELD_RECHARGE_RATE * dt);
+    if (player.shield >= player.maxShield) {
+      this.shieldRechargeActive.delete(player.id);
+      this.pushEvent({
+        type: 'shield-recharge-complete',
+        targetId: player.id,
+        position: cloneVec3(player.position),
+        message: `${player.name}: barrera restaurada`,
+      });
+    }
   }
 
   private tryLaunchFromJumpPad(player: PlayerState): boolean {
@@ -860,25 +910,42 @@ export class GameSimulation {
             this.state.teamScores[carrier.team as Exclude<Team, 'neutral'>] += 1;
             carrier.score += 1;
             carrier.carryingFlagTeam = null;
-            this.resetFlag(flag, `${carrier.name} capturó la bandera`);
+            this.resetFlag(flag, `${carrier.name} capturó la bandera`, {
+              actorId: carrier.id,
+              actorTeam: carrier.team,
+              flagAction: 'captured',
+            });
           }
         }
       } else if (flag.status === 'dropped') {
         flag.returnTimer -= dt;
-        if (flag.returnTimer <= 0) this.resetFlag(flag, `La bandera ${flag.team} volvió a base`);
+        if (flag.returnTimer <= 0) this.resetFlag(flag, `La bandera ${flag.team} volvió a base`, {
+          flagAction: 'returned',
+        });
       }
 
       if (flag.status !== 'carried') {
         for (const player of Object.values(this.state.players)) {
           if (!player.alive || distanceSquared(player.position, flag.position) > 2.25) continue;
           if (player.team === flag.team) {
-            if (flag.status === 'dropped') this.resetFlag(flag, `${player.name} devolvió la bandera`);
+            if (flag.status === 'dropped') this.resetFlag(flag, `${player.name} devolvió la bandera`, {
+              actorId: player.id,
+              actorTeam: player.team,
+              flagAction: 'returned',
+            });
           } else if (!player.carryingFlagTeam && player.team !== 'neutral') {
             flag.status = 'carried';
             flag.carrierId = player.id;
             player.carryingFlagTeam = flag.team;
             player.spawnProtection = 0;
-            this.pushEvent({ type: 'flag', actorId: player.id, message: `${player.name} tomó la bandera` });
+            this.pushEvent({
+              type: 'flag',
+              actorId: player.id,
+              actorTeam: player.team,
+              flagTeam: flag.team,
+              flagAction: 'taken',
+              message: `${player.name} tomó la bandera`,
+            });
           }
         }
       }
@@ -893,12 +960,24 @@ export class GameSimulation {
       flag.carrierId = null;
       flag.position = cloneVec3(player.position);
       flag.returnTimer = 12;
-      this.pushEvent({ type: 'flag', actorId: player.id, position: cloneVec3(player.position), message: `${player.name} soltó la bandera` });
+      this.pushEvent({
+        type: 'flag',
+        actorId: player.id,
+        actorTeam: player.team,
+        flagTeam: flag.team,
+        flagAction: 'dropped',
+        position: cloneVec3(player.position),
+        message: `${player.name} soltó la bandera`,
+      });
     }
     player.carryingFlagTeam = null;
   }
 
-  private resetFlag(flag: MatchState['flags'][number], message: string): void {
+  private resetFlag(
+    flag: MatchState['flags'][number],
+    message: string,
+    metadata: Pick<GameEvent, 'actorId' | 'actorTeam' | 'flagAction'> = {},
+  ): void {
     if (flag.carrierId) {
       const carrier = this.state.players[flag.carrierId];
       if (carrier) carrier.carryingFlagTeam = null;
@@ -907,7 +986,13 @@ export class GameSimulation {
     flag.status = 'home';
     flag.carrierId = null;
     flag.returnTimer = 0;
-    this.pushEvent({ type: 'flag', position: cloneVec3(flag.position), message });
+    this.pushEvent({
+      type: 'flag',
+      ...metadata,
+      flagTeam: flag.team,
+      position: cloneVec3(flag.position),
+      message,
+    });
   }
 
   private updateTower(dt: number): void {
@@ -1028,7 +1113,14 @@ export class GameSimulation {
 
   private pushEvent(event: Omit<GameEvent, 'id' | 'time'>): void {
     this.state.events.push({ ...event, id: ++this.state.eventSequence, time: this.state.elapsed });
-    if (this.state.events.length > 80) this.state.events.splice(0, this.state.events.length - 80);
+    while (this.state.events.length > 80) {
+      // Gunfire can produce many transient events in a single firefight. Keep
+      // the sparse events needed by the kill feed and objective announcer.
+      const transientIndex = this.state.events.findIndex((candidate) =>
+        !PRIORITY_EVENT_TYPES.has(candidate.type),
+      );
+      this.state.events.splice(transientIndex >= 0 ? transientIndex : 0, 1);
+    }
   }
 
   private ensureJuggernaut(): void {

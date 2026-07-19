@@ -1,12 +1,16 @@
 import { GameAudio } from '../audio/GameAudio';
+import { raycastWorld } from '../game/collision';
 import { MAPS } from '../game/map';
-import { clamp } from '../game/math';
+import { add, clamp, directionFromAngles, vec3 } from '../game/math';
 import { createDefaultConfig, GameSimulation, recommendedScoreLimit, recommendedTimeLimit } from '../game/simulation';
 import type { ClientMessage, GameMode, HostMessage, MatchConfig, MatchFormat, MatchState, PlayerInput, Team } from '../game/types';
 import { WEAPONS } from '../game/weapons';
 import { InputController } from '../input/InputController';
+import { isValidMatchState } from '../network/matchStateValidation';
 import { P2PNetwork, P2PNetworkError } from '../network/P2PNetwork';
 import type { ArenaRenderer } from '../render/ArenaRenderer';
+import { presentGameEvents, selectAnnouncementCandidate, type EventPresentation } from './eventPresentation';
+import { buildMotionRadarContacts } from './motionRadar';
 
 type WireMessage = ClientMessage | HostMessage;
 type SessionRole = 'local' | 'host' | 'guest';
@@ -43,9 +47,12 @@ const isTeamMode = (state: MatchState): boolean =>
 const isValidPlayerInput = (input: unknown): input is PlayerInput => {
   if (!input || typeof input !== 'object') return false;
   const candidate = input as Partial<PlayerInput>;
-  const numbers = [candidate.sequence, candidate.moveX, candidate.moveZ, candidate.yaw, candidate.pitch];
+  const numbers = [candidate.moveX, candidate.moveZ, candidate.yaw, candidate.pitch];
   const buttons = [candidate.fire, candidate.aim, candidate.jump, candidate.reload, candidate.swap, candidate.melee, candidate.grenade];
-  return numbers.every((value) => typeof value === 'number' && Number.isFinite(value)) && buttons.every((value) => typeof value === 'boolean');
+  return Number.isSafeInteger(candidate.sequence)
+    && (candidate.sequence ?? -1) >= 0
+    && numbers.every((value) => typeof value === 'number' && Number.isFinite(value))
+    && buttons.every((value) => typeof value === 'boolean');
 };
 
 export class AstralArenaApp {
@@ -71,6 +78,14 @@ export class AstralArenaApp {
   private guestName = 'Astronauta';
   private gameViewActive = false;
   private lastDamageEvent = 0;
+  private sniperZoomLevel: 0 | 1 = 0;
+  private lastPresentedEvent = 0;
+  private activeAlerts: Array<{ presentation: EventPresentation; expiresAt: number }> = [];
+  private lastAnnouncement = { message: '', at: 0 };
+  private pendingAnnouncement: EventPresentation | null = null;
+  private nextTacticalHudAt = 0;
+  private lastFrameErrorAt = 0;
+  private lastInvalidSnapshotAt = Number.NEGATIVE_INFINITY;
   private toastTimer = 0;
 
   public constructor(private readonly root: HTMLElement) {
@@ -406,8 +421,22 @@ export class AstralArenaApp {
       if (message.kind === 'welcome') {
         this.localPlayerId = message.playerId;
       } else if (message.kind === 'snapshot') {
-        this.currentState = message.state;
-        if (!this.gameViewActive && this.localPlayerId) void this.startGameView(message.state);
+        const receivedAt = performance.now();
+        const snapshot = message.state as unknown;
+        const localPlayerId = this.localPlayerId;
+        const invalidSnapshot = !isValidMatchState(snapshot)
+          || (localPlayerId !== null && snapshot.players[localPlayerId] === undefined)
+          || (this.gameViewActive && this.currentState !== null && snapshot.matchId !== this.currentState.matchId);
+        if (invalidSnapshot) {
+          if (receivedAt - this.lastInvalidSnapshotAt > 2000) {
+            this.lastInvalidSnapshotAt = receivedAt;
+            this.showToast('Se descartó una instantánea P2P inválida.');
+          }
+          return;
+        }
+        if (this.currentState?.matchId === snapshot.matchId && snapshot.tick < this.currentState.tick) return;
+        this.currentState = snapshot;
+        if (!this.gameViewActive && localPlayerId) void this.startGameView(snapshot);
       } else if (message.kind === 'pong') {
         this.latency = Math.round(performance.now() - message.sentAt);
       } else if (message.kind === 'error') {
@@ -420,7 +449,17 @@ export class AstralArenaApp {
     if (this.gameViewActive) return;
     this.gameViewActive = true;
     this.currentState = state;
-    this.audio.beginSession(state.eventSequence);
+    // Countdown events describe the match being entered (not stale history),
+    // e.g. the initial Coloso assignment. Mid-match guests still skip backlog.
+    const initialEventCursor = state.phase === 'countdown' ? 0 : state.eventSequence;
+    this.audio.beginSession(initialEventCursor);
+    this.lastPresentedEvent = initialEventCursor;
+    this.activeAlerts = [];
+    this.lastAnnouncement = { message: '', at: 0 };
+    this.pendingAnnouncement = null;
+    this.sniperZoomLevel = 0;
+    this.nextTacticalHudAt = 0;
+    this.lastFrameErrorAt = 0;
     const { ArenaRenderer } = await import('../render/ArenaRenderer');
     if (!this.gameViewActive) return;
     this.root.innerHTML = `
@@ -435,9 +474,14 @@ export class AstralArenaApp {
           <div class="hud-network"><i></i><span id="net-state">${this.role === 'local' ? 'LOCAL' : this.role === 'host' ? 'HOST P2P' : 'P2P'}</span><small id="ping-value"></small></div>
         </div>
         <div id="kill-feed" class="kill-feed"></div>
+        <div id="combat-alerts" class="combat-alerts" aria-live="polite"></div>
         <div id="objective-marker" class="objective-marker"></div>
-        <div class="crosshair" aria-hidden="true"><i></i><i></i><i></i><i></i><b></b></div>
-        <div id="scope-overlay" class="scope-overlay"><div></div><span>2.0×</span></div>
+        <div id="crosshair" class="crosshair" aria-hidden="true"><i></i><i></i><i></i><i></i><b></b></div>
+        <div id="scope-overlay" class="scope-overlay"><div></div><span id="scope-zoom">5×</span><small>RUEDA / Z · CAMBIAR AUMENTO</small></div>
+        <div id="motion-radar" class="motion-radar" role="img" aria-label="Radar de movimiento, alcance 25 metros">
+          <div class="radar-face"><i></i><i></i><i></i><b></b><span id="radar-blips"></span></div>
+          <small>25 M · MOVIMIENTO</small>
+        </div>
         <div class="hud-bottom-left">
           <div id="shield-block" class="vital-block shield-vital"><span>BARRERA</span><div><i id="shield-bar"></i></div><b id="shield-value">100</b></div>
           <div class="vital-block health-vital"><span>INTEGRIDAD</span><div><i id="health-bar"></i></div><b id="health-value">70</b></div>
@@ -456,7 +500,7 @@ export class AstralArenaApp {
         <div id="pause-panel" class="pause-panel glass-panel hidden">
           <span class="eyebrow">MENÚ DE MISIÓN</span><h2>Partida en curso</h2>
           <p>La simulación continúa mientras el ratón está libre.</p>
-          <div class="control-grid"><span><kbd>WASD</kbd>Mover</span><span><kbd>ESPACIO</kbd>Saltar</span><span><kbd>Q</kbd>Cambiar</span><span><kbd>R</kbd>Recargar</span><span><kbd>F</kbd>Melee</span><span><kbd>G</kbd>Granada</span></div>
+          <div class="control-grid"><span><kbd>WASD</kbd>Mover</span><span><kbd>ESPACIO</kbd>Saltar</span><span><kbd>Q</kbd>Cambiar</span><span><kbd>R</kbd>Recargar</span><span><kbd>F</kbd>Melee</span><span><kbd>G</kbd>Granada</span><span><kbd>RMB</kbd>Apuntar</span><span><kbd>Z / RUEDA</kbd>Zoom sniper</span></div>
           <button id="resume-game" class="primary-action compact" type="button"><span>Volver a la arena</span><b>→</b></button>
           <button id="exit-game" class="text-button danger" type="button">Abandonar partida</button>
         </div>
@@ -467,16 +511,24 @@ export class AstralArenaApp {
     const sceneHost = this.required<HTMLElement>('#scene-host');
     this.renderer = new ArenaRenderer(sceneHost, MAPS[state.config.mapId]);
     this.renderer.setLocalPlayer(this.localPlayerId);
-    this.input = new InputController(this.renderer.canvas, (locked) => {
-      this.input?.setEnabled(locked);
-      this.root.querySelector('#click-hint')?.classList.toggle('hidden', locked);
-      if (locked) this.root.querySelector('#pause-panel')?.classList.add('hidden');
-      else if (this.currentState?.phase !== 'finished') this.root.querySelector('#pause-panel')?.classList.remove('hidden');
-    });
+    this.input = new InputController(
+      this.renderer.canvas,
+      (locked) => {
+        this.input?.setEnabled(locked);
+        this.root.querySelector('#click-hint')?.classList.toggle('hidden', locked);
+        if (locked) this.root.querySelector('#pause-panel')?.classList.add('hidden');
+        else if (this.currentState?.phase !== 'finished') this.root.querySelector('#pause-panel')?.classList.remove('hidden');
+      },
+      (direction) => this.stepSniperZoom(direction),
+    );
     this.input.setEnabled(false);
     const local = this.localPlayerId ? state.players[this.localPlayerId] : undefined;
     if (local) this.input.setAngles(local.yaw, local.pitch);
-    this.renderer.canvas.addEventListener('click', () => void this.audio.unlock());
+    this.renderer.canvas.addEventListener('click', () => {
+      void this.audio.unlock().catch(() => {
+        // Browser audio policy must not interrupt pointer-lock/gameplay setup.
+      });
+    });
     this.required<HTMLButtonElement>('#leave-game').addEventListener('click', () => this.root.querySelector('#pause-panel')?.classList.remove('hidden'));
     this.required<HTMLButtonElement>('#resume-game').addEventListener('click', () => this.renderer?.canvas.requestPointerLock());
     this.required<HTMLButtonElement>('#exit-game').addEventListener('click', () => this.renderMenu());
@@ -489,6 +541,19 @@ export class AstralArenaApp {
 
   private frame = (now: number): void => {
     if (!this.gameViewActive) return;
+    this.animationFrame = requestAnimationFrame(this.frame);
+    try {
+      this.advanceFrame(now);
+    } catch (error) {
+      if (now - this.lastFrameErrorAt > 2000) {
+        this.lastFrameErrorAt = now;
+        console.error('Frame de juego recuperado tras un error:', error);
+        this.showToast('Se ha recuperado un error interno sin detener la partida.');
+      }
+    }
+  };
+
+  private advanceFrame(now: number): void {
     const delta = clamp((now - this.lastFrameAt) / 1000, 0, 0.1);
     this.lastFrameAt = now;
     const fixed = 1 / 60;
@@ -532,12 +597,12 @@ export class AstralArenaApp {
     }
 
     if (this.currentState && this.renderer) {
+      this.renderer.setLocalViewAim(Boolean(this.lastInput?.aim), this.sniperZoomLevel);
       this.renderer.render(this.currentState, this.accumulator / fixed, true);
       this.updateHud(this.currentState);
       this.audio.consume(this.currentState.events, this.localPlayerId);
     }
-    this.animationFrame = requestAnimationFrame(this.frame);
-  };
+  }
 
   private updateHud(state: MatchState): void {
     if (!this.localPlayerId) return;
@@ -552,6 +617,11 @@ export class AstralArenaApp {
     this.setText('#health-value', String(Math.max(0, Math.ceil(player.health))));
     this.setText('#grenade-value', String(player.grenades));
     this.root.querySelector('#shield-block')?.classList.toggle('disabled', player.maxShield === 0);
+    const shieldRecharging = player.alive
+      && player.maxShield > 0
+      && player.shield < player.maxShield
+      && state.elapsed - player.lastDamageAt >= (player.isJuggernaut ? 5 : 4);
+    this.root.querySelector('#shield-block')?.classList.toggle('recharging', shieldRecharging);
     if (weapon && definition) {
       this.setText('#weapon-name', definition.label);
       this.setText('#weapon-role', definition.role.toUpperCase());
@@ -562,7 +632,22 @@ export class AstralArenaApp {
     this.setText('#match-time', formatTime(state.timeRemaining));
     this.setText('#ping-value', this.role === 'guest' && this.networkStatus === 'connected' ? `${this.latency} MS` : '');
     if (this.role === 'guest') this.setText('#net-state', this.networkStatus === 'connected' ? 'P2P' : this.networkStatus === 'lost' ? 'SIN HOST' : 'RECONECTANDO');
-    this.root.querySelector('#scope-overlay')?.classList.toggle('active', Boolean(this.lastInput?.aim && weapon?.id === 'sniper'));
+    const sniperScoped = Boolean(this.lastInput?.aim && weapon?.id === 'sniper' && player.alive);
+    if (!sniperScoped) this.sniperZoomLevel = 0;
+    this.input?.setLookSensitivityScale(
+      sniperScoped ? (this.sniperZoomLevel === 0 ? 0.24 : 0.12) : 1,
+    );
+    this.root.querySelector('#scope-overlay')?.classList.toggle('active', sniperScoped);
+    this.root.querySelector('#crosshair')?.classList.toggle('scoped', sniperScoped);
+    this.setText('#scope-zoom', this.sniperZoomLevel === 0 ? '5×' : '10×');
+    const hudNow = performance.now();
+    if (hudNow >= this.nextTacticalHudAt) {
+      const tacticalState = this.presentedTacticalState(state);
+      const tacticalPlayer = tacticalState.players[player.id] ?? player;
+      this.updateCombatIdentification(tacticalState, tacticalPlayer, definition?.range ?? 120);
+      this.updateMotionRadar(tacticalState);
+      this.nextTacticalHudAt = hudNow + 1000 / 30;
+    }
 
     const ranked = Object.values(state.players).sort((a, b) => b.score - a.score || b.kills - a.kills);
     if (isTeamMode(state)) {
@@ -574,9 +659,7 @@ export class AstralArenaApp {
     }
     this.setText('#hud-objective', this.objectiveText(state, player.team));
 
-    const recent = state.events.filter((event) => ['kill', 'flag', 'score'].includes(event.type) && event.message).slice(-5).reverse();
-    const feed = this.root.querySelector<HTMLElement>('#kill-feed');
-    if (feed) feed.innerHTML = recent.map((event) => `<div class="feed-item ${event.type}"><i></i>${escapeHtml(event.message ?? '')}</div>`).join('');
+    this.updateEventPresentation(state);
 
     const rows = this.root.querySelector<HTMLElement>('#scoreboard-rows');
     if (rows) {
@@ -608,6 +691,146 @@ export class AstralArenaApp {
       this.setText('#result-subtitle', winnerName ? `Vencedor: ${winnerName}` : 'La arena quedó en tablas.');
       if (document.pointerLockElement) document.exitPointerLock();
     }
+  }
+
+  private presentedTacticalState(state: MatchState): MatchState {
+    if (!this.renderer) return state;
+    let changed = false;
+    const players = Object.fromEntries(Object.entries(state.players).map(([id, player]) => {
+      const presented = this.renderer?.getPresentedPlayerPosition(id);
+      if (!presented) return [id, player];
+      changed = true;
+      return [id, { ...player, position: presented }];
+    }));
+    return changed ? { ...state, players } : state;
+  }
+
+  private updateCombatIdentification(
+    state: MatchState,
+    player: MatchState['players'][string],
+    weaponRange: number,
+  ): void {
+    const crosshair = this.root.querySelector<HTMLElement>('#crosshair');
+    const scope = this.root.querySelector<HTMLElement>('#scope-overlay');
+    crosshair?.classList.remove('ally', 'enemy');
+    scope?.classList.remove('ally', 'enemy');
+    if (!player.alive) return;
+
+    const origin = add(player.position, vec3(0, player.height * 0.86, 0));
+    const hit = raycastWorld(
+      origin,
+      directionFromAngles(player.yaw, player.pitch),
+      weaponRange,
+      MAPS[state.config.mapId],
+      Object.values(state.players),
+      player.id,
+    );
+    const target = hit?.playerId ? state.players[hit.playerId] : undefined;
+    if (!target) return;
+    const relation = isTeamMode(state) && target.team === player.team ? 'ally' : 'enemy';
+    crosshair?.classList.add(relation);
+    scope?.classList.add(relation);
+  }
+
+  private updateMotionRadar(state: MatchState): void {
+    if (!this.localPlayerId) return;
+    const contacts = buildMotionRadarContacts(state, this.localPlayerId);
+    const blips = this.root.querySelector<HTMLElement>('#radar-blips');
+    if (blips) {
+      const markup = contacts.map((contact) => {
+        const left = 50 + contact.x * 44;
+        const top = 50 + contact.y * 44;
+        return `<i class="radar-blip ${contact.relation} ${contact.elevation} ${contact.revealedBy}" style="left:${left.toFixed(2)}%;top:${top.toFixed(2)}%;opacity:${contact.opacity.toFixed(2)}" title="${escapeHtml(contact.name)}"></i>`;
+      }).join('');
+      if (blips.innerHTML !== markup) blips.innerHTML = markup;
+    }
+    const local = state.players[this.localPlayerId];
+    const moving = Boolean(local && Math.hypot(local.velocity.x, local.velocity.y, local.velocity.z) >= 0.55);
+    this.root.querySelector('#motion-radar')?.classList.toggle('local-moving', moving);
+  }
+
+  private updateEventPresentation(state: MatchState): void {
+    if (!this.localPlayerId) return;
+    const now = performance.now();
+    const unseen = presentGameEvents(state.events, state, this.localPlayerId, this.lastPresentedEvent);
+    const newestEvent = state.events.at(-1);
+    if (newestEvent) this.lastPresentedEvent = Math.max(this.lastPresentedEvent, newestEvent.id);
+
+    for (const presentation of unseen) {
+      if (presentation.placement === 'center' || presentation.placement === 'both') {
+        this.activeAlerts = this.activeAlerts.filter(
+          (alert) => alert.presentation.headline !== presentation.headline,
+        );
+        this.activeAlerts.push({ presentation, expiresAt: now + presentation.durationMs });
+      }
+    }
+    this.activeAlerts = this.activeAlerts
+      .filter((alert) => alert.expiresAt > now)
+      .slice(-8);
+
+    const incomingAnnouncement = selectAnnouncementCandidate(unseen);
+    if (incomingAnnouncement && (
+      this.pendingAnnouncement === null
+      || incomingAnnouncement.eventId >= this.pendingAnnouncement.eventId
+      || incomingAnnouncement.priority >= 95
+    )) {
+      this.pendingAnnouncement = incomingAnnouncement;
+    }
+    const announcement = this.pendingAnnouncement;
+    if (announcement?.voice) {
+      const repeatedTooSoon = this.lastAnnouncement.message === announcement.voice
+        && now - this.lastAnnouncement.at < 2400;
+      if (repeatedTooSoon) {
+        this.pendingAnnouncement = null;
+      } else {
+        const result = this.audio.announce(announcement.voice, announcement.priority >= 95);
+        if (result === 'spoken') {
+          this.lastAnnouncement = { message: announcement.voice, at: now };
+          this.pendingAnnouncement = null;
+        } else if (result === 'unavailable') {
+          this.pendingAnnouncement = null;
+        }
+      }
+    }
+
+    const center = this.root.querySelector<HTMLElement>('#combat-alerts');
+    if (center) {
+      const byPriority = [...this.activeAlerts]
+        .sort((left, right) => right.presentation.priority - left.presentation.priority || right.presentation.eventId - left.presentation.eventId);
+      const newest = [...this.activeAlerts]
+        .sort((left, right) => right.presentation.eventId - left.presentation.eventId)[0];
+      const visibleAlerts = byPriority.length > 0 ? [byPriority[0]!] : [];
+      if (newest && newest !== visibleAlerts[0]) visibleAlerts.push(newest);
+      if (visibleAlerts.length < 2 && byPriority[1]) visibleAlerts.push(byPriority[1]);
+      const markup = visibleAlerts
+        .map(({ presentation }) => `<div class="combat-alert ${presentation.tone}"><strong>${escapeHtml(presentation.headline)}</strong>${presentation.detail ? `<span>${escapeHtml(presentation.detail)}</span>` : ''}</div>`)
+        .join('');
+      if (center.innerHTML !== markup) center.innerHTML = markup;
+    }
+
+    const feedPresentations = presentGameEvents(state.events, state, this.localPlayerId, 0)
+      .filter((presentation) => presentation.placement !== 'center')
+      .slice(-5)
+      .reverse();
+    const feed = this.root.querySelector<HTMLElement>('#kill-feed');
+    if (feed) {
+      const markup = feedPresentations
+        .map((presentation) => `<div class="feed-item ${presentation.tone}"><i></i>${escapeHtml(presentation.feedText)}</div>`)
+        .join('');
+      if (feed.innerHTML !== markup) feed.innerHTML = markup;
+    }
+  }
+
+  private stepSniperZoom(direction: -1 | 1): void {
+    if (!this.localPlayerId || !this.currentState || !this.lastInput?.aim) return;
+    const player = this.currentState.players[this.localPlayerId];
+    const weapon = player?.inventory[player.activeWeapon];
+    if (!player?.alive || weapon?.id !== 'sniper') return;
+    this.sniperZoomLevel = direction > 0 ? 1 : 0;
+  }
+
+  private toggleSniperZoom(): void {
+    this.stepSniperZoom(this.sniperZoomLevel === 0 ? 1 : -1);
   }
 
   private objectiveText(state: MatchState, localTeam: Team): string {
@@ -699,6 +922,7 @@ export class AstralArenaApp {
 
   private destroySession(): void {
     this.gameViewActive = false;
+    this.audio.stopAnnouncements();
     cancelAnimationFrame(this.animationFrame);
     this.input?.dispose();
     this.renderer?.dispose();
@@ -715,6 +939,13 @@ export class AstralArenaApp {
     this.latency = 0;
     this.networkStatus = 'connecting';
     this.lastDamageEvent = 0;
+    this.sniperZoomLevel = 0;
+    this.lastPresentedEvent = 0;
+    this.activeAlerts = [];
+    this.lastAnnouncement = { message: '', at: 0 };
+    this.pendingAnnouncement = null;
+    this.nextTacticalHudAt = 0;
+    this.lastFrameErrorAt = 0;
     if (document.pointerLockElement) document.exitPointerLock();
   }
 
@@ -722,6 +953,10 @@ export class AstralArenaApp {
     if (event.code === 'Tab' && this.gameViewActive) {
       event.preventDefault();
       this.root.querySelector('#scoreboard')?.classList.add('visible');
+    }
+    if (event.code === 'KeyZ' && this.gameViewActive && !event.repeat) {
+      event.preventDefault();
+      this.toggleSniperZoom();
     }
     if (event.code === 'Escape' && this.gameViewActive && !document.pointerLockElement) this.root.querySelector('#pause-panel')?.classList.remove('hidden');
   };

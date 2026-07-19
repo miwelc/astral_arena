@@ -29,6 +29,28 @@ export interface WeaponSoundProfile {
   mechanism: ToneLayer;
 }
 
+export type AnnouncementResult = 'spoken' | 'busy' | 'unavailable';
+
+/**
+ * Short UI-like shield cues stay above the combat mix without imitating a gun.
+ * Values are public so tuning regressions can be checked without booting WebAudio.
+ */
+export const SHIELD_RECHARGE_SOUND_PROFILE = Object.freeze({
+  start: Object.freeze({ duration: 0.68, from: 210, to: 920, volume: 0.38 }),
+  complete: Object.freeze({ duration: 0.2, from: 620, to: 1320, volume: 0.44 }),
+});
+
+export const shieldRechargeCueWasInterrupted = (
+  rechargeEvent: GameEvent,
+  events: readonly GameEvent[],
+): boolean => events.some((candidate) =>
+  candidate.type === 'hit'
+  && candidate.targetId === rechargeEvent.targetId
+  && candidate.id > rechargeEvent.id
+  && candidate.time >= rechargeEvent.time
+  && candidate.time - rechargeEvent.time <= 0.08,
+);
+
 /** Public, immutable tuning data keeps every weapon audibly recognisable. */
 export const WEAPON_SOUND_PROFILES: Readonly<Record<WeaponId, WeaponSoundProfile>> = {
   'pulse-rifle': {
@@ -94,6 +116,7 @@ export class GameAudio {
   }
 
   public beginSession(initialEventSequence = 0): void {
+    this.stopAnnouncements();
     this.seenEvent = Math.max(0, Math.trunc(initialEventSequence));
   }
 
@@ -117,6 +140,16 @@ export class GameAudio {
         }
         case 'shield-break':
           if (locallyRelevant) this.shieldBreak(targetLocal ? 0.62 : 0.24);
+          break;
+        case 'shield-recharge-start':
+          if (targetLocal && !shieldRechargeCueWasInterrupted(event, events)) {
+            this.shieldRechargeStart(SHIELD_RECHARGE_SOUND_PROFILE.start.volume);
+          }
+          break;
+        case 'shield-recharge-complete':
+          if (targetLocal && !shieldRechargeCueWasInterrupted(event, events)) {
+            this.shieldRechargeComplete(SHIELD_RECHARGE_SOUND_PROFILE.complete.volume);
+          }
           break;
         case 'kill':
           if (actorLocal) {
@@ -154,10 +187,49 @@ export class GameAudio {
     void this.unlock().then(() => {
       this.tone(180, 420, 0.11, 'sine', 0.16);
       this.tone(360, 620, 0.075, 'triangle', 0.08, 0.04);
+    }).catch(() => {
+      // Audio can be blocked by browser policy; UI interaction must continue.
     });
   }
 
+  /**
+   * Browser-native announcer voice. The no-op fallback makes it safe on browsers
+   * without speech synthesis and in the headless test/runtime environment.
+   */
+  public announce(message: string, interrupt = false): AnnouncementResult {
+    const cleanMessage = message.trim().slice(0, 120);
+    if (!cleanMessage || typeof window === 'undefined' || typeof SpeechSynthesisUtterance === 'undefined') return 'unavailable';
+    try {
+      const speech = window.speechSynthesis;
+      if (!speech) return 'unavailable';
+      if (!interrupt && (speech.speaking || speech.pending)) return 'busy';
+      const utterance = new SpeechSynthesisUtterance(cleanMessage);
+      utterance.lang = 'es-ES';
+      utterance.rate = 0.9;
+      utterance.pitch = 0.76;
+      utterance.volume = 0.78;
+      const voices = speech.getVoices();
+      utterance.voice = voices.find((voice) => voice.lang.toLowerCase().startsWith('es'))
+        ?? voices.find((voice) => voice.default)
+        ?? null;
+      if (interrupt) speech.cancel();
+      speech.speak(utterance);
+      return 'spoken';
+    } catch {
+      return 'unavailable';
+    }
+  }
+
+  public stopAnnouncements(): void {
+    try {
+      if (typeof window !== 'undefined') window.speechSynthesis?.cancel();
+    } catch {
+      // Some privacy modes expose the API but reject access; leaving is safe.
+    }
+  }
+
   public dispose(): void {
+    this.stopAnnouncements();
     this.master?.disconnect();
     this.compressor?.disconnect();
     void this.context?.close();
@@ -168,7 +240,7 @@ export class GameAudio {
   }
 
   private shot(weapon: WeaponId, volume: number): void {
-    const profile = WEAPON_SOUND_PROFILES[weapon];
+    const profile = WEAPON_SOUND_PROFILES[weapon] ?? WEAPON_SOUND_PROFILES['pulse-rifle'];
     this.noise(profile.attack, volume);
     this.toneLayer(profile.body, volume);
     this.noise(profile.tail, volume);
@@ -206,6 +278,25 @@ export class GameAudio {
     );
     this.tone(940, 115, 0.24, 'sawtooth', volume * 0.65);
     this.tone(1460, 520, 0.12, 'square', volume * 0.21, 0.018, 7);
+  }
+
+  private shieldRechargeStart(volume: number): void {
+    const profile = SHIELD_RECHARGE_SOUND_PROFILE.start;
+    // A broad rising bed signals the delay has elapsed, with a delayed digital
+    // shimmer to make the recharge legible during automatic-rifle fire.
+    this.tone(profile.from, profile.to, profile.duration, 'sine', volume * 0.72);
+    this.tone(410, 1080, profile.duration * 0.78, 'triangle', volume * 0.26, 0.08, 7);
+    this.noise(
+      { duration: 0.42, volume: 0.28, filter: 'bandpass', from: 720, to: 2550, q: 2.3, delay: 0.045 },
+      volume,
+    );
+  }
+
+  private shieldRechargeComplete(volume: number): void {
+    const profile = SHIELD_RECHARGE_SOUND_PROFILE.complete;
+    this.tone(profile.from, profile.to, profile.duration, 'sine', volume);
+    this.tone(1040, 1560, 0.13, 'triangle', volume * 0.48, 0.09);
+    this.tone(1560, 1180, 0.1, 'sine', volume * 0.25, 0.18);
   }
 
   private explosion(volume: number): void {

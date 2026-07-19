@@ -122,6 +122,23 @@ describe('bot fill and team assignment', () => {
   });
 });
 
+describe('input validation', () => {
+  it('rejects unsafe or fractional sequences before they can contaminate a P2P snapshot', () => {
+    const simulation = createSimulation({}, ['remote']);
+    const initialInput = structuredClone(player(simulation, 'remote').input);
+
+    for (const sequence of [-1, 0.5, Number.MAX_SAFE_INTEGER + 1]) {
+      simulation.setInput('remote', {
+        ...emptyInput(),
+        sequence,
+        fire: true,
+        yaw: 1.2,
+      });
+      expect(player(simulation, 'remote').input).toEqual(initialInput);
+    }
+  });
+});
+
 describe('combat rules', () => {
   it('waits four seconds before recharging shields at 25 points per second', () => {
     const simulation = createSimulation({ mode: 'deathmatch' }, ['alpha']);
@@ -139,13 +156,16 @@ describe('combat rules', () => {
     simulation.state.elapsed = 4;
     simulation.step(0.04);
     expect(alpha.shield).toBeCloseTo(21, 8);
+    expect(simulation.state.events.filter((event) => event.type === 'shield-recharge-start' && event.targetId === alpha.id)).toHaveLength(1);
 
     advance(simulation, 1);
     expect(alpha.shield).toBeCloseTo(46, 8);
+    expect(simulation.state.events.filter((event) => event.type === 'shield-recharge-start' && event.targetId === alpha.id)).toHaveLength(1);
 
     alpha.shield = 99.5;
     simulation.step(FIXED_STEP);
     expect(alpha.shield).toBe(100);
+    expect(simulation.state.events.filter((event) => event.type === 'shield-recharge-complete' && event.targetId === alpha.id)).toHaveLength(1);
   });
 
   it('spills explosive damage through a depleted shield into health', () => {
@@ -224,6 +244,11 @@ describe('objective modes', () => {
     expect(novaFlag.status).toBe('carried');
     expect(novaFlag.carrierId).toBe(aurora.id);
     expect(aurora.carryingFlagTeam).toBe('nova');
+    expect(simulation.state.events.find((event) => event.flagAction === 'taken')).toMatchObject({
+      actorId: aurora.id,
+      actorTeam: 'aurora',
+      flagTeam: 'nova',
+    });
 
     auroraFlag.status = 'dropped';
     auroraFlag.carrierId = null;
@@ -235,6 +260,11 @@ describe('objective modes', () => {
     expect(auroraFlag.status).toBe('home');
     expect(auroraFlag.position).toEqual(auroraFlag.basePosition);
     expect(aurora.carryingFlagTeam).toBe('nova');
+    expect(simulation.state.events.find((event) => event.flagAction === 'returned')).toMatchObject({
+      actorId: aurora.id,
+      actorTeam: 'aurora',
+      flagTeam: 'aurora',
+    });
 
     place(aurora, auroraFlag.basePosition);
     simulation.step(0);
@@ -245,6 +275,41 @@ describe('objective modes', () => {
     expect(novaFlag.status).toBe('home');
     expect(novaFlag.carrierId).toBeNull();
     expect(novaFlag.position).toEqual(novaFlag.basePosition);
+    expect(simulation.state.events.find((event) => event.flagAction === 'captured')).toMatchObject({
+      actorId: aurora.id,
+      actorTeam: 'aurora',
+      flagTeam: 'nova',
+    });
+  });
+
+  it('drops a bot-carried flag with durable metadata before replacing the bot with a remote player', () => {
+    const simulation = new GameSimulation(
+      createDefaultConfig({ mode: 'capture-the-flag', format: 'squads', botFill: true }),
+      [{ id: 'host', name: 'Host' }],
+    );
+    const carrier = Object.values(simulation.state.players).find(
+      (candidate) => candidate.kind === 'bot' && candidate.team === 'nova',
+    );
+    if (!carrier) throw new Error('Missing Nova bot');
+    const carriedFlag = flag(simulation, 'aurora');
+    carrier.carryingFlagTeam = carriedFlag.team;
+    carriedFlag.status = 'carried';
+    carriedFlag.carrierId = carrier.id;
+    carriedFlag.position = { ...carrier.position };
+
+    const joined = simulation.addRemotePlayer('remote', 'Invitado');
+
+    expect(joined?.team).toBe('nova');
+    expect(simulation.state.players[carrier.id]).toBeUndefined();
+    expect(carriedFlag.status).toBe('dropped');
+    expect(carriedFlag.carrierId).toBeNull();
+    expect(simulation.state.events.at(-1)).toMatchObject({
+      type: 'flag',
+      actorId: carrier.id,
+      actorTeam: 'nova',
+      flagTeam: 'aurora',
+      flagAction: 'dropped',
+    });
   });
 
   it('passes Juggernaut status and a point to the player who kills the current Juggernaut', () => {

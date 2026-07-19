@@ -19,8 +19,13 @@ export class InputController {
   private enabled = true;
   private disposed = false;
   private readonly sensitivity = 0.0021;
+  private lookSensitivityScale = 1;
 
-  public constructor(public readonly element: HTMLElement, private readonly onLockChange?: (locked: boolean) => void) {
+  public constructor(
+    public readonly element: HTMLElement,
+    private readonly onLockChange?: (locked: boolean) => void,
+    private readonly onZoomStep?: (direction: -1 | 1) => void,
+  ) {
     element.tabIndex = 0;
     element.addEventListener('click', this.requestLock);
     element.addEventListener('contextmenu', this.preventDefault);
@@ -29,6 +34,7 @@ export class InputController {
     document.addEventListener('mousedown', this.handleMouseDown);
     document.addEventListener('mouseup', this.handleMouseUp);
     document.addEventListener('mousemove', this.handleMouseMove);
+    document.addEventListener('wheel', this.handleWheel, { passive: false });
     document.addEventListener('pointerlockchange', this.handleLockChange);
     window.addEventListener('blur', this.clear);
   }
@@ -41,6 +47,10 @@ export class InputController {
   public setEnabled(enabled: boolean): void {
     this.enabled = enabled;
     if (!enabled) this.clear();
+  }
+
+  public setLookSensitivityScale(scale: number): void {
+    this.lookSensitivityScale = clamp(scale, 0.05, 1);
   }
 
   public sample(sequence: number): PlayerInput {
@@ -60,8 +70,8 @@ export class InputController {
       const deadzone = (value: number): number => (Math.abs(value) < 0.14 ? 0 : value);
       moveX = clamp(moveX + deadzone(gamepad.axes[0] ?? 0), -1, 1);
       moveZ = clamp(moveZ - deadzone(gamepad.axes[1] ?? 0), -1, 1);
-      this.yaw = wrapAngle(this.yaw - deadzone(gamepad.axes[2] ?? 0) * 0.045);
-      this.pitch = clamp(this.pitch - deadzone(gamepad.axes[3] ?? 0) * 0.035, -1.48, 1.48);
+      this.yaw = wrapAngle(this.yaw - deadzone(gamepad.axes[2] ?? 0) * 0.045 * this.lookSensitivityScale);
+      this.pitch = clamp(this.pitch - deadzone(gamepad.axes[3] ?? 0) * 0.035 * this.lookSensitivityScale, -1.48, 1.48);
       fire ||= (gamepad.buttons[7]?.value ?? 0) > 0.4;
       aim ||= (gamepad.buttons[6]?.value ?? 0) > 0.4;
       jump ||= gamepad.buttons[0]?.pressed ?? false;
@@ -84,6 +94,7 @@ export class InputController {
     document.removeEventListener('mousedown', this.handleMouseDown);
     document.removeEventListener('mouseup', this.handleMouseUp);
     document.removeEventListener('mousemove', this.handleMouseMove);
+    document.removeEventListener('wheel', this.handleWheel);
     document.removeEventListener('pointerlockchange', this.handleLockChange);
     window.removeEventListener('blur', this.clear);
   }
@@ -118,8 +129,14 @@ export class InputController {
 
   private handleMouseMove = (event: MouseEvent): void => {
     if (!this.enabled || document.pointerLockElement !== this.element) return;
-    this.yaw = wrapAngle(this.yaw - event.movementX * this.sensitivity);
-    this.pitch = clamp(this.pitch - event.movementY * this.sensitivity, -1.48, 1.48);
+    this.yaw = wrapAngle(this.yaw - event.movementX * this.sensitivity * this.lookSensitivityScale);
+    this.pitch = clamp(this.pitch - event.movementY * this.sensitivity * this.lookSensitivityScale, -1.48, 1.48);
+  };
+
+  private handleWheel = (event: WheelEvent): void => {
+    if (!this.enabled || document.pointerLockElement !== this.element || event.deltaY === 0) return;
+    event.preventDefault();
+    this.onZoomStep?.(event.deltaY < 0 ? 1 : -1);
   };
 
   private handleLockChange = (): void => {

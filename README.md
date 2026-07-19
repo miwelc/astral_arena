@@ -18,9 +18,9 @@ El repositorio contiene una **primera vertical jugable completa**, no una versi�
 - seis armas, bots con tres dificultades moderadas, controles de teclado/ratón y mando, hitboxes anatómicos ampliados y audio procedural multicapa por arma;
 - una capa de presentación Three.js con terreno PBR húmedo de barro, musgo, raíces, piedras, relieve, césped denso y charcos; bosque instanciado, niebla local, haces solares, puertas, cristales, rampas, barandillas, cajas, iluminación interior, sombras, bloom moderado, profundidad de campo, aberración cromática, astronautas articulados y seis armas *hard-surface* con fogonazo, trazadoras e impactos;
 - animación procedural compartida entre primera y tercera persona: locomoción ligada a la distancia recorrida y diferenciada por dirección, respiración, salto, caída, aterrizaje, muerte/reaparición, retroceso, recarga, cambio de arma, cuerpo a cuerpo y lanzamiento de granada, con rodillas, pies, manos y piezas de arma móviles;
-- menús, configuración 1v1/4v4, lobby manual P2P, HUD, marcador, kill feed, audio y pantalla de resultado integrados;
+- menús, configuración 1v1/4v4, lobby manual P2P, HUD, radar de movimiento de 25 m, IFF aliado/enemigo, avisos contextuales, voz de objetivos, audio y pantalla de resultado integrados;
 - transporte WebRTC P2P nativo con señalización manual, mensajes tipados y un host con hasta siete invitados;
-- 125 pruebas automatizadas para combate, movimiento, auto-step de rampas y deslizamiento por paredes, hitboxes, perfiles de bots, balance inicial, objetivos, regresiones, navegación e interiores del mapa, pads de salto, acceso a la torre, puntuación, determinismo, audio, curvas de animación, texturas procedurales, arquitectura y piezas móviles de armamento.
+- 196 pruebas automatizadas para combate, movimiento, auto-step de rampas y deslizamiento por paredes, hitboxes, perfiles de bots, balance inicial, objetivos, radar, avisos contextuales, regeneración de escudo, validación de snapshots P2P, regresiones, navegación e interiores del mapa, pads de salto, acceso a la torre, puntuación, determinismo, audio, curvas de animación, texturas procedurales, arquitectura y piezas móviles de armamento.
 
 El proyecto pasa `typecheck`, tests y build de producción. Aun así, el flujo WebRTC debe probarse con varios navegadores y redes reales antes de declarar soporte público 4v4; tampoco hay matchmaking, persistencia, cuentas, backend, migración de host ni anti-cheat.
 
@@ -68,6 +68,7 @@ Haz clic sobre el área de juego para capturar el puntero. `Esc` libera el punte
 | Mirar | Movimiento del ratón |
 | Disparar | Botón izquierdo |
 | Apuntar | Botón derecho |
+| Cambiar zoom del sniper | `Z` o rueda mientras se apunta (`5×` / `10×`) |
 | Saltar | `Espacio` |
 | Recargar | `R` |
 | Cambiar de arma | `Q`, `1`, `2` o botón central |
@@ -119,7 +120,7 @@ El equipamiento inicial normal es rifle de pulso y pistola. Las armas de poder a
 | Rifle de pulso | Automático equilibrado de corto y medio alcance. |
 | Pistola Vector | Semiautomática precisa. |
 | Rifle de batalla | Ráfaga de tres proyectiles para media distancia. |
-| Rifle de precisión | Cuatro disparos por cargador y gran daño a larga distancia. |
+| Rifle de precisión | Cuatro disparos por cargador, gran daño a larga distancia y visor escalonado `5×` / `10×`. |
 | Escopeta de brecha | Doce perdigones, fuerte a corta distancia. |
 | Lanzacohetes Nova | Proyectil lento con daño explosivo de área. |
 

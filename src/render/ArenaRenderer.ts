@@ -68,8 +68,11 @@ const FORWARD = new THREE.Vector3(0, 0, -1);
 const ASTRONAUT_WAIST_HEIGHT = 1.05;
 
 const TEAM_COLORS: Record<Team, { armor: number; accent: number; glow: number }> = {
-  aurora: { armor: 0xdce5e1, accent: 0x27d9cc, glow: 0x43f5df },
-  nova: { armor: 0xd9dddf, accent: 0xf15b78, glow: 0xff6e91 },
+  // Team modes use a readable full-suit tint, reinforced by bright IFF trim.
+  // The dark undersuit keeps the astronaut silhouette grounded and avoids the
+  // flat, toy-like look of a single saturated material.
+  aurora: { armor: 0x739eb4, accent: 0x26cfe4, glow: 0x54edff },
+  nova: { armor: 0xb95e69, accent: 0xff5068, glow: 0xff7186 },
   neutral: { armor: 0xe2e7e2, accent: 0xa9e83e, glow: 0xc7ff54 },
 };
 
@@ -77,10 +80,15 @@ const WEAPON_AIM_FOV: Readonly<Record<WeaponId, number>> = {
   'pulse-rifle': 57,
   sidearm: 63,
   'battle-rifle': 53,
-  sniper: 36,
+  sniper: 17.15,
   shotgun: 64,
   'rocket-launcher': 60,
 };
+
+// Optical FOVs corresponding to the classic 5x / 10x sniper steps from a
+// 74-degree hip-fire view. Keeping the values explicit makes the zoom honest:
+// the second level really resolves targets at twice the angular scale.
+const SNIPER_ZOOM_FOV = [17.15, 8.62] as const;
 
 const ARCHITECTURE_AUTHORED_SHELLS = new Set([
   'west-base-front-n',
@@ -125,6 +133,7 @@ interface PlayerRig {
   contactShadow: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
   shield: THREE.Mesh<THREE.SphereGeometry, THREE.MeshBasicMaterial>;
   juggernautRing: THREE.Mesh<THREE.TorusGeometry, THREE.MeshBasicMaterial>;
+  friendlyMarker: THREE.Sprite;
   armorMaterial: THREE.MeshPhysicalMaterial;
   accentMaterial: THREE.MeshStandardMaterial;
   visorMaterial: THREE.MeshPhysicalMaterial;
@@ -291,7 +300,7 @@ const sampleGroundRelief = (map: MapDefinition, worldX: number, worldZ: number):
 
 const disposeObject = (object: THREE.Object3D): void => {
   object.traverse((child) => {
-    if (!(child instanceof THREE.Mesh || child instanceof THREE.Line || child instanceof THREE.LineSegments || child instanceof THREE.Points)) return;
+    if (!(child instanceof THREE.Mesh || child instanceof THREE.Line || child instanceof THREE.LineSegments || child instanceof THREE.Points || child instanceof THREE.Sprite)) return;
     if (child.userData.sharedVisualTemplate) return;
     if (!child.userData.sharedEffectGeometry) child.geometry.dispose();
     const materials = Array.isArray(child.material) ? child.material : [child.material];
@@ -377,6 +386,8 @@ export class ArenaRenderer {
   private viewAimBlend = 0;
   private previousViewYaw: number | null = null;
   private previousViewPitch: number | null = null;
+  private localViewAim = false;
+  private sniperZoomLevel: 0 | 1 = 0;
   private visualSimulationTime = 0;
   private previousStateElapsed = 0;
   private visualClockInitialized = false;
@@ -543,6 +554,18 @@ export class ArenaRenderer {
     this.localPlayerId = id;
   }
 
+  public getPresentedPlayerPosition(id: string): Vec3 | null {
+    const rig = this.playerRigs.get(id);
+    if (!rig) return null;
+    return { x: rig.root.position.x, y: rig.root.position.y, z: rig.root.position.z };
+  }
+
+  /** Supplies latency-free local presentation input, including on P2P guests. */
+  public setLocalViewAim(aiming: boolean, sniperZoomLevel: 0 | 1): void {
+    this.localViewAim = aiming;
+    this.sniperZoomLevel = sniperZoomLevel;
+  }
+
   public pulseDamage(): void {
     this.damagePulse = 1;
   }
@@ -644,7 +667,7 @@ export class ArenaRenderer {
     const materials = new Set<THREE.Material>();
     const collect = (object: THREE.Object3D): void => {
       object.traverse((child) => {
-        if (!(child instanceof THREE.Mesh || child instanceof THREE.Line || child instanceof THREE.LineSegments || child instanceof THREE.Points)) return;
+        if (!(child instanceof THREE.Mesh || child instanceof THREE.Line || child instanceof THREE.LineSegments || child instanceof THREE.Points || child instanceof THREE.Sprite)) return;
         geometries.add(child.geometry);
         const childMaterials = Array.isArray(child.material) ? child.material : [child.material];
         for (const material of childMaterials) materials.add(material);
@@ -2167,6 +2190,9 @@ export class ArenaRenderer {
     delta: number,
   ): void {
     const present = new Set<string>();
+    const localPlayer = this.localPlayerId ? state.players[this.localPlayerId] : undefined;
+    const teamMode = state.config.mode !== 'deathmatch'
+      && !(state.config.mode === 'juggernaut' && state.config.format === 'duel');
     for (const player of Object.values(state.players)) {
       present.add(player.id);
       let rig = this.playerRigs.get(player.id);
@@ -2222,6 +2248,21 @@ export class ArenaRenderer {
         && (player.alive || rig.deathTimer > 0)
         && rig.contactShadow.material.opacity > 0.01;
       rig.juggernautRing.rotation.z = worldTime * 0.72;
+      const friendly = Boolean(
+        localPlayer
+        && teamMode
+        && player.id !== localPlayer.id
+        && player.team === localPlayer.team,
+      );
+      rig.friendlyMarker.visible = player.alive && friendly;
+      if (rig.friendlyMarker.visible) {
+        const markerDistance = rig.root.position.distanceTo(this.camera.position);
+        rig.friendlyMarker.material.opacity = THREE.MathUtils.clamp(
+          1.08 - markerDistance / 180,
+          0.62,
+          0.96,
+        );
+      }
       rig.armorMaterial.emissiveIntensity = 0;
       rig.accentMaterial.emissiveIntensity = player.isJuggernaut ? 1.05 : 0.3;
       rig.visorMaterial.emissiveIntensity = player.isJuggernaut
@@ -2235,6 +2276,11 @@ export class ArenaRenderer {
       if (present.has(id)) continue;
       rig.weaponMount.clear();
       this.scene.remove(rig.root);
+      const markerTexture = rig.friendlyMarker.material.map;
+      if (markerTexture) {
+        this.ownedTextures.delete(markerTexture);
+        markerTexture.dispose();
+      }
       disposeObject(rig.root);
       this.playerRigs.delete(id);
     }
@@ -2505,6 +2551,56 @@ export class ArenaRenderer {
       if (decoration.userData.towerRing) decoration.visible = state.config.mode === 'towah-of-powah';
     }
     this.towerTurret.visible = state.config.mode === 'towah-of-powah';
+  }
+
+  private createFriendlyMarker(name: string): THREE.Sprite {
+    const canvas = document.createElement('canvas');
+    canvas.width = 256;
+    canvas.height = 96;
+    const context = canvas.getContext('2d');
+    if (context) {
+      context.clearRect(0, 0, canvas.width, canvas.height);
+      context.shadowColor = 'rgba(0, 0, 0, 0.9)';
+      context.shadowBlur = 8;
+      context.fillStyle = '#e8f18b';
+      context.beginPath();
+      context.moveTo(128, 9);
+      context.lineTo(154, 34);
+      context.lineTo(141, 34);
+      context.lineTo(128, 23);
+      context.lineTo(115, 34);
+      context.lineTo(102, 34);
+      context.closePath();
+      context.fill();
+      context.shadowBlur = 5;
+      context.font = '700 22px Rajdhani, sans-serif';
+      context.textAlign = 'center';
+      context.textBaseline = 'middle';
+      context.fillText(name.toUpperCase().slice(0, 16), 128, 63, 224);
+      context.fillStyle = 'rgba(232, 241, 139, 0.72)';
+      context.fillRect(82, 82, 92, 2);
+    }
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.minFilter = THREE.LinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+    texture.needsUpdate = true;
+    this.ownedTextures.add(texture);
+    const marker = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: texture,
+      transparent: true,
+      depthTest: false,
+      depthWrite: false,
+      opacity: 0.96,
+      toneMapped: false,
+    }));
+    marker.name = 'friendly-iff-marker';
+    marker.userData.sharedEffectGeometry = true;
+    marker.position.y = 2.55;
+    marker.scale.set(2.25, 0.84, 1);
+    marker.renderOrder = 900;
+    marker.visible = false;
+    return marker;
   }
 
   private createAstronaut(player: PlayerState): PlayerRig {
@@ -2893,6 +2989,9 @@ export class ArenaRenderer {
     juggernautRing.visible = false;
     motionRoot.add(juggernautRing);
 
+    const friendlyMarker = this.createFriendlyMarker(player.name);
+    motionRoot.add(friendlyMarker);
+
     // Author body meshes in world-like coordinates for readability, then
     // shift the direct torso children once so all lean/breathing rotates from
     // the waist instead of from the astronaut's feet.
@@ -2925,6 +3024,7 @@ export class ArenaRenderer {
       contactShadow,
       shield,
       juggernautRing,
+      friendlyMarker,
       armorMaterial,
       accentMaterial,
       visorMaterial,
@@ -3920,11 +4020,16 @@ export class ArenaRenderer {
 
       const activeWeapon = localPlayer.inventory[localPlayer.activeWeapon] ?? localPlayer.inventory[0];
       this.setViewWeapon(activeWeapon?.id ?? null);
-      const aiming = Boolean(activeWeapon && localPlayer.input.aim);
+      const aiming = Boolean(activeWeapon && this.localViewAim);
       this.viewAimBlend = damp(this.viewAimBlend, aiming ? 1 : 0, aiming ? 17 : 21, delta);
+      const aimedFov = activeWeapon?.id === 'sniper'
+        ? SNIPER_ZOOM_FOV[this.sniperZoomLevel]
+        : activeWeapon
+          ? WEAPON_AIM_FOV[activeWeapon.id]
+          : 74;
       const targetFov = THREE.MathUtils.lerp(
         74,
-        activeWeapon ? WEAPON_AIM_FOV[activeWeapon.id] : 74,
+        aimedFov,
         this.viewAimBlend,
       );
       if (Math.abs(this.camera.fov - targetFov) > 0.01) {
@@ -3933,7 +4038,7 @@ export class ArenaRenderer {
       }
       const palette = TEAM_COLORS[localPlayer.team];
       this.viewArmMaterial.color.setHex(palette.armor);
-      this.viewModel.visible = true;
+      this.viewModel.visible = !(activeWeapon?.id === 'sniper' && this.viewAimBlend > 0.72);
 
       if (this.previousViewYaw === null || this.previousViewPitch === null) {
         this.previousViewYaw = localPlayer.yaw;

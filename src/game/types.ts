@@ -143,8 +143,24 @@ export interface TowerState {
 export interface GameEvent {
   id: number;
   time: number;
-  type: 'shot' | 'hit' | 'shield-break' | 'kill' | 'respawn' | 'pickup' | 'reload' | 'flag' | 'score' | 'explosion' | 'melee' | 'match-end';
+  type:
+    | 'shot'
+    | 'hit'
+    | 'shield-break'
+    | 'shield-recharge-start'
+    | 'shield-recharge-complete'
+    | 'kill'
+    | 'respawn'
+    | 'pickup'
+    | 'reload'
+    | 'flag'
+    | 'score'
+    | 'explosion'
+    | 'melee'
+    | 'match-end';
   actorId?: string;
+  /** Team captured at event time, retained even if the actor disconnects. */
+  actorTeam?: Team;
   targetId?: string;
   weaponId?: WeaponId;
   position?: Vec3;
@@ -152,6 +168,8 @@ export interface GameEvent {
   impact?: boolean;
   message?: string;
   amount?: number;
+  flagTeam?: Exclude<Team, 'neutral'>;
+  flagAction?: 'taken' | 'dropped' | 'returned' | 'captured';
 }
 
 export interface MatchState {

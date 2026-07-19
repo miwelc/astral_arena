@@ -569,11 +569,11 @@ export const updateBotInputs = (
     const exactPitch = pitchTo(eyePosition(player), aimPoint);
     const desiredYaw = exactYaw + (visibleTarget ? memory.aimError.x : 0);
     const desiredPitch = exactPitch + (visibleTarget ? memory.aimError.y : 0);
-    input.yaw = moveAngleToward(player.yaw, desiredYaw, profile.turnRate * safeDt);
+    input.yaw = wrapAngle(moveAngleToward(player.yaw, desiredYaw, profile.turnRate * safeDt));
     input.pitch = clamp(
       moveAngleToward(player.pitch, desiredPitch, profile.turnRate * 0.72 * safeDt),
-      -Math.PI * 0.48,
-      Math.PI * 0.48,
+      -1.48,
+      1.48,
     );
 
     const localMovement = movementToLocalInput(navigationDirection, input.yaw);
