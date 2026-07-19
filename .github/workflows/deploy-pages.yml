@@ -29,6 +29,20 @@ jobs:
           node-version: 22
           cache: npm
 
+      - name: Ensure GitHub Pages is enabled
+        uses: actions/github-script@v7
+        with:
+          script: |
+            try {
+              await github.request('GET /repos/{owner}/{repo}/pages', context.repo);
+            } catch (error) {
+              if (error.status !== 404) throw error;
+              await github.request('POST /repos/{owner}/{repo}/pages', {
+                ...context.repo,
+                build_type: 'workflow',
+              });
+            }
+
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
 
