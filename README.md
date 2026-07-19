@@ -38,6 +38,8 @@ npm run dev
 
 El servidor de desarrollo escucha en todas las interfaces y usa el puerto `4173`. La URL habitual es `http://localhost:4173`.
 
+La versión pública se despliega automáticamente desde `main` en **https://miwelc.github.io/astral_arena/**. El workflow de GitHub Pages ejecuta la suite completa y solo publica el build si todas las comprobaciones terminan correctamente.
+
 ### Scripts
 
 | Comando | Uso |
