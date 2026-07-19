@@ -1,16 +1,5 @@
 import type { PlayerInput } from '../game/types';
-
-const DIGITAL_INPUT_KEYS = [
-  'fire',
-  'aim',
-  'jump',
-  'reload',
-  'swap',
-  'melee',
-  'grenade',
-  'crouch',
-  'use',
-] as const satisfies readonly (keyof PlayerInput)[];
+import { DIGITAL_INPUT_KEYS } from './playerInputProtocol';
 
 /**
  * Converts an arbitrarily timed WebRTC input stream into one digital

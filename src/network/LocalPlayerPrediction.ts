@@ -11,23 +11,13 @@ import type {
   PlayerState,
   Vec3,
 } from '../game/types';
+import { PLAYER_PITCH_LIMIT } from '../game/types';
+import { DIGITAL_INPUT_KEYS } from './playerInputProtocol';
 
 const MAX_PENDING_INPUTS = 300;
 const SNAP_CORRECTION_DISTANCE = 3;
 const CORRECTION_DECAY_PER_SECOND = 14;
 const MAX_QUEUED_TRANSITIONS = 32;
-
-const DIGITAL_INPUT_KEYS = [
-  'fire',
-  'aim',
-  'jump',
-  'reload',
-  'swap',
-  'melee',
-  'grenade',
-  'crouch',
-  'use',
-] as const satisfies readonly (keyof PlayerInput)[];
 
 interface PendingInput {
   input: PlayerInput;
@@ -44,18 +34,20 @@ interface PendingInput {
 export class LocalPlayerPrediction {
   private player: PlayerState | null = null;
   private matchId: string | null = null;
-  private pending: PendingInput[] = [];
+  private readonly pending: PendingInput[] = [];
   private previousInput: PlayerInput | null = null;
-  private queuedTransitions: PlayerInput[] = [];
-  private visualCorrection: Vec3 = vec3();
+  private readonly queuedTransitions: PlayerInput[] = [];
+  private readonly visualCorrection: Vec3 = vec3();
 
   public reset(): void {
     this.player = null;
     this.matchId = null;
-    this.pending = [];
+    this.pending.length = 0;
     this.previousInput = null;
-    this.queuedTransitions = [];
-    this.visualCorrection = vec3();
+    this.queuedTransitions.length = 0;
+    this.visualCorrection.x = 0;
+    this.visualCorrection.y = 0;
+    this.visualCorrection.z = 0;
   }
 
   /** Applies one unacknowledged fixed input tick immediately on the guest. */
@@ -74,7 +66,7 @@ export class LocalPlayerPrediction {
           pitch: input.pitch,
         }
       : input;
-    const command = { input: { ...effectiveInput }, dt };
+    const command = { input: effectiveInput, dt };
     this.pending.push(command);
     if (this.pending.length > MAX_PENDING_INPUTS) {
       this.pending.splice(0, this.pending.length - MAX_PENDING_INPUTS);
@@ -104,7 +96,7 @@ export class LocalPlayerPrediction {
     // Mounted yaw is rate-limited in fixed prediction ticks below. Applying it
     // again on every render frame would make turn speed refresh-rate dependent.
     if (!operatingTurret) this.player.yaw = input.yaw;
-    this.player.pitch = clamp(input.pitch, -1.48, 1.48);
+    this.player.pitch = clamp(input.pitch, -PLAYER_PITCH_LIMIT, PLAYER_PITCH_LIMIT);
   }
 
   /** Rewinds to host truth and replays commands the host has not acknowledged. */
@@ -126,10 +118,17 @@ export class LocalPlayerPrediction {
       : { ...authoritative.position };
 
     if (!sameMatch || !previousAlive || !authoritative.alive) {
-      this.pending = [];
-      this.queuedTransitions = [];
+      this.pending.length = 0;
+      this.queuedTransitions.length = 0;
     } else {
-      this.pending = this.pending.filter(({ input }) => input.sequence > acknowledgedInput);
+      let acknowledgedCount = 0;
+      while (
+        acknowledgedCount < this.pending.length
+        && this.pending[acknowledgedCount]!.input.sequence <= acknowledgedInput
+      ) {
+        acknowledgedCount += 1;
+      }
+      if (acknowledgedCount > 0) this.pending.splice(0, acknowledgedCount);
       // The acknowledgement covers the freshest continuous sample applied by
       // the host, not every digital edge still waiting behind it. Keep locally
       // queued edges until fixed prediction ticks consume them in order.
@@ -150,13 +149,9 @@ export class LocalPlayerPrediction {
       && previousAlive
       && authoritative.alive
       && correctionDistance <= SNAP_CORRECTION_DISTANCE;
-    this.visualCorrection = shouldSmooth
-      ? {
-          x: previouslyPresented.x - this.player.position.x,
-          y: previouslyPresented.y - this.player.position.y,
-          z: previouslyPresented.z - this.player.position.z,
-        }
-      : vec3();
+    this.visualCorrection.x = shouldSmooth ? previouslyPresented.x - this.player.position.x : 0;
+    this.visualCorrection.y = shouldSmooth ? previouslyPresented.y - this.player.position.y : 0;
+    this.visualCorrection.z = shouldSmooth ? previouslyPresented.z - this.player.position.z : 0;
   }
 
   /** Publishes the predicted pose into the render snapshot. */
@@ -170,18 +165,18 @@ export class LocalPlayerPrediction {
     this.visualCorrection.y *= decay;
     this.visualCorrection.z *= decay;
 
-    target.position = {
-      x: this.player.position.x + this.visualCorrection.x,
-      y: this.player.position.y + this.visualCorrection.y,
-      z: this.player.position.z + this.visualCorrection.z,
-    };
-    target.velocity = { ...this.player.velocity };
+    target.position.x = this.player.position.x + this.visualCorrection.x;
+    target.position.y = this.player.position.y + this.visualCorrection.y;
+    target.position.z = this.player.position.z + this.visualCorrection.z;
+    target.velocity.x = this.player.velocity.x;
+    target.velocity.y = this.player.velocity.y;
+    target.velocity.z = this.player.velocity.z;
     target.yaw = this.player.yaw;
     target.pitch = this.player.pitch;
     target.height = this.player.height;
     target.crouched = this.player.crouched;
     target.grounded = this.player.grounded;
-    target.input = { ...this.player.input };
+    Object.assign(target.input, this.player.input);
   }
 
   public pendingInputCount(): number {
@@ -195,9 +190,11 @@ export class LocalPlayerPrediction {
     this.matchId = state.matchId;
     this.player = structuredClone(authoritative);
     this.previousInput = { ...authoritative.input };
-    this.pending = [];
-    this.queuedTransitions = [];
-    this.visualCorrection = vec3();
+    this.pending.length = 0;
+    this.queuedTransitions.length = 0;
+    this.visualCorrection.x = 0;
+    this.visualCorrection.y = 0;
+    this.visualCorrection.z = 0;
   }
 
   private advanceCommand(state: MatchState, command: PendingInput, elapsedOffset: number): void {
@@ -206,7 +203,7 @@ export class LocalPlayerPrediction {
     const input = command.input;
 
     if (!player.alive) {
-      this.previousInput = { ...input };
+      this.previousInput = input;
       return;
     }
 
@@ -219,8 +216,8 @@ export class LocalPlayerPrediction {
           TOWER_TURRET_LAYOUT.turnRate * command.dt,
         )
       : input.yaw;
-    player.pitch = clamp(input.pitch, -1.48, 1.48);
-    player.input = { ...input };
+    player.pitch = clamp(input.pitch, -PLAYER_PITCH_LIMIT, PLAYER_PITCH_LIMIT);
+    player.input = input;
     player.lastProcessedInput = Math.max(player.lastProcessedInput, input.sequence);
 
     if (state.phase === 'playing') {
@@ -245,6 +242,6 @@ export class LocalPlayerPrediction {
         );
       }
     }
-    this.previousInput = { ...input };
+    this.previousInput = input;
   }
 }

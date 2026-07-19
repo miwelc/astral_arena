@@ -80,6 +80,32 @@ describe('animation curve primitives', () => {
     expect(trianglePulse(0.5, 0.4, 0.4, 0.8)).toBe(0);
   });
 
+  it('keeps triangle pulses neutral for non-finite progress and boundaries in a normalized interval', () => {
+    for (const progress of [Number.NaN, Number.NEGATIVE_INFINITY, Number.POSITIVE_INFINITY]) {
+      expect(trianglePulse(progress, 0.1, 0.4, 0.8)).toBe(0);
+    }
+
+    const boundaries = [0.1, 0.4, 0.8];
+    for (const invalid of [Number.NaN, Number.NEGATIVE_INFINITY, Number.POSITIVE_INFINITY]) {
+      for (let index = 0; index < boundaries.length; index += 1) {
+        const candidate = [...boundaries];
+        candidate[index] = invalid;
+        expect(trianglePulse(0.4, candidate[0]!, candidate[1]!, candidate[2]!)).toBe(0);
+      }
+    }
+  });
+
+  it('rejects every collapsed, reversed or overlapping triangle interval', () => {
+    for (const [start, peak, end] of [
+      [0.4, 0.4, 0.8],
+      [0.1, 0.8, 0.8],
+      [0.8, 0.4, 0.1],
+      [0.1, 0.9, 0.8],
+    ]) {
+      expect(trianglePulse(0.5, start!, peak!, end!)).toBe(0);
+    }
+  });
+
   it('creates a smooth held window with neutral endpoints', () => {
     expect(smoothWindow(0, 0, 0.2, 0.7, 1)).toBe(0);
     expect(smoothWindow(0.2, 0, 0.2, 0.7, 1)).toBe(1);
@@ -87,6 +113,42 @@ describe('animation curve primitives', () => {
     expect(smoothWindow(0.7, 0, 0.2, 0.7, 1)).toBe(1);
     expect(smoothWindow(1, 0, 0.2, 0.7, 1)).toBe(0);
     expect(smoothWindow(0.5, 0.4, 0.3, 0.7, 0.8)).toBe(0);
+  });
+
+  it('keeps smooth windows neutral for non-finite progress and boundaries in a normalized interval', () => {
+    for (const progress of [Number.NaN, Number.NEGATIVE_INFINITY, Number.POSITIVE_INFINITY]) {
+      expect(smoothWindow(progress, 0.1, 0.3, 0.7, 0.9)).toBe(0);
+    }
+
+    const boundaries = [0.1, 0.3, 0.7, 0.9];
+    for (const invalid of [Number.NaN, Number.NEGATIVE_INFINITY, Number.POSITIVE_INFINITY]) {
+      for (let index = 0; index < boundaries.length; index += 1) {
+        const candidate = [...boundaries];
+        candidate[index] = invalid;
+        expect(smoothWindow(
+          0.5,
+          candidate[0]!,
+          candidate[1]!,
+          candidate[2]!,
+          candidate[3]!,
+        )).toBe(0);
+      }
+    }
+  });
+
+  it('rejects invalid windows while allowing a zero-length hold at the shared join', () => {
+    for (const [enterStart, enterEnd, exitStart, exitEnd] of [
+      [0.2, 0.2, 0.7, 0.9],
+      [0.1, 0.3, 0.8, 0.8],
+      [0.1, 0.7, 0.6, 0.9],
+      [0.9, 0.7, 0.3, 0.1],
+    ]) {
+      expect(smoothWindow(0.5, enterStart!, enterEnd!, exitStart!, exitEnd!)).toBe(0);
+    }
+
+    expect(smoothWindow(0.4, 0.1, 0.4, 0.4, 0.8)).toBe(1);
+    expect(smoothWindow(0.4 - 1e-6, 0.1, 0.4, 0.4, 0.8)).toBeCloseTo(1, 8);
+    expect(smoothWindow(0.4 + 1e-6, 0.1, 0.4, 0.4, 0.8)).toBeCloseTo(1, 8);
   });
 
   it('normalizes countdown timers and clamps overshoot', () => {

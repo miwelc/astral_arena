@@ -32,7 +32,9 @@ import {
 import { WEAPONS } from '../game/weapons';
 import { InputController } from '../input/InputController';
 import { isValidMatchState } from '../network/matchStateValidation';
+import { networkSnapshotState } from '../network/networkSnapshot';
 import { P2PNetwork, P2PNetworkError } from '../network/P2PNetwork';
+import { isValidPlayerInput } from '../network/playerInputProtocol';
 import { LocalPlayerPrediction } from '../network/LocalPlayerPrediction';
 import { RemoteInputBuffer } from '../network/RemoteInputBuffer';
 import type { ArenaRenderer } from '../render/ArenaRenderer';
@@ -87,17 +89,6 @@ const formatTime = (seconds: number): string => {
 const isTeamMode = (state: MatchState): boolean =>
   isTeamGameMode(state.config.mode);
 
-const isValidPlayerInput = (input: unknown): input is PlayerInput => {
-  if (!input || typeof input !== 'object') return false;
-  const candidate = input as Partial<PlayerInput>;
-  const numbers = [candidate.moveX, candidate.moveZ, candidate.yaw, candidate.pitch];
-  const buttons = [candidate.fire, candidate.aim, candidate.jump, candidate.reload, candidate.swap, candidate.melee, candidate.grenade, candidate.crouch, candidate.use];
-  return Number.isSafeInteger(candidate.sequence)
-    && (candidate.sequence ?? -1) >= 0
-    && numbers.every((value) => typeof value === 'number' && Number.isFinite(value))
-    && buttons.every((value) => typeof value === 'boolean');
-};
-
 export class AstralArenaApp {
   private simulation: GameSimulation | null = null;
   private network: P2PNetwork<WireMessage> | null = null;
@@ -121,6 +112,8 @@ export class AstralArenaApp {
   private lastInput: PlayerInput | null = null;
   private readonly remoteInputBuffer = new RemoteInputBuffer();
   private readonly localPlayerPrediction = new LocalPlayerPrediction();
+  private readonly elementCache = new Map<string, Element>();
+  private readonly markupCache = new WeakMap<HTMLElement, string>();
   private guestName = 'Astronauta';
   private gameViewActive = false;
   private lastDamageEvent = 0;
@@ -136,6 +129,7 @@ export class AstralArenaApp {
   private lastInvalidSnapshotAt = Number.NEGATIVE_INFINITY;
   private damageHudTimer = 0;
   private toastTimer = 0;
+  private eventFeedKey = '';
   private externalWeaponPreload: Promise<ExternalWeaponLoadReport> | null = null;
   private sessionGeneration = 0;
 
@@ -349,6 +343,7 @@ export class AstralArenaApp {
     const state = this.simulation?.state;
     if (!state) return;
     const maxPlayers = this.simulation?.maxPlayers ?? rulesForMode(state.config.mode).maxPlayers;
+    this.elementCache.clear();
     this.root.innerHTML = `
       <main class="lobby-shell">
         <div class="lobby-backdrop"></div>
@@ -440,6 +435,7 @@ export class AstralArenaApp {
     this.role = 'guest';
     this.localPlayerId = null;
     this.createNetwork(this.stunEnabled());
+    this.elementCache.clear();
     this.root.innerHTML = `
       <main class="connect-shell">
         <div class="connection-radar"><i></i><i></i><i></i><b>↗</b></div>
@@ -522,7 +518,6 @@ export class AstralArenaApp {
         this.network?.sendToPeer(peerId, {
           kind: 'welcome',
           playerId: player.id,
-          config: this.simulation.state.config,
           protocol: GAME_PROTOCOL_VERSION,
         });
         this.network?.sendToPeer(peerId, this.createSnapshot());
@@ -530,7 +525,7 @@ export class AstralArenaApp {
       } else if (message.kind === 'input') {
         if (isValidPlayerInput(message.input)) this.queueRemoteInput(peerId, message.input);
       } else if (message.kind === 'ping') {
-        this.network?.sendToPeer(peerId, { kind: 'pong', sentAt: message.sentAt, serverAt: performance.now() });
+        this.network?.sendToPeer(peerId, { kind: 'pong', sentAt: message.sentAt });
       }
       return;
     }
@@ -574,13 +569,7 @@ export class AstralArenaApp {
         this.guestSnapshotTimer = 0;
         this.currentState = snapshot;
         if (localPlayerId) {
-          const authoritativeAck = snapshot.players[localPlayerId]?.lastProcessedInput ?? 0;
-          const envelopeAck = message.acknowledgedInputs[localPlayerId];
-          const acknowledgedInput = typeof envelopeAck === 'number'
-            && Number.isSafeInteger(envelopeAck)
-            && envelopeAck >= 0
-            ? Math.min(envelopeAck, authoritativeAck)
-            : authoritativeAck;
+          const acknowledgedInput = snapshot.players[localPlayerId]?.lastProcessedInput ?? 0;
           this.localPlayerPrediction.reconcile(snapshot, localPlayerId, acknowledgedInput);
           this.localPlayerPrediction.applyTo(snapshot, localPlayerId, 0);
         }
@@ -642,6 +631,7 @@ export class AstralArenaApp {
       // failures so a single weapon cannot make the whole match unplayable.
       console.warn('Modelos GLB no disponibles; se usará el modelo de resiliencia:', weaponAssets.failed);
     }
+    this.elementCache.clear();
     this.root.innerHTML = `
       <main class="game-shell">
         <div id="scene-host" class="scene-host"></div>
@@ -762,7 +752,7 @@ export class AstralArenaApp {
           // Keep at most roughly one full-state snapshot queued on the reliable
           // channel. A skipped state is superseded by the next tick, leaving
           // room for welcome, pong and error control messages on the same path.
-          this.network.broadcast(this.createSnapshot(), { maxBufferedAmount: 8 * 1024 });
+          this.network.broadcastLazy(() => this.createSnapshot(), { maxBufferedAmount: 8 * 1024 });
         }
       }
     } else if (this.role === 'guest' && this.network && this.input && this.localPlayerId) {
@@ -780,7 +770,7 @@ export class AstralArenaApp {
           sampledInput,
         );
       }
-      const hostConnected = this.network.connectedPeerIds.includes('host');
+      const hostConnected = this.network.isPeerConnected('host');
       while (this.accumulator >= fixed) {
         const input = { ...sampledInput, sequence: ++this.inputSequence };
         this.lastInput = input;
@@ -788,7 +778,7 @@ export class AstralArenaApp {
           this.localPlayerPrediction.advance(this.currentState, this.localPlayerId, input, fixed);
         }
         if (hostConnected) {
-          this.network.sendToHost({ kind: 'input', playerId: this.localPlayerId, input });
+          this.network.sendToHost({ kind: 'input', input });
         }
         this.accumulator -= fixed;
       }
@@ -854,12 +844,12 @@ export class AstralArenaApp {
     this.setText('#shield-value', player.maxShield === 0 ? 'OFF' : String(Math.ceil(player.shield)));
     this.setText('#health-value', String(Math.max(0, Math.ceil(player.health))));
     this.setText('#grenade-value', String(player.grenades));
-    this.root.querySelector('#shield-block')?.classList.toggle('disabled', player.maxShield === 0);
+    this.query('#shield-block')?.classList.toggle('disabled', player.maxShield === 0);
     const shieldRecharging = player.alive
       && player.maxShield > 0
       && player.shield < player.maxShield
       && state.elapsed - player.lastDamageAt >= 5;
-    this.root.querySelector('#shield-block')?.classList.toggle('recharging', shieldRecharging);
+    this.query('#shield-block')?.classList.toggle('recharging', shieldRecharging);
     if (operatingTurret) {
       this.setText('#weapon-name', 'Torreta M41');
       this.setText('#weapon-role', 'EMPLAZAMIENTO CONECTADO');
@@ -882,34 +872,44 @@ export class AstralArenaApp {
     this.input?.setLookSensitivityScale(
       opticalAimActive ? clamp((zoomFov ?? 62) / 74, 0.12, 0.86) : 1,
     );
-    this.root.querySelector('#scope-overlay')?.classList.toggle('active', sniperScoped);
-    const crosshair = this.root.querySelector<HTMLElement>('#crosshair');
+    this.query('#scope-overlay')?.classList.toggle('active', sniperScoped);
+    const crosshair = this.query<HTMLElement>('#crosshair');
     crosshair?.classList.toggle('scoped', sniperScoped);
     crosshair?.classList.toggle('firing', Boolean(this.lastInput?.fire && (operatingTurret ? state.tower.turretCooldown : weapon?.cooldown)));
     if (crosshair) {
       const bloom = operatingTurret ? 0 : clamp(weapon?.bloom ?? 0, 0, 1);
-      crosshair.dataset.reticle = operatingTurret ? 'turret' : weaponReticle(weapon?.id);
-      crosshair.style.setProperty('--weapon-bloom', bloom.toFixed(3));
-      crosshair.style.setProperty('--reticle-bloom-scale', (1 + bloom * 0.32).toFixed(3));
+      const reticle = operatingTurret ? 'turret' : weaponReticle(weapon?.id);
+      if (crosshair.dataset.reticle !== reticle) crosshair.dataset.reticle = reticle;
+      const bloomValue = bloom.toFixed(3);
+      const bloomScale = (1 + bloom * 0.32).toFixed(3);
+      if (crosshair.style.getPropertyValue('--weapon-bloom') !== bloomValue) {
+        crosshair.style.setProperty('--weapon-bloom', bloomValue);
+      }
+      if (crosshair.style.getPropertyValue('--reticle-bloom-scale') !== bloomScale) {
+        crosshair.style.setProperty('--reticle-bloom-scale', bloomScale);
+      }
     }
     const warning = !operatingTurret && player.alive
       ? selectCombatWarning(weapon, definition?.magazineSize, player.grenades, Boolean(this.lastInput?.grenade))
       : null;
-    const combatWarning = this.root.querySelector<HTMLElement>('#combat-warning');
+    const combatWarning = this.query<HTMLElement>('#combat-warning');
     if (combatWarning) {
       const warningLabel = warning?.label ?? '';
       if (combatWarning.textContent !== warningLabel) combatWarning.textContent = warningLabel;
-      combatWarning.classList.remove('critical', 'warning', 'utility');
+      const previousTone = combatWarning.dataset.tone;
+      if (previousTone && previousTone !== warning?.tone) combatWarning.classList.remove(previousTone);
       combatWarning.classList.toggle('visible', warning !== null);
-      if (warning) combatWarning.classList.add(warning.tone);
+      if (warning && previousTone !== warning.tone) combatWarning.classList.add(warning.tone);
+      if (warning) combatWarning.dataset.tone = warning.tone;
+      else delete combatWarning.dataset.tone;
     }
-    this.root.querySelector('.hud-bottom-right')?.classList.toggle('turret-active', operatingTurret);
-    const turretHud = this.root.querySelector<HTMLElement>('#turret-hud');
+    this.query('.hud-bottom-right')?.classList.toggle('turret-active', operatingTurret);
+    const turretHud = this.query<HTMLElement>('#turret-hud');
     turretHud?.classList.toggle('active', operatingTurret);
     turretHud?.setAttribute('aria-hidden', String(!operatingTurret));
     this.updateInteractionPrompt(state, player);
     this.setText('#scope-zoom', this.sniperZoomLevel === 0 ? '5×' : '10×');
-    const radar = this.root.querySelector<HTMLElement>('#motion-radar');
+    const radar = this.query<HTMLElement>('#motion-radar');
     radar?.classList.toggle('zoom-hidden', opticalAimActive);
     radar?.setAttribute('aria-hidden', String(opticalAimActive));
     const hudNow = performance.now();
@@ -921,38 +921,58 @@ export class AstralArenaApp {
       this.nextTacticalHudAt = hudNow + 1000 / 30;
     }
 
-    const ranked = Object.values(state.players).sort((a, b) => b.score - a.score || b.kills - a.kills);
     if (isTeamMode(state)) {
       this.setText('#score-left', String(state.teamScores.aurora));
       this.setText('#score-right', String(state.teamScores.nova));
     } else {
+      let leadingOpponentScore = 0;
+      for (const id in state.players) {
+        const candidate = state.players[id];
+        if (candidate && candidate.id !== player.id && candidate.score > leadingOpponentScore) {
+          leadingOpponentScore = candidate.score;
+        }
+      }
       this.setText('#score-left', String(player.score));
-      this.setText('#score-right', String(ranked.find((candidate) => candidate.id !== player.id)?.score ?? 0));
+      this.setText('#score-right', String(leadingOpponentScore));
     }
     this.setText('#hud-objective', this.objectiveText(state, player.team));
 
     this.updateEventPresentation(state);
 
-    const rows = this.root.querySelector<HTMLElement>('#scoreboard-rows');
-    if (rows) {
-      rows.innerHTML = ranked
+    const scoreboard = this.query<HTMLElement>('#scoreboard');
+    const rows = this.query<HTMLElement>('#scoreboard-rows');
+    if (rows && scoreboard?.classList.contains('visible')) {
+      const ranked = Object.values(state.players).sort((a, b) => b.score - a.score || b.kills - a.kills);
+      const markup = ranked
         .map((candidate) => `<div class="scoreboard-row ${candidate.id === player.id ? 'you' : ''} team-${candidate.team}"><span><i></i>${escapeHtml(candidate.name)}${candidate.kind === 'bot' ? '<small>BOT</small>' : ''}${candidate.isJuggernaut ? '<b>COLOSO</b>' : ''}</span><span>${candidate.score}</span><span>${candidate.kills}</span><span>${candidate.deaths}</span></div>`)
         .join('');
+      this.setMarkup(rows, markup);
     }
 
-    const countdown = this.root.querySelector<HTMLElement>('#countdown');
+    const countdown = this.query<HTMLElement>('#countdown');
     if (countdown) {
       countdown.textContent = state.phase === 'countdown' ? (state.countdown > 0.35 ? String(Math.ceil(state.countdown)) : 'COMBATE') : '';
       countdown.classList.toggle('visible', state.phase === 'countdown');
     }
-    const death = this.root.querySelector<HTMLElement>('#death-state');
-    if (death) death.innerHTML = player.alive ? '' : `<span>TRAJE FUERA DE SERVICIO</span><b>Reentrada en ${Math.max(0, player.respawnTimer).toFixed(1)}</b>`;
+    const death = this.query<HTMLElement>('#death-state');
+    if (death) {
+      this.setMarkup(
+        death,
+        player.alive ? '' : `<span>TRAJE FUERA DE SERVICIO</span><b>Reentrada en ${Math.max(0, player.respawnTimer).toFixed(1)}</b>`,
+      );
+    }
 
-    const damage = state.events.filter((event) => event.type === 'hit' && event.targetId === player.id).at(-1);
+    let damage: MatchState['events'][number] | undefined;
+    for (let index = state.events.length - 1; index >= 0; index -= 1) {
+      const event = state.events[index];
+      if (event?.type === 'hit' && event.targetId === player.id) {
+        damage = event;
+        break;
+      }
+    }
     if (damage && damage.id > this.lastDamageEvent) {
       this.lastDamageEvent = damage.id;
-      this.renderer?.pulseDamage();
-      const damageHud = this.root.querySelector<HTMLElement>('#damage-hud');
+      const damageHud = this.query<HTMLElement>('#damage-hud');
       if (damageHud) {
         const presentation = directionalDamagePresentation(damage, player);
         damageHud.style.setProperty('--damage-strength', presentation.strength.toFixed(2));
@@ -968,7 +988,7 @@ export class AstralArenaApp {
     }
 
     if (state.phase === 'finished') {
-      const result = this.root.querySelector<HTMLElement>('#match-result');
+      const result = this.query<HTMLElement>('#match-result');
       result?.classList.remove('hidden');
       const won = state.winner === player.id || state.winner === player.team;
       this.setText('#result-title', won ? 'VICTORIA' : 'MISIÓN PERDIDA');
@@ -995,8 +1015,8 @@ export class AstralArenaApp {
     player: MatchState['players'][string],
     weaponRange: number,
   ): void {
-    const crosshair = this.root.querySelector<HTMLElement>('#crosshair');
-    const scope = this.root.querySelector<HTMLElement>('#scope-overlay');
+    const crosshair = this.query<HTMLElement>('#crosshair');
+    const scope = this.query<HTMLElement>('#scope-overlay');
     crosshair?.classList.remove('ally', 'enemy');
     scope?.classList.remove('ally', 'enemy');
     if (!player.alive) return;
@@ -1045,34 +1065,34 @@ export class AstralArenaApp {
   }
 
   private updateInteractionPrompt(state: MatchState, player: MatchState['players'][string]): void {
-    const element = this.root.querySelector<HTMLElement>('#interaction-prompt');
+    const element = this.query<HTMLElement>('#interaction-prompt');
     if (!element) return;
     const prompt = interactionPromptFor(state, player);
     element.classList.toggle('visible', prompt !== null);
     element.classList.toggle('turret-action', prompt?.action === 'enter-turret' || prompt?.action === 'exit-turret');
     if (!prompt) {
-      element.replaceChildren();
+      this.setMarkup(element, '');
       return;
     }
     const markup = `<kbd>${prompt.key}</kbd><span><strong>${escapeHtml(prompt.label)}</strong><small>${escapeHtml(prompt.detail)}</small></span>`;
-    if (element.innerHTML !== markup) element.innerHTML = markup;
+    this.setMarkup(element, markup);
   }
 
   private updateMotionRadar(state: MatchState): void {
     if (!this.localPlayerId) return;
     const contacts = buildMotionRadarContacts(state, this.localPlayerId);
-    const blips = this.root.querySelector<HTMLElement>('#radar-blips');
+    const blips = this.query<HTMLElement>('#radar-blips');
     if (blips) {
       const markup = contacts.map((contact) => {
         const left = 50 + contact.x * 44;
         const top = 50 + contact.y * 44;
         return `<i class="radar-blip ${contact.relation} ${contact.elevation} ${contact.revealedBy}" style="left:${left.toFixed(2)}%;top:${top.toFixed(2)}%;opacity:${contact.opacity.toFixed(2)}" title="${escapeHtml(contact.name)}"></i>`;
       }).join('');
-      if (blips.innerHTML !== markup) blips.innerHTML = markup;
+      this.setMarkup(blips, markup);
     }
     const local = state.players[this.localPlayerId];
     const moving = Boolean(local && !local.crouched && Math.hypot(local.velocity.x, local.velocity.y, local.velocity.z) >= 0.55);
-    this.root.querySelector('#motion-radar')?.classList.toggle('local-moving', moving);
+    this.query('#motion-radar')?.classList.toggle('local-moving', moving);
   }
 
   private updateEventPresentation(state: MatchState): void {
@@ -1082,17 +1102,28 @@ export class AstralArenaApp {
     const newestEvent = state.events.at(-1);
     if (newestEvent) this.lastPresentedEvent = Math.max(this.lastPresentedEvent, newestEvent.id);
 
+    let alertsChanged = false;
     for (const presentation of unseen) {
       if (presentation.placement === 'center' || presentation.placement === 'both') {
-        this.activeAlerts = this.activeAlerts.filter(
-          (alert) => alert.presentation.headline !== presentation.headline,
-        );
+        for (let index = this.activeAlerts.length - 1; index >= 0; index -= 1) {
+          if (this.activeAlerts[index]?.presentation.headline === presentation.headline) {
+            this.activeAlerts.splice(index, 1);
+          }
+        }
         this.activeAlerts.push({ presentation, expiresAt: now + presentation.durationMs });
+        alertsChanged = true;
       }
     }
-    this.activeAlerts = this.activeAlerts
-      .filter((alert) => alert.expiresAt > now)
-      .slice(-8);
+    for (let index = this.activeAlerts.length - 1; index >= 0; index -= 1) {
+      if ((this.activeAlerts[index]?.expiresAt ?? 0) <= now) {
+        this.activeAlerts.splice(index, 1);
+        alertsChanged = true;
+      }
+    }
+    if (this.activeAlerts.length > 8) {
+      this.activeAlerts.splice(0, this.activeAlerts.length - 8);
+      alertsChanged = true;
+    }
 
     const incomingAnnouncement = selectAnnouncementCandidate(unseen);
     if (incomingAnnouncement && (
@@ -1119,31 +1150,59 @@ export class AstralArenaApp {
       }
     }
 
-    const center = this.root.querySelector<HTMLElement>('#combat-alerts');
-    if (center) {
-      const byPriority = [...this.activeAlerts]
-        .sort((left, right) => right.presentation.priority - left.presentation.priority || right.presentation.eventId - left.presentation.eventId);
-      const newest = [...this.activeAlerts]
-        .sort((left, right) => right.presentation.eventId - left.presentation.eventId)[0];
-      const visibleAlerts = byPriority.length > 0 ? [byPriority[0]!] : [];
-      if (newest && newest !== visibleAlerts[0]) visibleAlerts.push(newest);
-      if (visibleAlerts.length < 2 && byPriority[1]) visibleAlerts.push(byPriority[1]);
+    const center = this.query<HTMLElement>('#combat-alerts');
+    if (center && alertsChanged) {
+      type ActiveAlert = { presentation: EventPresentation; expiresAt: number };
+      let highest: ActiveAlert | undefined;
+      let secondHighest: ActiveAlert | undefined;
+      let newest: ActiveAlert | undefined;
+      const higherPriority = (
+        left: ActiveAlert,
+        right: ActiveAlert,
+      ): boolean => left.presentation.priority > right.presentation.priority
+        || (
+          left.presentation.priority === right.presentation.priority
+          && left.presentation.eventId > right.presentation.eventId
+        );
+      for (const alert of this.activeAlerts) {
+        if (!newest || alert.presentation.eventId > newest.presentation.eventId) newest = alert;
+        if (!highest || higherPriority(alert, highest)) {
+          secondHighest = highest;
+          highest = alert;
+        } else if (!secondHighest || higherPriority(alert, secondHighest)) {
+          secondHighest = alert;
+        }
+      }
+      const visibleAlerts: ActiveAlert[] = highest ? [highest] : [];
+      if (newest && newest !== highest) visibleAlerts.push(newest);
+      if (visibleAlerts.length < 2 && secondHighest) visibleAlerts.push(secondHighest);
       const markup = visibleAlerts
         .map(({ presentation }) => `<div class="combat-alert ${presentation.tone}"><strong>${escapeHtml(presentation.headline)}</strong>${presentation.detail ? `<span>${escapeHtml(presentation.detail)}</span>` : ''}</div>`)
         .join('');
-      if (center.innerHTML !== markup) center.innerHTML = markup;
+      this.setMarkup(center, markup);
     }
 
-    const feedPresentations = presentGameEvents(state.events, state, this.localPlayerId, 0)
-      .filter((presentation) => presentation.placement !== 'center')
-      .slice(-5)
-      .reverse();
-    const feed = this.root.querySelector<HTMLElement>('#kill-feed');
-    if (feed) {
-      const markup = feedPresentations
-        .map((presentation) => `<div class="feed-item ${presentation.tone}"><i></i>${escapeHtml(presentation.feedText)}</div>`)
-        .join('');
-      if (feed.innerHTML !== markup) feed.innerHTML = markup;
+    const firstEventId = state.events[0]?.id ?? 0;
+    let playerCount = 0;
+    for (const playerId in state.players) {
+      if (Object.hasOwn(state.players, playerId)) playerCount += 1;
+    }
+    const feedKey = `${state.eventSequence}:${firstEventId}:${state.events.length}:${playerCount}`;
+    if (feedKey !== this.eventFeedKey) {
+      this.eventFeedKey = feedKey;
+      const allPresentations = presentGameEvents(state.events, state, this.localPlayerId, 0);
+      const feedPresentations: EventPresentation[] = [];
+      for (let index = allPresentations.length - 1; index >= 0 && feedPresentations.length < 5; index -= 1) {
+        const presentation = allPresentations[index];
+        if (presentation && presentation.placement !== 'center') feedPresentations.push(presentation);
+      }
+      const feed = this.query<HTMLElement>('#kill-feed');
+      if (feed) {
+        const markup = feedPresentations
+          .map((presentation) => `<div class="feed-item ${presentation.tone}"><i></i>${escapeHtml(presentation.feedText)}</div>`)
+          .join('');
+        this.setMarkup(feed, markup);
+      }
     }
   }
 
@@ -1174,10 +1233,8 @@ export class AstralArenaApp {
   }
 
   private createSnapshot(): HostMessage {
-    if (!this.simulation) return { kind: 'error', message: 'Simulación no disponible.' };
-    const acknowledgedInputs: Record<string, number> = {};
-    for (const player of Object.values(this.simulation.state.players)) acknowledgedInputs[player.id] = player.lastProcessedInput;
-    return { kind: 'snapshot', serverTime: performance.now(), acknowledgedInputs, state: this.simulation.snapshot() };
+    if (!this.simulation) throw new Error('No se puede crear una instantánea sin simulación.');
+    return { kind: 'snapshot', state: networkSnapshotState(this.simulation.state) };
   }
 
   private updateLobbyRoster(): void {
@@ -1300,9 +1357,13 @@ export class AstralArenaApp {
     this.lastAnnouncement = { message: '', at: 0 };
     this.pendingAnnouncement = null;
     this.nextTacticalHudAt = 0;
+    this.eventFeedKey = '';
     this.lastFrameErrorAt = 0;
     window.clearTimeout(this.damageHudTimer);
     this.damageHudTimer = 0;
+    window.clearTimeout(this.toastTimer);
+    this.toastTimer = 0;
+    this.elementCache.clear();
     if (document.pointerLockElement) document.exitPointerLock();
   }
 
@@ -1336,8 +1397,8 @@ export class AstralArenaApp {
       this.localPlayerPrediction.setLook(this.currentState, this.localPlayerId, input);
       this.localPlayerPrediction.applyTo(this.currentState, this.localPlayerId, 0);
     }
-    if (this.network.connectedPeerIds.includes('host')) {
-      this.network.sendToHost({ kind: 'input', playerId: this.localPlayerId, input });
+    if (this.network.isPeerConnected('host')) {
+      this.network.sendToHost({ kind: 'input', input });
     }
   }
 
@@ -1363,18 +1424,34 @@ export class AstralArenaApp {
   };
 
   private required<T extends Element>(selector: string): T {
-    const element = this.root.querySelector<T>(selector);
+    const element = this.query<T>(selector);
     if (!element) throw new Error(`Falta el elemento requerido: ${selector}`);
     return element;
   }
 
+  private query<T extends Element>(selector: string): T | null {
+    const cached = this.elementCache.get(selector);
+    if (cached?.isConnected) return cached as T;
+    const element = this.root.querySelector<T>(selector);
+    if (element) this.elementCache.set(selector, element);
+    else this.elementCache.delete(selector);
+    return element;
+  }
+
+  private setMarkup(element: HTMLElement, markup: string): void {
+    if (this.markupCache.get(element) === markup) return;
+    this.markupCache.set(element, markup);
+    element.innerHTML = markup;
+  }
+
   private setText(selector: string, value: string): void {
-    const element = this.root.querySelector<HTMLElement>(selector);
+    const element = this.query<HTMLElement>(selector);
     if (element && element.textContent !== value) element.textContent = value;
   }
 
   private setWidth(selector: string, percentage: number): void {
-    const element = this.root.querySelector<HTMLElement>(selector);
-    if (element) element.style.width = `${clamp(percentage, 0, 100)}%`;
+    const element = this.query<HTMLElement>(selector);
+    const width = `${clamp(percentage, 0, 100)}%`;
+    if (element && element.style.width !== width) element.style.width = width;
   }
 }

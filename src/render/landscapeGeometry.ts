@@ -67,7 +67,6 @@ const createPeakGeometry = ({
   }
 
   for (let index = 0; index < radialSegments; index += 1) {
-    const angle = (index / radialSegments) * TAU;
     const baseIndex = baseIndices[index]! * 3;
     const taper = 0.46 + random() * 0.16;
     shoulderIndices.push(positions.length / 3);

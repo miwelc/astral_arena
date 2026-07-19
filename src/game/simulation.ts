@@ -20,6 +20,7 @@ import {
   vec3,
   wrapAngle,
 } from './math';
+import { PLAYER_PITCH_LIMIT } from './types';
 import type {
   Difficulty,
   GameEvent,
@@ -40,7 +41,6 @@ import { createBotMemory, updateBotInputs } from './bots';
 import {
   advancePlayerMovement,
   createPlayerMovementMemory,
-  PLAYER_MOVEMENT_TUNING,
   STANDING_PLAYER_HEIGHT,
 } from './playerMovement';
 
@@ -312,7 +312,7 @@ export class GameSimulation {
       moveX: clamp(input.moveX, -1, 1),
       moveZ: clamp(input.moveZ, -1, 1),
       yaw: wrapAngle(input.yaw),
-      pitch: clamp(input.pitch, -1.48, 1.48),
+      pitch: clamp(input.pitch, -PLAYER_PITCH_LIMIT, PLAYER_PITCH_LIMIT),
     };
   }
 
@@ -374,7 +374,14 @@ export class GameSimulation {
   public step(dt: number): void {
     const safeDt = clamp(dt, 0, 0.05);
     this.state.tick += 1;
-    this.state.events = this.state.events.filter((event) => this.state.elapsed - event.time < 4);
+    let expiredEventCount = 0;
+    while (
+      expiredEventCount < this.state.events.length
+      && this.state.elapsed - this.state.events[expiredEventCount]!.time >= 4
+    ) {
+      expiredEventCount += 1;
+    }
+    if (expiredEventCount > 0) this.state.events.splice(0, expiredEventCount);
 
     if (this.state.phase === 'countdown') {
       this.state.countdown = Math.max(0, this.state.countdown - safeDt);
@@ -518,7 +525,7 @@ export class GameSimulation {
           TOWER_TURRET_LAYOUT.turnRate * dt,
         )
       : player.input.yaw;
-    player.pitch = clamp(player.input.pitch, -1.48, 1.48);
+    player.pitch = clamp(player.input.pitch, -PLAYER_PITCH_LIMIT, PLAYER_PITCH_LIMIT);
     player.lastProcessedInput = Math.max(player.lastProcessedInput, player.input.sequence);
 
     const previous = this.previousButtons.get(player.id) ?? noButtons();
@@ -742,7 +749,10 @@ export class GameSimulation {
     player.spawnProtection = 0;
     const origin = { x: player.position.x, y: player.position.y + 1.5, z: player.position.z };
     const rawDirection = directionFromAngles(player.yaw, player.pitch);
-    const baseDirection = this.assistedAimDirection(player, origin, rawDirection, definition);
+    const hitscanPlayers = definition.ballisticSpeed || definition.projectile === 'rocket'
+      ? undefined
+      : Object.values(this.state.players);
+    const baseDirection = this.assistedAimDirection(player, origin, rawDirection, definition, hitscanPlayers);
     if (definition.ballisticSpeed) {
       const direction = sampleDirectionInCone(
         baseDirection,
@@ -809,6 +819,7 @@ export class GameSimulation {
     const traces: Vec3[] = [];
     const resolvedHits: Array<ReturnType<typeof raycastWorld>> = [];
     const spreadScale = shotSpread(definition, weapon, burstIndex);
+    const players = hitscanPlayers ?? Object.values(this.state.players);
     for (let pellet = 0; pellet < definition.pellets; pellet += 1) {
       const direction = sampleDirectionInCone(
         baseDirection,
@@ -816,7 +827,7 @@ export class GameSimulation {
         randomRange(this.state, 0, 1),
         randomRange(this.state, 0, 1),
       );
-      const hit = raycastWorld(origin, direction, definition.range, this.map, Object.values(this.state.players), player.id);
+      const hit = raycastWorld(origin, direction, definition.range, this.map, players, player.id);
       resolvedHits.push(hit);
       traces.push(hit?.point ?? add(origin, scale(direction, definition.range)));
     }
@@ -870,10 +881,12 @@ export class GameSimulation {
     origin: Vec3,
     direction: Vec3,
     definition: (typeof WEAPONS)[WeaponId],
+    knownPlayers?: readonly PlayerState[],
   ): Vec3 {
     const angleLimit = definition.magnetismAngle ?? 0;
     const assistRange = Math.min(definition.range, definition.magnetismRange ?? 0);
     if (player.kind === 'bot' || angleLimit <= 0 || assistRange <= 0) return direction;
+    const players = knownPlayers ?? Object.values(this.state.players);
 
     // Never pull an already valid body/head ray away from the point the player chose.
     const directHit = raycastWorld(
@@ -881,14 +894,14 @@ export class GameSimulation {
       direction,
       definition.range,
       this.map,
-      Object.values(this.state.players),
+      players,
       player.id,
     );
     if (directHit?.playerId) return direction;
 
     let bestDirection: Vec3 | null = null;
     let bestAngle = angleLimit;
-    for (const target of Object.values(this.state.players)) {
+    for (const target of players) {
       if (!target.alive || target.spawnProtection > 0 || !isEnemy(this.state, player, target)) continue;
       const targetPoint = add(target.position, vec3(0, target.height * 0.62, 0));
       const delta = subtract(targetPoint, origin);
@@ -1245,7 +1258,10 @@ export class GameSimulation {
   }
 
   private updateProjectiles(dt: number): void {
-    for (const projectile of this.state.projectiles) {
+    const projectiles = this.state.projectiles;
+    if (projectiles.length === 0) return;
+    const players = Object.values(this.state.players);
+    for (const projectile of projectiles) {
       if (!projectile.alive) continue;
       if (projectile.kind !== 'grenade' || projectile.armed) projectile.fuse -= dt;
       const previous = cloneVec3(projectile.position);
@@ -1260,7 +1276,7 @@ export class GameSimulation {
             scale(directionDelta, 1 / travel),
             travel + projectile.radius,
             this.map,
-            Object.values(this.state.players),
+            players,
             projectile.ownerId,
           )
           : null;
@@ -1315,7 +1331,7 @@ export class GameSimulation {
           scale(directionDelta, 1 / travel),
           travel + projectile.radius,
           this.map,
-          Object.values(this.state.players),
+          players,
           ignoreOwner ? projectile.ownerId : undefined,
         );
         if (hit) {
@@ -1382,9 +1398,13 @@ export class GameSimulation {
           }
         }
       }
-      if (explode) this.explode(projectile);
+      if (explode) this.explode(projectile, players);
     }
-    this.state.projectiles = this.state.projectiles.filter((projectile) => projectile.alive);
+    let aliveCount = 0;
+    for (const projectile of projectiles) {
+      if (projectile.alive) projectiles[aliveCount++] = projectile;
+    }
+    projectiles.length = aliveCount;
   }
 
   private armGrenade(projectile: ProjectileState): void {
@@ -1393,7 +1413,7 @@ export class GameSimulation {
     projectile.fuse = GRENADE_FUSE_SECONDS;
   }
 
-  private explode(projectile: ProjectileState): void {
+  private explode(projectile: ProjectileState, players: readonly PlayerState[]): void {
     if (projectile.kind === 'bullet') return;
     projectile.alive = false;
     this.pushEvent({
@@ -1405,7 +1425,7 @@ export class GameSimulation {
       radius: projectile.blastRadius,
     });
     const owner = this.state.players[projectile.ownerId] ?? null;
-    for (const target of Object.values(this.state.players)) {
+    for (const target of players) {
       if (!target.alive) continue;
       const targetCenter = add(target.position, vec3(0, 0.9, 0));
       const targetDistance = distance(projectile.position, targetCenter);
@@ -1426,6 +1446,7 @@ export class GameSimulation {
 
   private updatePickups(dt: number): void {
     const remainingPickups: PickupState[] = [];
+    let players: PlayerState[] | null = null;
     for (const pickup of this.state.pickups) {
       if (pickup.temporary) {
         pickup.despawnTimer = Math.max(0, pickup.despawnTimer - dt);
@@ -1438,7 +1459,8 @@ export class GameSimulation {
         continue;
       }
       let removeTemporaryPickup = false;
-      for (const player of Object.values(this.state.players)) {
+      players ??= Object.values(this.state.players);
+      for (const player of players) {
         if (!player.alive || distanceSquared(player.position, pickup.position) > 2.2) continue;
         let consumed = false;
         let grantedAmount = 0;

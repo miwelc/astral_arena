@@ -37,6 +37,9 @@ import {
   smootherstep01,
   trianglePulse,
   type ActionPoseWeights,
+  type DirectionalGaitPose,
+  type LocomotionCycle,
+  type WeaponBobPose,
 } from './animationMath';
 import { createColdAlienPlant, createLayeredRidge } from './landscapeGeometry';
 import {
@@ -161,6 +164,8 @@ interface PlayerRig {
   targetYaw: number;
   lastTick: number;
   operatingTowerTurret: boolean;
+  visualTimeOffset: number;
+  fallSide: number;
   locomotionPhase: number;
   moveBlend: number;
   crouchBlend: number;
@@ -206,12 +211,14 @@ interface PickupVisual {
   phase: number;
   temporary: boolean;
   amount: number;
+  seenGeneration: number;
   weaponId?: WeaponId;
 }
 
 interface ProjectileVisual {
   root: THREE.Group;
   kind: ProjectileState['kind'];
+  seenGeneration: number;
 }
 
 interface TransientEffect {
@@ -281,6 +288,12 @@ interface HitRippleVisual {
 
 const MAX_SHOT_TRACE_SEGMENTS = 12;
 const MAX_SHOT_IMPACT_SPARKS = 15;
+const NEUTRAL_ACTION_POSE: ActionPoseWeights = Object.freeze({
+  lower: 0,
+  twist: 0,
+  part: 0,
+  hand: 0,
+});
 
 const clamp01 = (value: number): number => Math.min(1, Math.max(0, value));
 
@@ -400,7 +413,6 @@ export class ArenaRenderer {
   private readonly renderer: THREE.WebGLRenderer;
   private readonly composer: EffectComposer;
   private readonly depthFocusPass: DepthFocusPass;
-  private readonly bloomPass: UnrealBloomPass;
   private readonly gradePass: ShaderPass;
   private readonly camera = new THREE.PerspectiveCamera(74, 1, 0.035, 240);
   private readonly viewScene = new THREE.Scene();
@@ -429,6 +441,36 @@ export class ArenaRenderer {
   private readonly retiredWeaponTemplates = new Set<THREE.Group>();
   private readonly worldDecorations: THREE.Object3D[] = [];
   private readonly ownedTextures = new Set<THREE.Texture>();
+  private readonly scratchVectorA = new THREE.Vector3();
+  private readonly scratchVectorB = new THREE.Vector3();
+  private readonly scratchVectorC = new THREE.Vector3();
+  private readonly scratchQuaternionA = new THREE.Quaternion();
+  private readonly scratchQuaternionB = new THREE.Quaternion();
+  private readonly scratchEulerA = new THREE.Euler();
+  private readonly scratchEulerB = new THREE.Euler();
+  private readonly scratchLocomotion: LocomotionCycle = {
+    moveBlend: 0,
+    runBlend: 0,
+    forwardBlend: 0,
+    strafeBlend: 0,
+    strideLength: 0,
+    cyclesPerSecond: 0,
+    phaseDelta: 0,
+  };
+  private readonly scratchGait: DirectionalGaitPose = {
+    leftHipPitch: 0,
+    rightHipPitch: 0,
+    leftHipRoll: 0,
+    rightHipRoll: 0,
+    leftKnee: 0,
+    rightKnee: 0,
+    leftFootPitch: 0,
+    rightFootPitch: 0,
+    pelvisRoll: 0,
+    torsoPitch: 0,
+    torsoRoll: 0,
+  };
+  private readonly scratchWeaponBob: WeaponBobPose = { x: 0, y: 0, pitch: 0, roll: 0 };
   private environmentTarget: THREE.WebGLRenderTarget | null = null;
   private facilityEnvironment: FacilityEnvironmentBundle | null = null;
   private baseArchitecture: BaseArchitectureBundle | null = null;
@@ -489,6 +531,11 @@ export class ArenaRenderer {
   private previousStateElapsed = 0;
   private visualClockInitialized = false;
   private elapsedRenderTime = 0;
+  private renderGeneration = 0;
+  private renderWidth = 0;
+  private renderHeight = 0;
+  private renderPixelRatio = 0;
+  private objectiveMode: MatchState['config']['mode'] | null = null;
   private disposed = false;
   private unsubscribeExternalWeapons: (() => void) | null = null;
 
@@ -555,8 +602,8 @@ export class ArenaRenderer {
     viewModelPass.clear = false;
     viewModelPass.clearDepth = true;
     this.composer.addPass(viewModelPass);
-    this.bloomPass = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.38, 0.52, 0.98);
-    this.composer.addPass(this.bloomPass);
+    const bloomPass = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.38, 0.52, 0.98);
+    this.composer.addPass(bloomPass);
     this.gradePass = new ShaderPass({
       uniforms: {
         tDiffuse: { value: null },
@@ -672,10 +719,6 @@ export class ArenaRenderer {
     this.sniperZoomLevel = sniperZoomLevel;
   }
 
-  public pulseDamage(): void {
-    this.damagePulse = 1;
-  }
-
   public resize(): void {
     if (this.disposed) return;
     const width = Math.max(1, this.container.clientWidth || window.innerWidth || 1);
@@ -688,17 +731,30 @@ export class ArenaRenderer {
       1.25,
       Math.sqrt(renderTargetPixelBudget / (width * height)),
     );
-    this.renderer.setPixelRatio(pixelRatio);
-    this.renderer.setSize(width, height, false);
-    this.composer.setPixelRatio(pixelRatio);
-    this.composer.setSize(width, height);
-    this.camera.aspect = width / height;
-    this.camera.updateProjectionMatrix();
-    this.viewCamera.aspect = width / height;
-    this.viewCamera.updateProjectionMatrix();
+    const dimensionsChanged = width !== this.renderWidth || height !== this.renderHeight;
+    const pixelRatioChanged = Math.abs(pixelRatio - this.renderPixelRatio) > 0.0001;
+    if (!dimensionsChanged && !pixelRatioChanged) return;
+    if (pixelRatioChanged) {
+      this.renderer.setPixelRatio(pixelRatio);
+      this.composer.setPixelRatio(pixelRatio);
+    }
+    if (dimensionsChanged) {
+      this.renderer.setSize(width, height, false);
+      this.composer.setSize(width, height);
+    }
+    const aspect = width / height;
+    if (Math.abs(this.camera.aspect - aspect) > 0.0001) {
+      this.camera.aspect = aspect;
+      this.camera.updateProjectionMatrix();
+      this.viewCamera.aspect = aspect;
+      this.viewCamera.updateProjectionMatrix();
+    }
+    this.renderWidth = width;
+    this.renderHeight = height;
+    this.renderPixelRatio = pixelRatio;
 
     const overlayHeight = 0.125;
-    this.damageOverlay?.scale.set(overlayHeight * this.camera.aspect, overlayHeight, 1);
+    this.damageOverlay?.scale.set(overlayHeight * aspect, overlayHeight, 1);
   }
 
   public render(
@@ -710,6 +766,7 @@ export class ArenaRenderer {
     if (this.disposed) return;
 
     const delta = Math.min(this.clock.getDelta(), 0.05);
+    this.renderGeneration += 1;
     this.elapsedRenderTime += delta;
     const interpolation = clamp01(alpha);
     if (
@@ -2419,11 +2476,11 @@ export class ArenaRenderer {
     firstPerson: boolean,
     delta: number,
   ): void {
-    const present = new Set<string>();
     const localPlayer = this.localPlayerId ? state.players[this.localPlayerId] : undefined;
     const teamMode = isTeamGameMode(state.config.mode);
-    for (const player of Object.values(state.players)) {
-      present.add(player.id);
+    for (const id in state.players) {
+      const player = state.players[id];
+      if (!player) continue;
       let rig = this.playerRigs.get(player.id);
       if (!rig) {
         rig = this.createAstronaut(player);
@@ -2455,17 +2512,22 @@ export class ArenaRenderer {
         rig.operatingTowerTurret = operatingTowerTurret;
         rig.lastTick = state.tick;
       } else if (rig.lastTick !== state.tick) {
-        const nextPosition = vectorFrom(player.position);
         const turretMountChanged = rig.operatingTowerTurret !== operatingTowerTurret;
-        if (turretMountChanged || rig.targetPosition.distanceToSquared(nextPosition) > 36) {
-          rig.previousPosition.copy(nextPosition);
-          rig.targetPosition.copy(nextPosition);
-          rig.root.position.copy(nextPosition);
+        const targetDeltaX = rig.targetPosition.x - player.position.x;
+        const targetDeltaY = rig.targetPosition.y - player.position.y;
+        const targetDeltaZ = rig.targetPosition.z - player.position.z;
+        if (
+          turretMountChanged
+          || targetDeltaX * targetDeltaX + targetDeltaY * targetDeltaY + targetDeltaZ * targetDeltaZ > 36
+        ) {
+          rig.previousPosition.set(player.position.x, player.position.y, player.position.z);
+          rig.targetPosition.copy(rig.previousPosition);
+          rig.root.position.copy(rig.previousPosition);
           rig.previousYaw = player.yaw;
           rig.targetYaw = player.yaw;
         } else {
           rig.previousPosition.copy(rig.targetPosition);
-          rig.targetPosition.copy(nextPosition);
+          rig.targetPosition.set(player.position.x, player.position.y, player.position.z);
           rig.previousYaw = rig.targetYaw;
           rig.targetYaw = player.yaw;
         }
@@ -2473,7 +2535,7 @@ export class ArenaRenderer {
         rig.lastTick = state.tick;
       }
       if (!locallyPresented) {
-        const desiredPosition = new THREE.Vector3().lerpVectors(
+        const desiredPosition = this.scratchVectorA.lerpVectors(
           rig.previousPosition,
           rig.targetPosition,
           alpha,
@@ -2487,7 +2549,7 @@ export class ArenaRenderer {
       const activeWeapon = player.inventory[player.activeWeapon] ?? player.inventory[0];
       const weaponId = activeWeapon?.id ?? null;
       if (weaponId !== rig.weaponId) this.setRigWeapon(rig, weaponId);
-      this.updateRigAnimation(rig, player, activeWeapon, worldTime, delta);
+      this.updateRigAnimation(rig, player, activeWeapon, delta);
       // The mounted astronaut remains a real, targetable third-person body,
       // but their carried gun is stowed while both hands operate the emplacement.
       rig.weaponMount.visible = !operatingTowerTurret;
@@ -2531,7 +2593,7 @@ export class ArenaRenderer {
     }
 
     for (const [id, rig] of this.playerRigs) {
-      if (present.has(id)) continue;
+      if (state.players[id]) continue;
       rig.weaponMount.clear();
       this.scene.remove(rig.root);
       const markerTexture = rig.friendlyMarker.material.map;
@@ -2548,7 +2610,6 @@ export class ArenaRenderer {
     rig: PlayerRig,
     player: PlayerState,
     activeWeapon: PlayerState['inventory'][number] | undefined,
-    worldTime: number,
     delta: number,
   ): void {
     if (!rig.previousGrounded && player.grounded && rig.previousVerticalVelocity < -0.65) {
@@ -2575,7 +2636,13 @@ export class ArenaRenderer {
     const rightZ = -Math.sin(player.yaw);
     const forwardSpeed = player.velocity.x * forwardX + player.velocity.z * forwardZ;
     const strafeSpeed = player.velocity.x * rightX + player.velocity.z * rightZ;
-    const locomotion = evaluateLocomotionCycle(horizontalSpeed, forwardSpeed, strafeSpeed, delta);
+    const locomotion = evaluateLocomotionCycle(
+      horizontalSpeed,
+      forwardSpeed,
+      strafeSpeed,
+      delta,
+      this.scratchLocomotion,
+    );
     rig.moveBlend = damp(rig.moveBlend, locomotion.moveBlend, 13, delta);
     rig.crouchBlend = damp(rig.crouchBlend, player.crouched ? 1 : 0, player.crouched ? 15 : 11, delta);
     rig.groundBlend = damp(rig.groundBlend, player.grounded ? 1 : 0, player.grounded ? 19 : 13, delta);
@@ -2585,12 +2652,15 @@ export class ArenaRenderer {
     const runBlend = locomotion.runBlend;
     rig.locomotionPhase = advanceLocomotionPhase(rig.locomotionPhase, locomotion.phaseDelta);
     const cycle = Math.sin(rig.locomotionPhase);
-    const gait = evaluateDirectionalGait(rig.locomotionPhase, {
-      moveBlend: rig.moveBlend,
-      runBlend,
-      forwardBlend: rig.forwardBlend,
-      strafeBlend: rig.strafeBlend,
-    });
+    locomotion.moveBlend = rig.moveBlend;
+    locomotion.runBlend = runBlend;
+    locomotion.forwardBlend = rig.forwardBlend;
+    locomotion.strafeBlend = rig.strafeBlend;
+    const gait = evaluateDirectionalGait(
+      rig.locomotionPhase,
+      locomotion,
+      this.scratchGait,
+    );
     const groundedWeight = rig.groundBlend;
     const airborneWeight = 1 - groundedWeight;
     const rise = saturate(player.velocity.y / 6.3);
@@ -2630,7 +2700,7 @@ export class ArenaRenderer {
       -gait.rightHipRoll * 0.34 * groundedWeight,
     );
 
-    const visualTime = this.elapsedRenderTime + (hashString(player.id) % 100) * 0.017;
+    const visualTime = this.elapsedRenderTime + rig.visualTimeOffset;
     const breathing = Math.sin(visualTime * 1.75) * 0.0065 * (1 - rig.moveBlend * 0.72);
     const gaitBob = Math.abs(Math.sin(rig.locomotionPhase))
       * THREE.MathUtils.lerp(0.018, 0.052, runBlend)
@@ -2670,7 +2740,7 @@ export class ArenaRenderer {
     rig.juggernautRing.position.y = THREE.MathUtils.lerp(2.18, 1.55, rig.crouchBlend);
 
     let actionKind: 'none' | 'reload' | 'swap' | 'melee' | 'grenade' = 'none';
-    let actionPose: ActionPoseWeights = { lower: 0, twist: 0, part: 0, hand: 0 };
+    let actionPose: ActionPoseWeights = NEUTRAL_ACTION_POSE;
     let reloadProgress = 0;
     if (activeWeapon && activeWeapon.reloadTimer > 0) {
       reloadProgress = normalizedTimer(activeWeapon.reloadTimer, WEAPONS[activeWeapon.id].reloadSeconds);
@@ -2724,8 +2794,7 @@ export class ArenaRenderer {
     rig.motionRoot.scale.set(1, 1, 1);
     if (rig.deathTimer > 0) {
       const deathProgress = smootherstep01(normalizedTimer(rig.deathTimer, 1.05));
-      const fallSide = hashString(player.id) % 2 === 0 ? 1 : -1;
-      rig.motionRoot.rotation.set(deathProgress * 0.2, 0, fallSide * deathProgress * 1.34);
+      rig.motionRoot.rotation.set(deathProgress * 0.2, 0, rig.fallSide * deathProgress * 1.34);
       rig.motionRoot.position.y = -deathProgress * 0.34;
     } else if (rig.spawnTimer > 0 && player.alive) {
       const spawnProgress = smootherstep01(normalizedTimer(rig.spawnTimer, 0.62));
@@ -2754,16 +2823,17 @@ export class ArenaRenderer {
     rig.rightArm.quaternion.copy(rig.baseRightArmQuaternion);
     rig.leftForearm.quaternion.copy(rig.baseLeftForearmQuaternion);
     rig.rightForearm.quaternion.copy(rig.baseRightForearmQuaternion);
-    const leftOffset = new THREE.Quaternion();
-    const forearmOffset = new THREE.Quaternion();
+    if (kind !== 'reload' && kind !== 'grenade' && kind !== 'swap') return;
+    const leftOffset = this.scratchQuaternionA.identity();
+    const forearmOffset = this.scratchQuaternionB.identity();
     if (kind === 'reload') {
-      leftOffset.setFromEuler(new THREE.Euler(0.16 * pose.hand, -0.34 * pose.hand, -0.48 * pose.hand));
-      forearmOffset.setFromEuler(new THREE.Euler(0.24 * pose.hand, 0, 0.25 * pose.hand));
+      leftOffset.setFromEuler(this.scratchEulerA.set(0.16 * pose.hand, -0.34 * pose.hand, -0.48 * pose.hand));
+      forearmOffset.setFromEuler(this.scratchEulerB.set(0.24 * pose.hand, 0, 0.25 * pose.hand));
     } else if (kind === 'grenade') {
-      leftOffset.setFromEuler(new THREE.Euler(-0.9 * pose.hand, -0.2 * pose.hand, -0.62 * pose.hand));
-      forearmOffset.setFromEuler(new THREE.Euler(-0.55 * pose.hand, 0, 0.28 * pose.hand));
+      leftOffset.setFromEuler(this.scratchEulerA.set(-0.9 * pose.hand, -0.2 * pose.hand, -0.62 * pose.hand));
+      forearmOffset.setFromEuler(this.scratchEulerB.set(-0.55 * pose.hand, 0, 0.28 * pose.hand));
     } else if (kind === 'swap') {
-      leftOffset.setFromEuler(new THREE.Euler(0.08 * pose.hand, 0, -0.16 * pose.hand));
+      leftOffset.setFromEuler(this.scratchEulerA.set(0.08 * pose.hand, 0, -0.16 * pose.hand));
     }
     rig.leftArm.quaternion.multiply(leftOffset);
     rig.leftForearm.quaternion.multiply(forearmOffset);
@@ -2776,31 +2846,34 @@ export class ArenaRenderer {
     fireProgress: number,
     recoil: number,
   ): void {
-    const reloadPose = evaluateWeaponReload(reloadProgress, weaponId);
+    const reloadPose = reloadProgress > 0
+      ? evaluateWeaponReload(reloadProgress, weaponId)
+      : null;
     const magazine = parts.magazine;
-    if (magazine) {
+    if (magazine && reloadPose) {
       magazine.object.position.x += reloadPose.magazineOffsetX;
       magazine.object.position.y += reloadPose.magazineOffsetY;
       magazine.object.position.z += reloadPose.magazineOffsetZ;
       magazine.object.quaternion.multiply(
-        new THREE.Quaternion().setFromEuler(new THREE.Euler(0, 0, reloadPose.magazineRoll)),
+        this.scratchQuaternionA.setFromEuler(this.scratchEulerA.set(0, 0, reloadPose.magazineRoll)),
       );
     }
     const energyCell = parts['energy-cell'];
     if (energyCell) {
-      energyCell.object.position.x += reloadPose.action.part * 0.22;
-      energyCell.object.position.y -= reloadPose.action.part * 0.08;
+      const reloadPart = reloadPose?.action.part ?? 0;
+      energyCell.object.position.x += reloadPart * 0.22;
+      energyCell.object.position.y -= reloadPart * 0.08;
       const pulse = 1 + recoil * 0.08;
       energyCell.object.scale.copy(energyCell.baseScale).multiplyScalar(pulse);
     }
     const cassette = parts['launcher-cassette'];
-    if (cassette) {
+    if (cassette && reloadPose) {
       cassette.object.position.z += reloadPose.action.part * 0.42;
       cassette.object.rotation.x += reloadPose.action.part * 0.16;
     }
 
     const slide = parts.slide;
-    if (slide) slide.object.position.z += reloadPose.slideOffsetZ;
+    if (slide && reloadPose) slide.object.position.z += reloadPose.slideOffsetZ;
 
     if (!weaponId || fireProgress <= 0 || fireProgress >= 1) return;
     if (slide) slide.object.position.z += trianglePulse(fireProgress, 0, 0.1, 0.34) * 0.17;
@@ -2820,6 +2893,8 @@ export class ArenaRenderer {
   }
 
   private syncObjectiveVisibility(state: MatchState): void {
+    if (this.objectiveMode === state.config.mode) return;
+    this.objectiveMode = state.config.mode;
     for (const decoration of this.worldDecorations) {
       if (typeof decoration.userData.teamBeacon === 'string') decoration.visible = state.config.mode === 'capture-the-flag';
       if (typeof decoration.userData.teamBeaconStructure === 'string') decoration.visible = state.config.mode === 'capture-the-flag';
@@ -3276,6 +3351,8 @@ export class ArenaRenderer {
     const initial = vectorFrom(player.position);
     const leftForearm = leftArm.userData.forearm as THREE.Group;
     const rightForearm = rightArm.userData.forearm as THREE.Group;
+    const playerHash = hashString(player.id);
+    const fallSide = playerHash % 2 === 0 ? 1 : -1;
     return {
       root,
       motionRoot,
@@ -3311,7 +3388,9 @@ export class ArenaRenderer {
       targetYaw: player.yaw,
       lastTick: -1,
       operatingTowerTurret: false,
-      locomotionPhase: (hashString(player.id) % 628) * 0.01,
+      visualTimeOffset: (playerHash % 100) * 0.017,
+      fallSide,
+      locomotionPhase: (playerHash % 628) * 0.01,
       moveBlend: 0,
       crouchBlend: player.crouched ? 1 : 0,
       groundBlend: player.grounded ? 1 : 0,
@@ -3330,7 +3409,7 @@ export class ArenaRenderer {
       grenadeTimer: 0,
       fireTimer: 0,
       hitTimer: 0,
-      hitDirection: hashString(player.id) % 2 === 0 ? 1 : -1,
+      hitDirection: fallSide,
       deathTimer: 0,
       spawnTimer: player.alive ? 0.6 : 0,
       recoil: 0,
@@ -3392,7 +3471,8 @@ export class ArenaRenderer {
   }
 
   private resetAnimatedWeaponParts(parts: AnimatedWeaponParts): void {
-    for (const part of Object.values(parts)) {
+    for (const role in parts) {
+      const part = parts[role as WeaponAnimationRole];
       if (!part) continue;
       part.object.position.copy(part.basePosition);
       part.object.quaternion.copy(part.baseQuaternion);
@@ -3487,9 +3567,7 @@ export class ArenaRenderer {
   }
 
   private syncPickups(pickups: PickupState[], worldTime: number): void {
-    const present = new Set<string>();
     for (const pickup of pickups) {
-      present.add(pickup.id);
       let visual = this.pickupVisuals.get(pickup.id);
       if (visual && visual.amount !== pickup.amount) {
         visual.root.removeFromParent();
@@ -3502,6 +3580,7 @@ export class ArenaRenderer {
         this.pickupVisuals.set(pickup.id, visual);
         this.scene.add(visual.root);
       }
+      visual.seenGeneration = this.renderGeneration;
       visual.root.visible = pickup.available;
       visual.root.position.set(
         pickup.position.x,
@@ -3520,7 +3599,7 @@ export class ArenaRenderer {
       }
     }
     for (const [id, visual] of this.pickupVisuals) {
-      if (present.has(id)) continue;
+      if (visual.seenGeneration === this.renderGeneration) continue;
       // Weapon/grenade death drops are intentionally short-lived. Their
       // weapon meshes clone shared templates while rings/grenade shells are
       // owned per pickup. disposeObject skips the former and releases the
@@ -3647,14 +3726,17 @@ export class ArenaRenderer {
       phase: (hashString(pickup.id) % 628) / 100,
       temporary: pickup.temporary,
       amount: pickup.amount,
+      seenGeneration: this.renderGeneration,
       weaponId: pickup.weaponId,
     };
   }
 
   private syncFlags(flags: FlagState[], state: MatchState, worldTime: number): void {
-    const present = new Set<FlagState['team']>();
+    let auroraPresent = false;
+    let novaPresent = false;
     for (const flag of flags) {
-      present.add(flag.team);
+      if (flag.team === 'aurora') auroraPresent = true;
+      else novaPresent = true;
       let visual = this.flagVisuals.get(flag.team);
       if (!visual) {
         visual = this.createFlag(flag.team);
@@ -3670,8 +3752,13 @@ export class ArenaRenderer {
       const cloth = visual.userData.cloth as THREE.Mesh | undefined;
       if (cloth) cloth.rotation.y = Math.sin(worldTime * 3.1 + (flag.team === 'aurora' ? 0 : 1.7)) * 0.08;
     }
-    for (const [team, visual] of this.flagVisuals) {
-      if (!present.has(team)) visual.visible = false;
+    if (!auroraPresent) {
+      const visual = this.flagVisuals.get('aurora');
+      if (visual) visual.visible = false;
+    }
+    if (!novaPresent) {
+      const visual = this.flagVisuals.get('nova');
+      if (visual) visual.visible = false;
     }
   }
 
@@ -3715,19 +3802,18 @@ export class ArenaRenderer {
   }
 
   private syncProjectiles(projectiles: ProjectileState[], worldTime: number): void {
-    const active = new Set<string>();
     for (const projectile of projectiles) {
       if (!projectile.alive) continue;
-      active.add(projectile.id);
       let visual = this.projectileVisuals.get(projectile.id);
       if (!visual) {
         visual = this.createProjectile(projectile);
         this.projectileVisuals.set(projectile.id, visual);
         this.scene.add(visual.root);
       }
+      visual.seenGeneration = this.renderGeneration;
       visual.root.position.set(projectile.position.x, projectile.position.y, projectile.position.z);
       if (projectile.kind === 'rocket' || projectile.kind === 'bullet') {
-        const velocity = vectorFrom(projectile.velocity);
+        const velocity = vectorFrom(projectile.velocity, this.scratchVectorA);
         if (velocity.lengthSq() > 0.001) visual.root.quaternion.setFromUnitVectors(UP, velocity.normalize());
         if (projectile.kind === 'rocket') {
           const flame = visual.root.userData.flame as THREE.Mesh | undefined;
@@ -3740,7 +3826,7 @@ export class ArenaRenderer {
     }
 
     for (const [id, visual] of this.projectileVisuals) {
-      if (active.has(id)) continue;
+      if (visual.seenGeneration === this.renderGeneration) continue;
       this.scene.remove(visual.root);
       disposeObject(visual.root);
       this.projectileVisuals.delete(id);
@@ -3830,7 +3916,7 @@ export class ArenaRenderer {
     root.traverse((object) => {
       if (object instanceof THREE.Mesh) object.castShadow = projectile.kind !== 'bullet';
     });
-    return { root, kind: projectile.kind };
+    return { root, kind: projectile.kind, seenGeneration: this.renderGeneration };
   }
 
   private syncTower(state: MatchState, worldTime: number): void {
@@ -3851,8 +3937,11 @@ export class ArenaRenderer {
       return;
     }
 
-    for (const event of state.events) {
-      if (event.id <= this.lastEventId) continue;
+    if ((state.events.at(-1)?.id ?? 0) <= this.lastEventId) return;
+    let firstUnseen = state.events.length - 1;
+    while (firstUnseen > 0 && state.events[firstUnseen - 1]!.id > this.lastEventId) firstUnseen -= 1;
+    for (let index = firstUnseen; index < state.events.length; index += 1) {
+      const event = state.events[index]!;
       const redundantFatalShieldBreak = event.type === 'shield-break' && state.events.some((candidate) =>
         candidate.type === 'hit'
         && candidate.actorId === event.actorId
@@ -4842,17 +4931,17 @@ export class ArenaRenderer {
       const speed = Math.hypot(localPlayer.velocity.x, localPlayer.velocity.z);
       const bobAmount = localRig.moveBlend * localRig.groundBlend;
       const bobPhase = localRig.locomotionPhase;
-      const viewLocomotion = {
-        moveBlend: localRig.moveBlend,
-        runBlend: smootherstep01((speed - 2.35) / 3.05),
-        forwardBlend: localRig.forwardBlend,
-        strafeBlend: localRig.strafeBlend,
-      };
+      const viewLocomotion = this.scratchLocomotion;
+      viewLocomotion.moveBlend = localRig.moveBlend;
+      viewLocomotion.runBlend = smootherstep01((speed - 2.35) / 3.05);
+      viewLocomotion.forwardBlend = localRig.forwardBlend;
+      viewLocomotion.strafeBlend = localRig.strafeBlend;
       const weaponBob = evaluateWeaponBob(
         bobPhase,
         viewLocomotion,
         localRig.groundBlend,
         modelAimBlend,
+        this.scratchWeaponBob,
       );
       const landingWeight = trianglePulse(
         normalizedTimer(localRig.landingTimer, 0.34),
@@ -4920,7 +5009,7 @@ export class ArenaRenderer {
       this.previousViewPitch = localPlayer.pitch;
 
       let actionKind: 'none' | 'reload' | 'swap' | 'melee' | 'grenade' = 'none';
-      let actionPose: ActionPoseWeights = { lower: 0, twist: 0, part: 0, hand: 0 };
+      let actionPose: ActionPoseWeights = NEUTRAL_ACTION_POSE;
       let reloadProgress = 0;
       if (activeWeapon && activeWeapon.reloadTimer > 0) {
         reloadProgress = normalizedTimer(activeWeapon.reloadTimer, WEAPONS[activeWeapon.id].reloadSeconds);
@@ -4991,10 +5080,16 @@ export class ArenaRenderer {
       this.viewRightHandAssembly.rotation.set(0, 0, 0);
       this.viewLeftHandAssembly.rotation.set(0, 0, 0);
       if (actionKind === 'reload') {
-        this.viewLeftHandAssembly.position.add(new THREE.Vector3(-0.09, -0.18, 0.11).multiplyScalar(actionPose.hand));
+        this.viewLeftHandAssembly.position.addScaledVector(
+          this.scratchVectorA.set(-0.09, -0.18, 0.11),
+          actionPose.hand,
+        );
         this.viewLeftHandAssembly.rotation.set(0.22 * actionPose.hand, -0.18 * actionPose.hand, -0.46 * actionPose.hand);
       } else if (actionKind === 'grenade') {
-        this.viewLeftHandAssembly.position.add(new THREE.Vector3(-0.34, 0.2, -0.16).multiplyScalar(actionPose.hand));
+        this.viewLeftHandAssembly.position.addScaledVector(
+          this.scratchVectorA.set(-0.34, 0.2, -0.16),
+          actionPose.hand,
+        );
         this.viewLeftHandAssembly.rotation.set(-0.72 * actionPose.hand, 0.24 * actionPose.hand, -0.5 * actionPose.hand);
       } else if (actionKind === 'swap') {
         this.viewLeftHandAssembly.position.y -= actionPose.hand * 0.07;
@@ -5021,9 +5116,11 @@ export class ArenaRenderer {
     this.previousViewYaw = null;
     this.previousViewPitch = null;
     if (localPlayer && localRig) {
-      const target = localRig.root.position.clone().add(new THREE.Vector3(0, localPlayer.height * 0.7, 0));
-      const forward = FORWARD.clone().applyAxisAngle(UP, localPlayer.yaw);
-      const desired = target.clone().addScaledVector(forward, -6.6).add(new THREE.Vector3(0, 2.65, 0));
+      const target = this.scratchVectorA.copy(localRig.root.position);
+      target.y += localPlayer.height * 0.7;
+      const forward = this.scratchVectorB.copy(FORWARD).applyAxisAngle(UP, localPlayer.yaw);
+      const desired = this.scratchVectorC.copy(target).addScaledVector(forward, -6.6);
+      desired.y += 2.65;
       const damping = 1 - Math.exp(-delta * 7.5);
       this.camera.position.lerp(desired, damping);
       this.camera.up.set(0, 1, 0);
@@ -5031,7 +5128,7 @@ export class ArenaRenderer {
       return;
     }
 
-    const center = new THREE.Vector3(
+    const center = this.scratchVectorA.set(
       (this.map.bounds.minX + this.map.bounds.maxX) * 0.5,
       this.map.bounds.floorY + 4.3,
       (this.map.bounds.minZ + this.map.bounds.maxZ) * 0.5,
@@ -5042,7 +5139,7 @@ export class ArenaRenderer {
     );
     const radius = mapSpan * 0.68;
     const angle = this.elapsedRenderTime * 0.045 + 0.7;
-    const desired = new THREE.Vector3(
+    const desired = this.scratchVectorB.set(
       center.x + Math.cos(angle) * radius,
       Math.max(24, mapSpan * 0.28),
       center.z + Math.sin(angle) * radius,

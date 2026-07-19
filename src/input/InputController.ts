@@ -1,5 +1,5 @@
 import { clamp, emptyInput, wrapAngle } from '../game/math';
-import type { PlayerInput } from '../game/types';
+import { PLAYER_PITCH_LIMIT, type PlayerInput } from '../game/types';
 
 type ButtonKey = 'fire' | 'aim' | 'jump' | 'reload' | 'swap' | 'melee' | 'grenade';
 
@@ -47,7 +47,7 @@ export class InputController {
 
   public setAngles(yaw: number, pitch: number): void {
     this.yaw = wrapAngle(yaw);
-    this.pitch = clamp(pitch, -1.48, 1.48);
+    this.pitch = clamp(pitch, -PLAYER_PITCH_LIMIT, PLAYER_PITCH_LIMIT);
   }
 
   public setEnabled(enabled: boolean): void {
@@ -86,8 +86,8 @@ export class InputController {
       this.pitch = clamp(
         this.pitch
         - deadzone(gamepad.axes[3] ?? 0) * 0.035 * this.lookSensitivityScale * lookStepScale,
-        -1.48,
-        1.48,
+        -PLAYER_PITCH_LIMIT,
+        PLAYER_PITCH_LIMIT,
       );
       fire ||= (gamepad.buttons[7]?.value ?? 0) > 0.4;
       aim ||= (gamepad.buttons[6]?.value ?? 0) > 0.4;
@@ -155,7 +155,11 @@ export class InputController {
   private handleMouseMove = (event: MouseEvent): void => {
     if (!this.enabled || document.pointerLockElement !== this.element) return;
     this.yaw = wrapAngle(this.yaw - event.movementX * this.sensitivity * this.lookSensitivityScale);
-    this.pitch = clamp(this.pitch - event.movementY * this.sensitivity * this.lookSensitivityScale, -1.48, 1.48);
+    this.pitch = clamp(
+      this.pitch - event.movementY * this.sensitivity * this.lookSensitivityScale,
+      -PLAYER_PITCH_LIMIT,
+      PLAYER_PITCH_LIMIT,
+    );
   };
 
   private handleWheel = (event: WheelEvent): void => {

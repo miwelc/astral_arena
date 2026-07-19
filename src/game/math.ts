@@ -11,7 +11,12 @@ export const scale = (value: Vec3, scalar: number): Vec3 => ({ x: value.x * scal
 export const dot = (a: Vec3, b: Vec3): number => a.x * b.x + a.y * b.y + a.z * b.z;
 export const lengthSquared = (value: Vec3): number => dot(value, value);
 export const length = (value: Vec3): number => Math.sqrt(lengthSquared(value));
-export const distanceSquared = (a: Vec3, b: Vec3): number => lengthSquared(subtract(a, b));
+export const distanceSquared = (a: Vec3, b: Vec3): number => {
+  const x = a.x - b.x;
+  const y = a.y - b.y;
+  const z = a.z - b.z;
+  return x * x + y * y + z * z;
+};
 export const distance = (a: Vec3, b: Vec3): number => Math.sqrt(distanceSquared(a, b));
 export const normalize = (value: Vec3): Vec3 => {
   const magnitude = length(value);

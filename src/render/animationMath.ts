@@ -112,7 +112,7 @@ export const smootherstep01 = (value: number): number => {
  * returns to zero at `end`. Invalid or collapsed intervals are neutral.
  */
 export const trianglePulse = (progress: number, start: number, peak: number, end: number): number => {
-  if (![start, peak, end].every(Number.isFinite) || !(start < peak && peak < end)) return 0;
+  if (!Number.isFinite(start) || !Number.isFinite(peak) || !Number.isFinite(end) || !(start < peak && peak < end)) return 0;
   const value = saturate(progress);
   if (value <= start || value >= end) return 0;
   if (value === peak) return 1;
@@ -129,7 +129,10 @@ export const smoothWindow = (
   exitEnd: number,
 ): number => {
   if (
-    ![enterStart, enterEnd, exitStart, exitEnd].every(Number.isFinite)
+    !Number.isFinite(enterStart)
+    || !Number.isFinite(enterEnd)
+    || !Number.isFinite(exitStart)
+    || !Number.isFinite(exitEnd)
     || !(enterStart < enterEnd && enterEnd <= exitStart && exitStart < exitEnd)
   ) return 0;
   const value = saturate(progress);
@@ -160,6 +163,7 @@ export const evaluateLocomotionCycle = (
   forwardSpeed: number,
   strafeSpeed: number,
   delta: number,
+  out?: LocomotionCycle,
 ): LocomotionCycle => {
   const speed = Number.isFinite(horizontalSpeed) ? Math.max(0, horizontalSpeed) : 0;
   const safeDelta = Number.isFinite(delta) ? Math.max(0, delta) : 0;
@@ -178,15 +182,23 @@ export const evaluateLocomotionCycle = (
   // the phase direction to flicker as the dominant input axis changes.
   const phaseDirection = safeForward < -Math.abs(safeStrafe) * 0.45 ? -1 : 1;
 
-  return {
-    moveBlend,
-    runBlend,
-    forwardBlend,
-    strafeBlend,
-    strideLength,
-    cyclesPerSecond,
-    phaseDelta: cyclesPerSecond * safeDelta * TAU * phaseDirection,
+  const result = out ?? {
+    moveBlend: 0,
+    runBlend: 0,
+    forwardBlend: 0,
+    strafeBlend: 0,
+    strideLength: 0,
+    cyclesPerSecond: 0,
+    phaseDelta: 0,
   };
+  result.moveBlend = moveBlend;
+  result.runBlend = runBlend;
+  result.forwardBlend = forwardBlend;
+  result.strafeBlend = strafeBlend;
+  result.strideLength = strideLength;
+  result.cyclesPerSecond = cyclesPerSecond;
+  result.phaseDelta = cyclesPerSecond * safeDelta * TAU * phaseDirection;
+  return result;
 };
 
 /** Keeps a continuously accumulated locomotion phase numerically well behaved. */
@@ -205,6 +217,7 @@ export const advanceLocomotionPhase = (phase: number, phaseDelta: number): numbe
 export const evaluateDirectionalGait = (
   phase: number,
   locomotion: Pick<LocomotionCycle, 'moveBlend' | 'runBlend' | 'forwardBlend' | 'strafeBlend'>,
+  out?: DirectionalGaitPose,
 ): DirectionalGaitPose => {
   const safePhase = Number.isFinite(phase) ? phase : 0;
   const move = saturate(locomotion.moveBlend);
@@ -240,19 +253,31 @@ export const evaluateDirectionalGait = (
   const rightKnee = Math.max(0, cycle) * recovery * forwardWeight
     + Math.max(0, -cycle * strafeSign) * lateralCompression;
 
-  return {
-    leftHipPitch,
-    rightHipPitch,
-    leftHipRoll,
-    rightHipRoll,
-    leftKnee,
-    rightKnee,
-    leftFootPitch: -leftHipPitch + leftKnee * 0.76,
-    rightFootPitch: -rightHipPitch + rightKnee * 0.76,
-    pelvisRoll: -strafe * (0.045 + run * 0.025) * move + Math.cos(safePhase) * 0.012 * move,
-    torsoPitch: -forward * (0.038 + run * 0.035) * move,
-    torsoRoll: -strafe * (0.065 + run * 0.035) * move,
+  const result = out ?? {
+    leftHipPitch: 0,
+    rightHipPitch: 0,
+    leftHipRoll: 0,
+    rightHipRoll: 0,
+    leftKnee: 0,
+    rightKnee: 0,
+    leftFootPitch: 0,
+    rightFootPitch: 0,
+    pelvisRoll: 0,
+    torsoPitch: 0,
+    torsoRoll: 0,
   };
+  result.leftHipPitch = leftHipPitch;
+  result.rightHipPitch = rightHipPitch;
+  result.leftHipRoll = leftHipRoll;
+  result.rightHipRoll = rightHipRoll;
+  result.leftKnee = leftKnee;
+  result.rightKnee = rightKnee;
+  result.leftFootPitch = -leftHipPitch + leftKnee * 0.76;
+  result.rightFootPitch = -rightHipPitch + rightKnee * 0.76;
+  result.pelvisRoll = -strafe * (0.045 + run * 0.025) * move + Math.cos(safePhase) * 0.012 * move;
+  result.torsoPitch = -forward * (0.038 + run * 0.035) * move;
+  result.torsoRoll = -strafe * (0.065 + run * 0.035) * move;
+  return result;
 };
 
 /**
@@ -264,6 +289,7 @@ export const evaluateWeaponBob = (
   locomotion: Pick<LocomotionCycle, 'moveBlend' | 'runBlend' | 'forwardBlend' | 'strafeBlend'>,
   groundBlend: number,
   aimBlend: number,
+  out?: WeaponBobPose,
 ): WeaponBobPose => {
   const safePhase = Number.isFinite(phase) ? phase : 0;
   const move = saturate(locomotion.moveBlend) * saturate(groundBlend);
@@ -276,12 +302,12 @@ export const evaluateWeaponBob = (
   const horizontal = Math.sin(safePhase);
   const vertical = 0.5 - 0.5 * Math.cos(safePhase * 2);
 
-  return {
-    x: horizontal * xAmplitude * move * steadying,
-    y: vertical * yAmplitude * move * steadying,
-    pitch: vertical * (0.004 + run * 0.004) * move * steadying,
-    roll: -horizontal * (0.005 + strafe * 0.004) * move * steadying,
-  };
+  const result = out ?? { x: 0, y: 0, pitch: 0, roll: 0 };
+  result.x = horizontal * xAmplitude * move * steadying;
+  result.y = vertical * yAmplitude * move * steadying;
+  result.pitch = vertical * (0.004 + run * 0.004) * move * steadying;
+  result.roll = -horizontal * (0.005 + strafe * 0.004) * move * steadying;
+  return result;
 };
 
 /** Magazine/energy-cell manipulation with a long support-hand release. */

@@ -191,15 +191,19 @@ export class GameAudio {
   }
 
   public consume(events: GameEvent[], localPlayerId: string | null): void {
+    const newestEventId = events.at(-1)?.id ?? 0;
+    if (newestEventId <= this.seenEvent) return;
     if (!this.context || !this.master) {
       // The match keeps running before the browser grants WebAudio permission.
       // Discard that silent history so the first interaction cannot unleash a
       // compressed backlog of several seconds of shots and impacts.
-      for (const event of events) this.seenEvent = Math.max(this.seenEvent, event.id);
+      this.seenEvent = newestEventId;
       return;
     }
-    for (const event of events) {
-      if (event.id <= this.seenEvent) continue;
+    let firstUnseen = events.length - 1;
+    while (firstUnseen > 0 && events[firstUnseen - 1]!.id > this.seenEvent) firstUnseen -= 1;
+    for (let index = firstUnseen; index < events.length; index += 1) {
+      const event = events[index]!;
       this.seenEvent = Math.max(this.seenEvent, event.id);
       const actorLocal = event.actorId === localPlayerId;
       const targetLocal = event.targetId === localPlayerId;

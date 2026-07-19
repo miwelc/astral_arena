@@ -1,5 +1,7 @@
 import { canonicalFormatForMode, rulesForMode } from '../game/modeRules';
-import type { GameMode, MatchState } from '../game/types';
+import { CROUCHED_PLAYER_HEIGHT, STANDING_PLAYER_HEIGHT } from '../game/playerMovement';
+import { PLAYER_PITCH_LIMIT, type GameMode, type MatchState } from '../game/types';
+import { isValidPlayerInput } from './playerInputProtocol';
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -72,17 +74,6 @@ const isVec3 = (value: unknown): boolean => {
   return [value.x, value.y, value.z].every(
     (coordinate) => isFiniteNumber(coordinate) && Math.abs(coordinate) <= MAX_WORLD_COORDINATE,
   );
-};
-
-const isPlayerInput = (value: unknown): boolean => {
-  if (!isRecord(value)) return false;
-  return isSafeNonNegativeInteger(value.sequence)
-    && isFiniteNumber(value.moveX) && Math.abs(value.moveX) <= 1
-    && isFiniteNumber(value.moveZ) && Math.abs(value.moveZ) <= 1
-    && isFiniteNumber(value.yaw) && Math.abs(value.yaw) <= Math.PI + 0.001
-    && isFiniteNumber(value.pitch) && Math.abs(value.pitch) <= 1.481
-    && [value.fire, value.aim, value.jump, value.reload, value.swap, value.melee, value.grenade, value.crouch, value.use]
-      .every((button) => typeof button === 'boolean');
 };
 
 const isPlayerMovementMemory = (value: unknown): boolean => {
@@ -187,14 +178,17 @@ const isPlayerState = (value: unknown, recordId: string): boolean => {
     value.equipTimer,
   ];
   if (!finiteFields.every(isFiniteNumber) || !nonNegativeFields.every(isNonNegativeNumber)) return false;
-  if (Math.abs(value.yaw as number) > Math.PI + 0.001 || Math.abs(value.pitch as number) > 1.481) return false;
+  if (
+    Math.abs(value.yaw as number) > Math.PI + 0.001
+    || Math.abs(value.pitch as number) > PLAYER_PITCH_LIMIT + 0.001
+  ) return false;
   if ((value.radius as number) <= 0 || (value.height as number) <= 0) return false;
   if (typeof value.grounded !== 'boolean'
     || typeof value.crouched !== 'boolean'
     || typeof value.alive !== 'boolean'
     || typeof value.isJuggernaut !== 'boolean'
     || typeof value.aimSuppressed !== 'boolean') return false;
-  const expectedHeight = value.crouched ? 1.22 : 1.8;
+  const expectedHeight = value.crouched ? CROUCHED_PLAYER_HEIGHT : STANDING_PLAYER_HEIGHT;
   if (Math.abs((value.height as number) - expectedHeight) > 0.001) return false;
 
   if (!Array.isArray(value.inventory) || value.inventory.length === 0 || value.inventory.length > 2) return false;
@@ -208,12 +202,13 @@ const isPlayerState = (value: unknown, recordId: string): boolean => {
   const integerFields = [value.grenades, value.lastProcessedInput, value.kills, value.deaths, value.assists, value.score, value.streak];
   if (
     !integerFields.every(isSafeNonNegativeInteger)
-    || !isPlayerInput(value.input)
+    || !isValidPlayerInput(value.input)
     || !isPlayerMovementMemory(value.movementMemory)
   ) return false;
   if (!(value.carryingFlagTeam === null || isEnumValue(TEAMS, value.carryingFlagTeam))) return false;
-  if (value.bot !== undefined && !isBotMemory(value.bot)) return false;
-  return value.kind !== 'bot' || isBotMemory(value.bot);
+  // BotMemory is host-authority state and is intentionally omitted from the
+  // guest snapshot DTO. If present it must still be fully valid.
+  return value.bot === undefined || isBotMemory(value.bot);
 };
 
 const isMatchConfig = (value: unknown): boolean => {

@@ -1,4 +1,4 @@
-import { add, clamp, dot, EPSILON, lengthSquared, scale, subtract } from './math';
+import { clamp, EPSILON } from './math';
 import type { AabbObstacle, MapDefinition, PlayerState, RayHit, Vec3 } from './types';
 
 const insideHorizontal = (position: Vec3, obstacle: AabbObstacle, margin = 0): boolean =>
@@ -117,23 +117,18 @@ const autoStepHeight = (
   };
   if (Math.hypot(target.x - position.x, target.z - position.z) < EPSILON) return null;
 
-  const candidates = map.obstacles
-    .filter((obstacle) => {
-      if (obstacle.kind !== 'platform') return false;
-      const step = obstacle.max.y - position.y;
-      if (step <= 0.02 || step > MAX_AUTO_STEP_HEIGHT + CONTACT_EPSILON) return false;
-      if (!overlapsVertical(position.y, player.height, obstacle)) return false;
-      if (!insideHorizontal(target, obstacle, player.radius)) return false;
-      return segmentIntersectsExpandedFootprint(position, target, obstacle, player.radius);
-    })
-    .sort((left, right) => right.max.y - left.max.y);
-
-  for (const candidate of candidates) {
-    if (hasAutoStepHeadroom(position, target, candidate.max.y, player, map, candidate.id)) {
-      return { height: candidate.max.y, supportId: candidate.id };
-    }
+  let best: AabbObstacle | null = null;
+  for (const obstacle of map.obstacles) {
+    if (obstacle.kind !== 'platform') continue;
+    const step = obstacle.max.y - position.y;
+    if (step <= 0.02 || step > MAX_AUTO_STEP_HEIGHT + CONTACT_EPSILON) continue;
+    if (!overlapsVertical(position.y, player.height, obstacle)) continue;
+    if (!insideHorizontal(target, obstacle, player.radius)) continue;
+    if (!segmentIntersectsExpandedFootprint(position, target, obstacle, player.radius)) continue;
+    if (!hasAutoStepHeadroom(position, target, obstacle.max.y, player, map, obstacle.id)) continue;
+    if (!best || obstacle.max.y > best.max.y) best = obstacle;
   }
-  return null;
+  return best ? { height: best.max.y, supportId: best.id } : null;
 };
 
 /**
@@ -263,10 +258,19 @@ export const moveCapsule = (
   return { position, velocity, grounded, hitWall };
 };
 
-const raySphere = (origin: Vec3, direction: Vec3, center: Vec3, radius: number): number | null => {
-  const offset = subtract(origin, center);
-  const b = dot(offset, direction);
-  const c = lengthSquared(offset) - radius * radius;
+const raySphereAt = (
+  origin: Vec3,
+  direction: Vec3,
+  centerX: number,
+  centerY: number,
+  centerZ: number,
+  radius: number,
+): number | null => {
+  const offsetX = origin.x - centerX;
+  const offsetY = origin.y - centerY;
+  const offsetZ = origin.z - centerZ;
+  const b = offsetX * direction.x + offsetY * direction.y + offsetZ * direction.z;
+  const c = offsetX * offsetX + offsetY * offsetY + offsetZ * offsetZ - radius * radius;
   const discriminant = b * b - c;
   if (discriminant < 0) return null;
   const root = Math.sqrt(discriminant);
@@ -276,26 +280,25 @@ const raySphere = (origin: Vec3, direction: Vec3, center: Vec3, radius: number):
   return far >= 0 ? far : null;
 };
 
-const rayEllipsoid = (
+const rayEllipsoidAt = (
   origin: Vec3,
   direction: Vec3,
-  center: Vec3,
-  radii: Vec3,
+  centerX: number,
+  centerY: number,
+  centerZ: number,
+  radiusX: number,
+  radiusY: number,
+  radiusZ: number,
 ): number | null => {
-  const offset = subtract(origin, center);
-  const normalizedOffset = {
-    x: offset.x / radii.x,
-    y: offset.y / radii.y,
-    z: offset.z / radii.z,
-  };
-  const normalizedDirection = {
-    x: direction.x / radii.x,
-    y: direction.y / radii.y,
-    z: direction.z / radii.z,
-  };
-  const a = lengthSquared(normalizedDirection);
-  const b = dot(normalizedOffset, normalizedDirection);
-  const c = lengthSquared(normalizedOffset) - 1;
+  const offsetX = (origin.x - centerX) / radiusX;
+  const offsetY = (origin.y - centerY) / radiusY;
+  const offsetZ = (origin.z - centerZ) / radiusZ;
+  const directionX = direction.x / radiusX;
+  const directionY = direction.y / radiusY;
+  const directionZ = direction.z / radiusZ;
+  const a = directionX * directionX + directionY * directionY + directionZ * directionZ;
+  const b = offsetX * directionX + offsetY * directionY + offsetZ * directionZ;
+  const c = offsetX * offsetX + offsetY * offsetY + offsetZ * offsetZ - 1;
   const discriminant = b * b - a * c;
   if (discriminant < 0 || a < EPSILON) return null;
   const root = Math.sqrt(discriminant);
@@ -305,20 +308,48 @@ const rayEllipsoid = (
   return far >= 0 ? far : null;
 };
 
-const rayAabb = (origin: Vec3, direction: Vec3, obstacle: AabbObstacle): number | null => {
+const rayAabbComponents = (
+  originX: number,
+  originY: number,
+  originZ: number,
+  directionX: number,
+  directionY: number,
+  directionZ: number,
+  obstacle: AabbObstacle,
+): number | null => {
   let near = -Infinity;
   let far = Infinity;
-  for (const axis of ['x', 'y', 'z'] as const) {
-    if (Math.abs(direction[axis]) < EPSILON) {
-      if (origin[axis] < obstacle.min[axis] || origin[axis] > obstacle.max[axis]) return null;
-      continue;
-    }
-    const first = (obstacle.min[axis] - origin[axis]) / direction[axis];
-    const second = (obstacle.max[axis] - origin[axis]) / direction[axis];
+
+  if (Math.abs(directionX) < EPSILON) {
+    if (originX < obstacle.min.x || originX > obstacle.max.x) return null;
+  } else {
+    const first = (obstacle.min.x - originX) / directionX;
+    const second = (obstacle.max.x - originX) / directionX;
     near = Math.max(near, Math.min(first, second));
     far = Math.min(far, Math.max(first, second));
     if (near > far) return null;
   }
+
+  if (Math.abs(directionY) < EPSILON) {
+    if (originY < obstacle.min.y || originY > obstacle.max.y) return null;
+  } else {
+    const first = (obstacle.min.y - originY) / directionY;
+    const second = (obstacle.max.y - originY) / directionY;
+    near = Math.max(near, Math.min(first, second));
+    far = Math.min(far, Math.max(first, second));
+    if (near > far) return null;
+  }
+
+  if (Math.abs(directionZ) < EPSILON) {
+    if (originZ < obstacle.min.z || originZ > obstacle.max.z) return null;
+  } else {
+    const first = (obstacle.min.z - originZ) / directionZ;
+    const second = (obstacle.max.z - originZ) / directionZ;
+    near = Math.max(near, Math.min(first, second));
+    far = Math.min(far, Math.max(first, second));
+    if (near > far) return null;
+  }
+
   if (far < 0) return null;
   return Math.max(0, near);
 };
@@ -332,14 +363,34 @@ export const raycastWorld = (
   ignoredPlayerId?: string,
 ): RayHit | null => {
   let result: RayHit | null = null;
-  const consider = (hit: RayHit): void => {
-    if (hit.distance > maxDistance) return;
-    if (!result || hit.distance < result.distance) result = hit;
-  };
+  let nearestObstacleDistance = Number.POSITIVE_INFINITY;
+  let nearestObstacleId: string | undefined;
 
   for (const obstacle of map.obstacles) {
-    const distance = rayAabb(origin, direction, obstacle);
-    if (distance !== null) consider({ distance, point: add(origin, scale(direction, distance)), obstacleId: obstacle.id });
+    const distance = rayAabbComponents(
+      origin.x,
+      origin.y,
+      origin.z,
+      direction.x,
+      direction.y,
+      direction.z,
+      obstacle,
+    );
+    if (distance !== null && distance <= maxDistance && distance < nearestObstacleDistance) {
+      nearestObstacleDistance = distance;
+      nearestObstacleId = obstacle.id;
+    }
+  }
+  if (nearestObstacleId !== undefined) {
+    result = {
+      distance: nearestObstacleDistance,
+      point: {
+        x: origin.x + direction.x * nearestObstacleDistance,
+        y: origin.y + direction.y * nearestObstacleDistance,
+        z: origin.z + direction.z * nearestObstacleDistance,
+      },
+      obstacleId: nearestObstacleId,
+    };
   }
 
   for (const player of players) {
@@ -349,70 +400,80 @@ export const raycastWorld = (
     // overlapping body spheres cover legs/pelvis and torso without inflating
     // the player's world collision radius, while the helmet remains a distinct
     // (and deliberately smaller) precision zone.
-    const pelvisCenter = { x: player.position.x, y: player.position.y + player.height * 0.3, z: player.position.z };
-    const torsoCenter = { x: player.position.x, y: player.position.y + player.height * 0.58, z: player.position.z };
-    const headCenter = {
-      x: player.position.x,
-      y: player.position.y + player.height * COMBAT_HITBOX_TUNING.headCenterHeightScale,
-      z: player.position.z,
-    };
-    const pelvisDistance = raySphere(
+    const pelvisDistance = raySphereAt(
       origin,
       direction,
-      pelvisCenter,
+      player.position.x,
+      player.position.y + player.height * 0.3,
+      player.position.z,
       player.radius + COMBAT_HITBOX_TUNING.pelvisRadiusPadding,
     );
-    const torsoDistance = raySphere(
+    const torsoDistance = raySphereAt(
       origin,
       direction,
-      torsoCenter,
+      player.position.x,
+      player.position.y + player.height * 0.58,
+      player.position.z,
       player.radius + COMBAT_HITBOX_TUNING.torsoRadiusPadding,
     );
-    const bodyDistances = [pelvisDistance, torsoDistance].filter((value): value is number => value !== null);
-    const bodyDistance = bodyDistances.length > 0 ? Math.min(...bodyDistances) : null;
+    const bodyDistance = pelvisDistance === null
+      ? torsoDistance
+      : torsoDistance === null
+        ? pelvisDistance
+        : Math.min(pelvisDistance, torsoDistance);
     const headHorizontalRadius = player.radius * COMBAT_HITBOX_TUNING.headRadiusScale;
-    const headDistance = rayEllipsoid(
+    const headDistance = rayEllipsoidAt(
       origin,
       direction,
-      headCenter,
-      {
-        x: headHorizontalRadius,
-        y: player.height * COMBAT_HITBOX_TUNING.headHalfHeightScale,
-        z: headHorizontalRadius,
-      },
+      player.position.x,
+      player.position.y + player.height * COMBAT_HITBOX_TUNING.headCenterHeightScale,
+      player.position.z,
+      headHorizontalRadius,
+      player.height * COMBAT_HITBOX_TUNING.headHalfHeightScale,
+      headHorizontalRadius,
     );
     // Armour volumes overlap around the neck and shoulder plates. Classify the
     // first surface actually struck: a ray cannot enter the torso and later be
     // upgraded to a precision hit merely because it also crosses the helmet.
     const headWasHitFirst = headDistance !== null
       && (bodyDistance === null || headDistance + CONTACT_EPSILON < bodyDistance);
-    if (headWasHitFirst) {
-      consider({
-        distance: headDistance,
-        point: add(origin, scale(direction, headDistance)),
-        playerId: player.id,
-        headshot: true,
-      });
-    } else if (bodyDistance !== null) {
-      consider({
-        distance: bodyDistance,
-        point: add(origin, scale(direction, bodyDistance)),
-        playerId: player.id,
-        headshot: false,
-      });
-    }
+    const hitDistance = headWasHitFirst ? headDistance : bodyDistance;
+    if (hitDistance === null || hitDistance > maxDistance || (result && hitDistance >= result.distance)) continue;
+    result = {
+      distance: hitDistance,
+      point: {
+        x: origin.x + direction.x * hitDistance,
+        y: origin.y + direction.y * hitDistance,
+        z: origin.z + direction.z * hitDistance,
+      },
+      playerId: player.id,
+      headshot: headWasHitFirst,
+    };
   }
   return result;
 };
 
 export const hasLineOfSight = (from: Vec3, to: Vec3, map: MapDefinition): boolean => {
-  const delta = subtract(to, from);
-  const distanceSquaredValue = lengthSquared(delta);
+  const deltaX = to.x - from.x;
+  const deltaY = to.y - from.y;
+  const deltaZ = to.z - from.z;
+  const distanceSquaredValue = deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ;
   if (distanceSquaredValue < EPSILON) return true;
   const distance = Math.sqrt(distanceSquaredValue);
-  const direction = scale(delta, 1 / distance);
+  const inverseDistance = 1 / distance;
+  const directionX = deltaX * inverseDistance;
+  const directionY = deltaY * inverseDistance;
+  const directionZ = deltaZ * inverseDistance;
   for (const obstacle of map.obstacles) {
-    const hit = rayAabb(from, direction, obstacle);
+    const hit = rayAabbComponents(
+      from.x,
+      from.y,
+      from.z,
+      directionX,
+      directionY,
+      directionZ,
+      obstacle,
+    );
     if (hit !== null && hit < distance - 0.08) return false;
   }
   return true;

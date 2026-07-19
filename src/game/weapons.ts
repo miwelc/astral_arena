@@ -176,5 +176,3 @@ export const createWeaponState = (id: WeaponId): WeaponState => {
 
 export const DEFAULT_LOADOUT: readonly WeaponId[] = ['pulse-rifle', 'sidearm'];
 export const TOWER_LOADOUT: readonly WeaponId[] = ['shotgun', 'sidearm'];
-
-export const weaponLabel = (id: WeaponId): string => WEAPONS[id].label;

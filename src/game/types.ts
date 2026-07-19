@@ -5,7 +5,8 @@ export type Team = 'aurora' | 'nova' | 'neutral';
 export type PlayerKind = 'human' | 'bot' | 'remote';
 export type WeaponId = 'pulse-rifle' | 'sidearm' | 'battle-rifle' | 'sniper' | 'shotgun' | 'rocket-launcher';
 export type PickupKind = 'weapon' | 'overshield' | 'ammo' | 'grenade';
-export const GAME_PROTOCOL_VERSION = 4 as const;
+export const GAME_PROTOCOL_VERSION = 5 as const;
+export const PLAYER_PITCH_LIMIT = 1.48;
 
 export interface Vec3 {
   x: number;
@@ -375,19 +376,16 @@ export interface RayHit {
 
 export interface SerializedSnapshot {
   kind: 'snapshot';
-  serverTime: number;
-  acknowledgedInputs: Record<string, number>;
   state: MatchState;
 }
 
 export type ClientMessage =
   | { kind: 'hello'; name: string; protocol: typeof GAME_PROTOCOL_VERSION }
-  | { kind: 'input'; playerId: string; input: PlayerInput }
-  | { kind: 'ready'; playerId: string }
+  | { kind: 'input'; input: PlayerInput }
   | { kind: 'ping'; sentAt: number };
 
 export type HostMessage =
   | SerializedSnapshot
-  | { kind: 'welcome'; playerId: string; config: MatchConfig; protocol: typeof GAME_PROTOCOL_VERSION }
-  | { kind: 'pong'; sentAt: number; serverAt: number }
+  | { kind: 'welcome'; playerId: string; protocol: typeof GAME_PROTOCOL_VERSION }
+  | { kind: 'pong'; sentAt: number }
   | { kind: 'error'; message: string };

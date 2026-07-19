@@ -1,14 +1,6 @@
 import { canOccupyCapsule, moveCapsule } from './collision';
 import { isJumpPad } from './map';
-import {
-  add,
-  clamp,
-  dot,
-  normalize,
-  scale,
-  subtract,
-  vec3,
-} from './math';
+import { add, clamp, dot, scale, subtract, vec3 } from './math';
 import type {
   MapDefinition,
   MatchState,
@@ -62,16 +54,25 @@ export const advancePlayerMovement = (
 ): void => {
   updateCrouchStance(player, input, context.map);
 
-  const forward = { x: -Math.sin(player.yaw), y: 0, z: -Math.cos(player.yaw) };
-  const right = { x: Math.cos(player.yaw), y: 0, z: -Math.sin(player.yaw) };
-  let wish = add(scale(right, input.moveX), scale(forward, input.moveZ));
-  if (dot(wish, wish) > 1) wish = normalize(wish);
+  const sinYaw = Math.sin(player.yaw);
+  const cosYaw = Math.cos(player.yaw);
+  let wishX = cosYaw * input.moveX - sinYaw * input.moveZ;
+  let wishZ = -sinYaw * input.moveX - cosYaw * input.moveZ;
+  let wishLengthSquared = wishX * wishX + wishZ * wishZ;
+  if (wishLengthSquared > 1) {
+    const inverseWishLength = 1 / Math.sqrt(wishLengthSquared);
+    wishX *= inverseWishLength;
+    wishZ *= inverseWishLength;
+    wishLengthSquared = 1;
+  }
 
   const speedModifier = (player.isJuggernaut ? 0.95 : 1)
     * (player.carryingFlagTeam ? 0.95 : 1)
     * (player.crouched ? PLAYER_MOVEMENT_TUNING.crouchSpeedScale : 1);
-  const hasMovementInput = dot(wish, wish) >= 0.01;
-  const desired = scale(wish, PLAYER_MOVEMENT_TUNING.moveSpeed * speedModifier);
+  const hasMovementInput = wishLengthSquared >= 0.01;
+  const desiredSpeed = PLAYER_MOVEMENT_TUNING.moveSpeed * speedModifier;
+  const desiredX = wishX * desiredSpeed;
+  const desiredZ = wishZ * desiredSpeed;
 
   if (player.grounded || hasMovementInput) {
     const acceleration = player.grounded
@@ -79,20 +80,17 @@ export const advancePlayerMovement = (
           ? PLAYER_MOVEMENT_TUNING.groundAcceleration
           : PLAYER_MOVEMENT_TUNING.groundDeceleration)
       : PLAYER_MOVEMENT_TUNING.airAcceleration;
-    const change = {
-      x: desired.x - player.velocity.x,
-      y: 0,
-      z: desired.z - player.velocity.z,
-    };
-    const changeLength = Math.hypot(change.x, change.z);
+    const changeX = desiredX - player.velocity.x;
+    const changeZ = desiredZ - player.velocity.z;
+    const changeLength = Math.hypot(changeX, changeZ);
     const maxChange = acceleration * dt;
     if (changeLength <= maxChange || changeLength < 0.0001) {
-      player.velocity.x = desired.x;
-      player.velocity.z = desired.z;
+      player.velocity.x = desiredX;
+      player.velocity.z = desiredZ;
     } else {
       const changeScale = maxChange / changeLength;
-      player.velocity.x += change.x * changeScale;
-      player.velocity.z += change.z * changeScale;
+      player.velocity.x += changeX * changeScale;
+      player.velocity.z += changeZ * changeScale;
     }
   }
 

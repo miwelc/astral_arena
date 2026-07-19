@@ -362,10 +362,15 @@ export const presentGameEvents = (
   state: MatchState,
   localPlayerId: string,
   afterEventId = 0,
-): EventPresentation[] => events
-  .filter((event) => event.id > afterEventId)
-  .map((event) => presentGameEvent(event, state, localPlayerId))
-  .filter((presentation): presentation is EventPresentation => presentation !== null);
+): EventPresentation[] => {
+  const presentations: EventPresentation[] = [];
+  for (const event of events) {
+    if (event.id <= afterEventId) continue;
+    const presentation = presentGameEvent(event, state, localPlayerId);
+    if (presentation) presentations.push(presentation);
+  }
+  return presentations;
+};
 
 /**
  * Objective transitions should describe the newest known state. Match-ending
@@ -374,9 +379,21 @@ export const presentGameEvents = (
 export const selectAnnouncementCandidate = (
   presentations: readonly EventPresentation[],
 ): EventPresentation | null => {
-  const voiced = presentations.filter((presentation) => presentation.voice);
-  const urgent = voiced
-    .filter((presentation) => presentation.priority >= 95)
-    .sort((left, right) => right.priority - left.priority || right.eventId - left.eventId)[0];
-  return urgent ?? voiced.sort((left, right) => right.eventId - left.eventId)[0] ?? null;
+  let newest: EventPresentation | null = null;
+  let urgent: EventPresentation | null = null;
+  for (const presentation of presentations) {
+    if (!presentation.voice) continue;
+    if (!newest || presentation.eventId > newest.eventId) newest = presentation;
+    if (
+      presentation.priority >= 95
+      && (
+        !urgent
+        || presentation.priority > urgent.priority
+        || (presentation.priority === urgent.priority && presentation.eventId > urgent.eventId)
+      )
+    ) {
+      urgent = presentation;
+    }
+  }
+  return urgent ?? newest;
 };

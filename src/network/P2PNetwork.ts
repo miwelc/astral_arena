@@ -11,10 +11,11 @@
  * networks being able to establish a direct route (typically the same LAN).
  */
 
-// Version 4 adds deterministic client movement-prediction state.
+// Version 5 removes authority-only bot memory and redundant envelope fields
+// from realtime snapshots.
 // Keeping this in the signalling/message envelope makes stale cached clients
 // fail before entering a lobby they cannot deserialize correctly.
-export const P2P_PROTOCOL_VERSION = 4 as const;
+export const P2P_PROTOCOL_VERSION = 5 as const;
 export const MAX_HOST_PEERS = 7 as const;
 export const HOST_PEER_ID = 'host' as const;
 export const DEFAULT_DATA_CHANNEL_LABEL = 'astral-arena-reliable' as const;
@@ -160,7 +161,6 @@ export class P2PNetwork<TMessage = JsonValue> {
 
   private currentRole: P2PRole | null = null;
   private assignedGuestId: string | null = null;
-  private remoteSessionId: string | null = null;
   private closed = false;
 
   public constructor(options: P2PNetworkOptions = {}) {
@@ -200,6 +200,10 @@ export class P2PNetwork<TMessage = JsonValue> {
     return [...this.peers.values()]
       .filter((peer) => peer.channel?.readyState === 'open')
       .map((peer) => peer.id);
+  }
+
+  public isPeerConnected(peerId: string): boolean {
+    return this.peers.get(peerId)?.channel?.readyState === 'open';
   }
 
   public get isClosed(): boolean {
@@ -287,7 +291,6 @@ export class P2PNetwork<TMessage = JsonValue> {
     const signal = decodeSignal(offerCode, 'offer');
     this.currentRole = 'guest';
     this.assignedGuestId = signal.peerId;
-    this.remoteSessionId = signal.sessionId;
 
     const peer = this.createPeer(HOST_PEER_ID);
     this.peers.set(HOST_PEER_ID, peer);
@@ -332,7 +335,6 @@ export class P2PNetwork<TMessage = JsonValue> {
       this.disposePeer(peer, false);
       this.currentRole = null;
       this.assignedGuestId = null;
-      this.remoteSessionId = null;
       throw normalizeNegotiationError(cause, 'Could not accept the host offer.');
     }
   }
@@ -382,20 +384,40 @@ export class P2PNetwork<TMessage = JsonValue> {
 
   /** Sends one reliable message to every connected guest. */
   public broadcast(data: TMessage, options: P2PBroadcastOptions = {}): void {
+    this.broadcastLazy(() => data, options);
+  }
+
+  /**
+   * Builds and serializes a broadcast only when at least one channel can
+   * accept it. This avoids cloning/stringifying superseded snapshots while a
+   * host has no guests or every guest is backpressured.
+   */
+  public broadcastLazy(createData: () => TMessage, options: P2PBroadcastOptions = {}): void {
     this.assertUsable();
     if (this.currentRole !== 'host') {
       throw new P2PNetworkError('INVALID_STATE', 'Only a host can broadcast to guests.');
     }
 
-    const encoded = this.encodeMessage(data);
+    let encoded: string | null = null;
+    let firstError: P2PNetworkError | null = null;
     for (const peer of this.peers.values()) {
       if (
         peer.channel?.readyState === 'open' &&
         (options.maxBufferedAmount === undefined || peer.channel.bufferedAmount <= options.maxBufferedAmount)
       ) {
-        this.sendEncoded(peer, encoded);
+        encoded ??= this.encodeMessage(createData());
+        try {
+          this.sendEncoded(peer, encoded);
+        } catch (cause) {
+          const error = cause instanceof P2PNetworkError
+            ? cause
+            : new P2PNetworkError('CONNECTION_FAILED', `Could not broadcast to peer "${peer.id}".`, cause);
+          firstError ??= error;
+          this.emit('error', { peerId: peer.id, error });
+        }
       }
     }
+    if (firstError) throw firstError;
   }
 
   /** Releases offers that have not received an answer yet. Connected peers are preserved. */
@@ -573,15 +595,18 @@ export class P2PNetwork<TMessage = JsonValue> {
       );
     }
 
-    const parsed = safeParseJson(encoded);
-    if (!isRecord(parsed) || !Object.prototype.hasOwnProperty.call(parsed, 'data')) {
+    // JSON.stringify omits a nested undefined/function/symbol (and a toJSON
+    // result of undefined). The fixed envelope ordering makes this check
+    // equivalent to reparsing the complete outgoing payload, without doubling
+    // snapshot CPU and allocation cost.
+    if (!encoded.includes(',"data":')) {
       throw new P2PNetworkError(
         'SERIALIZATION_FAILED',
         'Messages cannot contain an undefined, function, or symbol root value.',
       );
     }
 
-    if (utf8ByteLength(encoded) > this.maxMessageBytes) {
+    if (exceedsUtf8ByteLimit(encoded, this.maxMessageBytes)) {
       throw new P2PNetworkError(
         'MESSAGE_TOO_LARGE',
         `The encoded message exceeds ${this.maxMessageBytes} bytes.`,
@@ -595,7 +620,7 @@ export class P2PNetwork<TMessage = JsonValue> {
     if (typeof raw !== 'string') {
       throw new P2PNetworkError('INVALID_MESSAGE', 'Only JSON protocol messages are accepted.');
     }
-    if (utf8ByteLength(raw) > this.maxMessageBytes) {
+    if (exceedsUtf8ByteLimit(raw, this.maxMessageBytes)) {
       throw new P2PNetworkError(
         'MESSAGE_TOO_LARGE',
         `The received message exceeds ${this.maxMessageBytes} bytes.`,
@@ -934,8 +959,14 @@ function safeParseJson(value: string): unknown {
   }
 }
 
-function utf8ByteLength(value: string): number {
-  return new TextEncoder().encode(value).byteLength;
+function exceedsUtf8ByteLimit(value: string, maximumBytes: number): boolean {
+  // UTF-8 uses at least one byte and at most three bytes per UTF-16 code unit
+  // (a surrogate pair is four bytes for two units). Most protocol messages are
+  // far below the cap, so exact encoding is only needed in the narrow boundary
+  // band instead of allocating a Uint8Array for every input and snapshot.
+  if (value.length > maximumBytes) return true;
+  if (value.length * 3 <= maximumBytes) return false;
+  return new TextEncoder().encode(value).byteLength > maximumBytes;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

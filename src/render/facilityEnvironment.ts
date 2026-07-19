@@ -794,7 +794,12 @@ export const createUnderstoryField = (options: UnderstoryFieldOptions): THREE.Gr
 
 const createWeatheredRockGeometry = (seed: number): THREE.BufferGeometry => {
   const random = seededRandom(seed);
-  const geometry = new THREE.IcosahedronGeometry(1, 2).toNonIndexed();
+  // IcosahedronGeometry is already non-indexed in current Three releases.
+  // Avoid a redundant conversion (and its warning) while retaining support if
+  // that implementation detail changes in a future release.
+  const source = new THREE.IcosahedronGeometry(1, 2);
+  const geometry = source.index ? source.toNonIndexed() : source;
+  if (geometry !== source) source.dispose();
   const position = geometry.getAttribute('position');
   const vertex = new THREE.Vector3();
   for (let index = 0; index < position.count; index += 1) {

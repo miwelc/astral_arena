@@ -14,6 +14,7 @@ import {
   wrapAngle,
   yawTo,
 } from './math';
+import { PLAYER_PITCH_LIMIT } from './types';
 import type {
   BotMemory,
   Difficulty,
@@ -29,6 +30,7 @@ import type {
   WeaponState,
 } from './types';
 import { TOWER_TURRET_LAYOUT } from './map';
+import { isTeamGameMode } from './modeRules';
 import { WEAPONS } from './weapons';
 
 export type LineOfSightTest = (from: Vec3, to: Vec3) => boolean;
@@ -110,6 +112,21 @@ export const BOT_DIFFICULTY_PROFILES: Readonly<Record<Difficulty, Readonly<Diffi
   },
 };
 
+const TURRET_PROFILE_CACHE = new WeakMap<Readonly<DifficultyProfile>, DifficultyProfile>();
+
+const turretProfileFor = (profile: Readonly<DifficultyProfile>): DifficultyProfile => {
+  let turretProfile = TURRET_PROFILE_CACHE.get(profile);
+  if (!turretProfile) {
+    turretProfile = {
+      ...profile,
+      visionRange: Math.max(70, profile.visionRange),
+      fieldOfView: Math.PI * 2,
+    };
+    TURRET_PROFILE_CACHE.set(profile, turretProfile);
+  }
+  return turretProfile;
+};
+
 const WEAPON_RANGE: Record<WeaponId, { ideal: number; minimum: number; maximum: number }> = {
   'pulse-rifle': { ideal: 18, minimum: 3, maximum: 46 },
   sidearm: { ideal: 25, minimum: 5, maximum: 62 },
@@ -119,7 +136,6 @@ const WEAPON_RANGE: Record<WeaponId, { ideal: number; minimum: number; maximum: 
   'rocket-launcher': { ideal: 22, minimum: 7, maximum: 78 },
 };
 
-const TEAM_MODES = new Set(['team-deathmatch', 'capture-the-flag', 'towah-of-powah']);
 const MAX_GRENADES = 2;
 const PICKUP_PROGRESS_EPSILON = 0.55;
 const PICKUP_PROGRESS_TIMEOUT = 4.5;
@@ -155,7 +171,7 @@ const raisedPoint = (point: Vec3): Vec3 => ({ x: point.x, y: point.y + 1, z: poi
 
 const isEnemy = (state: MatchState, player: PlayerState, other: PlayerState): boolean => {
   if (player.id === other.id || !other.alive) return false;
-  if (!TEAM_MODES.has(state.config.mode)) return true;
+  if (!isTeamGameMode(state.config.mode)) return true;
   return player.team === 'neutral' || other.team === 'neutral' || player.team !== other.team;
 };
 
@@ -193,6 +209,7 @@ const acquireVisibleTarget = (
   observer: PlayerState,
   profile: DifficultyProfile,
   hasLineOfSight: LineOfSightTest,
+  players: readonly PlayerState[] = orderedPlayers(state),
 ): PlayerState | null => {
   let best: PlayerState | null = null;
   let bestScore = Number.POSITIVE_INFINITY;
@@ -217,7 +234,7 @@ const acquireVisibleTarget = (
     }
   }
 
-  for (const candidate of orderedPlayers(state)) {
+  for (const candidate of players) {
     if (!isEnemy(state, observer, candidate) || !canSeePlayer(observer, candidate, profile, hasLineOfSight)) continue;
     const score = targetPriority(state, observer, candidate, observer.bot?.targetId ?? null);
     if (score < bestScore) {
@@ -256,10 +273,14 @@ export const isPlayerRevealedToBotRadar = (
   return Math.hypot(target.velocity.x, target.velocity.y, target.velocity.z) >= MOTION_RADAR_THRESHOLD;
 };
 
-const acquireMotionRadarContact = (state: MatchState, observer: PlayerState): PlayerState | null => {
+const acquireMotionRadarContact = (
+  state: MatchState,
+  observer: PlayerState,
+  players: readonly PlayerState[],
+): PlayerState | null => {
   let selected: PlayerState | null = null;
   let bestScore = Number.POSITIVE_INFINITY;
-  for (const candidate of orderedPlayers(state)) {
+  for (const candidate of players) {
     if (!isPlayerRevealedToBotRadar(state, observer, candidate)) continue;
     let score = horizontalDistance(observer.position, candidate.position);
     if (candidate.id === observer.bot?.targetId) score -= 3;
@@ -282,6 +303,7 @@ const takeMotionRadarGlance = (
   state: MatchState,
   observer: PlayerState,
   profile: DifficultyProfile,
+  players: readonly PlayerState[],
 ): void => {
   const memory = observer.bot!;
   const interval = profile.radarGlanceInterval;
@@ -294,7 +316,7 @@ const takeMotionRadarGlance = (
   }
 
   memory.radarGlanceTimer = randomRange(state, interval[0], interval[1]);
-  const contact = acquireMotionRadarContact(state, observer);
+  const contact = acquireMotionRadarContact(state, observer, players);
   if (!contact) {
     memory.radarContactId = null;
     memory.radarContactPosition = null;
@@ -633,6 +655,17 @@ const navigationAdjacency = (map: MapDefinition): NavigationEdge[][] => {
   return adjacency;
 };
 
+const NAVIGATION_ADJACENCY_CACHE = new WeakMap<MapDefinition, NavigationEdge[][]>();
+
+const cachedNavigationAdjacency = (map: MapDefinition): NavigationEdge[][] => {
+  let adjacency = NAVIGATION_ADJACENCY_CACHE.get(map);
+  if (!adjacency) {
+    adjacency = navigationAdjacency(map);
+    NAVIGATION_ADJACENCY_CACHE.set(map, adjacency);
+  }
+  return adjacency;
+};
+
 const shortestNavigationRoute = (
   map: MapDefinition,
   adjacency: NavigationEdge[][],
@@ -716,8 +749,6 @@ const selectGraphWaypoint = (
   hasLineOfSight: LineOfSightTest,
 ): NavigationSelection | null => {
   if (!map.waypointLinks?.length || map.waypoints.length === 0) return null;
-  const start = closestGraphWaypoint(player, map, hasLineOfSight);
-  if (start < 0) return null;
 
   let destination = 0;
   let destinationScore = Number.POSITIVE_INFINITY;
@@ -734,15 +765,37 @@ const selectGraphWaypoint = (
   memory.navigationCursor ??= 0;
   memory.navigationGoalIndex ??= null;
   const currentRouteNode = memory.navigationRoute[memory.navigationCursor];
-  const routeIsStale = memory.navigationGoalIndex !== destination
+  let start = -1;
+  let routeIsStale = memory.navigationGoalIndex !== destination
     || currentRouteNode === undefined
-    || !map.waypoints[currentRouteNode]
-    || (
-      horizontalDistance(player.position, map.waypoints[currentRouteNode]!) > 18
-      && !memory.navigationRoute.slice(Math.max(0, memory.navigationCursor - 1)).includes(start)
-    );
+    || !map.waypoints[currentRouteNode];
+  if (!routeIsStale && memory.navigationCursor === 0) {
+    // The route's first edge depends on the player's current graph entry.
+    // Once the cursor advances, the previous route node fully determines that
+    // traversal and the expensive closest-node LOS scan is unnecessary.
+    start = closestGraphWaypoint(player, map, hasLineOfSight);
+    if (start < 0) return null;
+  }
+  if (
+    !routeIsStale
+    && currentRouteNode !== undefined
+    && horizontalDistance(player.position, map.waypoints[currentRouteNode]!) > 18
+  ) {
+    if (start < 0) start = closestGraphWaypoint(player, map, hasLineOfSight);
+    if (start < 0) return null;
+    let routeContainsStart = false;
+    for (let index = Math.max(0, memory.navigationCursor - 1); index < memory.navigationRoute.length; index += 1) {
+      if (memory.navigationRoute[index] === start) {
+        routeContainsStart = true;
+        break;
+      }
+    }
+    routeIsStale = !routeContainsStart;
+  }
   if (routeIsStale) {
-    memory.navigationRoute = shortestNavigationRoute(map, navigationAdjacency(map), start, destination);
+    if (start < 0) start = closestGraphWaypoint(player, map, hasLineOfSight);
+    if (start < 0) return null;
+    memory.navigationRoute = shortestNavigationRoute(map, cachedNavigationAdjacency(map), start, destination);
     memory.navigationGoalIndex = destination;
     memory.navigationCursor = memory.navigationRoute[0] === start
       && horizontalDistance(player.position, map.waypoints[start]!) <= 2.2
@@ -765,7 +818,7 @@ const selectGraphWaypoint = (
   const nodeIndex = memory.navigationRoute[memory.navigationCursor]!;
   const previousIndex = memory.navigationCursor > 0
     ? memory.navigationRoute[memory.navigationCursor - 1]!
-    : start;
+    : start >= 0 ? start : nodeIndex;
   const node = map.waypoints[nodeIndex]!;
   memory.waypointIndex = nodeIndex;
   if (
@@ -934,11 +987,16 @@ const avoidNearbyExplosives = (state: MatchState, player: PlayerState, intended:
   return normalize({ x: intended.x + dangerX * 1.8, y: 0, z: intended.z + dangerZ * 1.8 });
 };
 
-const avoidFriendlyCrowding = (state: MatchState, player: PlayerState, intended: Vec3): Vec3 => {
-  if (!TEAM_MODES.has(state.config.mode) || player.team === 'neutral') return intended;
+const avoidFriendlyCrowding = (
+  state: MatchState,
+  player: PlayerState,
+  intended: Vec3,
+  players: readonly PlayerState[] = orderedPlayers(state),
+): Vec3 => {
+  if (!isTeamGameMode(state.config.mode) || player.team === 'neutral') return intended;
   let separationX = 0;
   let separationZ = 0;
-  for (const ally of orderedPlayers(state)) {
+  for (const ally of players) {
     if (ally.id === player.id || !ally.alive || ally.team !== player.team) continue;
     const range = horizontalDistance(player.position, ally.position);
     if (range >= 1.8) continue;
@@ -960,11 +1018,16 @@ const avoidFriendlyCrowding = (state: MatchState, player: PlayerState, intended:
   });
 };
 
-export const isBotGrenadeSafe = (state: MatchState, player: PlayerState, target: PlayerState): boolean => {
+export const isBotGrenadeSafe = (
+  state: MatchState,
+  player: PlayerState,
+  target: PlayerState,
+  players: readonly PlayerState[] = orderedPlayers(state),
+): boolean => {
   const targetRange = horizontalDistance(player.position, target.position);
   if (targetRange < 8.5 || targetRange > 25 || player.carryingFlagTeam) return false;
-  if (!TEAM_MODES.has(state.config.mode) || player.team === 'neutral') return true;
-  return orderedPlayers(state).every((ally) =>
+  if (!isTeamGameMode(state.config.mode) || player.team === 'neutral') return true;
+  return players.every((ally) =>
     ally.id === player.id ||
     !ally.alive ||
     ally.team !== player.team ||
@@ -983,6 +1046,7 @@ const updatePerception = (
   profile: DifficultyProfile,
   hasLineOfSight: LineOfSightTest,
   decisionDue: boolean,
+  players: readonly PlayerState[],
 ): PlayerState | null => {
   const memory = player.bot!;
   const previous = memory.targetId ? state.players[memory.targetId] : undefined;
@@ -991,7 +1055,7 @@ const updatePerception = (
     : false;
 
   let target = previousVisible ? previous ?? null : null;
-  if (decisionDue) target = acquireVisibleTarget(state, player, profile, hasLineOfSight) ?? target;
+  if (decisionDue) target = acquireVisibleTarget(state, player, profile, hasLineOfSight, players) ?? target;
 
   if (target) {
     const hadRecentSight = state.elapsed - memory.lastSeenAt <= Math.max(0.05, profile.decisionInterval * 1.5);
@@ -1048,7 +1112,8 @@ export const updateBotInputs = (
   hasLineOfSight: LineOfSightTest,
 ): void => {
   const safeDt = Math.max(0, dt);
-  for (const player of orderedPlayers(state)) {
+  const players = orderedPlayers(state);
+  for (const player of players) {
     if (player.kind !== 'bot') continue;
     player.bot ??= createBotMemory(state.config.difficulty);
     const memory = player.bot;
@@ -1105,11 +1170,11 @@ export const updateBotInputs = (
 
     const operatingTurret = state.config.mode === 'towah-of-powah' && state.tower.turretOwnerId === player.id;
     const perceptionProfile = operatingTurret
-      ? { ...profile, visionRange: Math.max(70, profile.visionRange), fieldOfView: Math.PI * 2 }
+      ? turretProfileFor(profile)
       : profile;
-    const visibleTarget = updatePerception(state, player, perceptionProfile, hasLineOfSight, decisionDue);
+    const visibleTarget = updatePerception(state, player, perceptionProfile, hasLineOfSight, decisionDue, players);
     if (decisionDue && memory.radarGlanceTimer <= 0) {
-      takeMotionRadarGlance(state, player, profile);
+      takeMotionRadarGlance(state, player, profile, players);
     }
     let plan = objectivePlan(state, player, map);
     if (pickupPlanHasStalled(state, player, plan)) plan = objectivePlan(state, player, map);
@@ -1158,7 +1223,7 @@ export const updateBotInputs = (
       });
     }
     navigationDirection = avoidNearbyExplosives(state, player, navigationDirection);
-    navigationDirection = avoidFriendlyCrowding(state, player, navigationDirection);
+    navigationDirection = avoidFriendlyCrowding(state, player, navigationDirection, players);
 
     const precisionFinisher = visibleTarget !== null &&
       visibleTarget.shield <= 0 &&
@@ -1185,8 +1250,8 @@ export const updateBotInputs = (
     input.yaw = wrapAngle(moveAngleToward(player.yaw, desiredYaw, profile.turnRate * safeDt));
     input.pitch = clamp(
       moveAngleToward(player.pitch, desiredPitch, profile.turnRate * 0.72 * safeDt),
-      -1.48,
-      1.48,
+      -PLAYER_PITCH_LIMIT,
+      PLAYER_PITCH_LIMIT,
     );
 
     const localMovement = movementToLocalInput(navigationDirection, input.yaw);
@@ -1241,7 +1306,7 @@ export const updateBotInputs = (
         memory.reactionTimer <= 0 &&
         player.grenades > 0 &&
         player.grenadeCooldown <= 0 &&
-        isBotGrenadeSafe(state, player, visibleTarget) &&
+        isBotGrenadeSafe(state, player, visibleTarget, players) &&
         random01(state) < profile.grenadeChance
       ) {
         input.grenade = true;

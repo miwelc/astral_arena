@@ -200,6 +200,26 @@ describe('match result and event collection', () => {
     expect(presentations.map((item) => item.eventId)).toEqual([3]);
   });
 
+  it('preserves authored event order, priority and placement without sorting the collection', () => {
+    const state = makeState();
+    state.winner = 'aurora';
+    const presentations = presentGameEvents([
+      event(73, 'kill', { actorId: 'local', targetId: 'enemy' }),
+      event(71, 'match-end', { message: 'Victoria: Aurora' }),
+      event(72, 'flag', {
+        actorId: 'local', actorTeam: 'aurora', flagTeam: 'nova', flagAction: 'captured',
+      }),
+      event(74, 'shot', { actorId: 'local' }),
+    ], state, 'local');
+
+    expect(presentations.map(({ eventId, placement, priority }) => ({ eventId, placement, priority })))
+      .toEqual([
+        { eventId: 73, placement: 'feed', priority: 34 },
+        { eventId: 71, placement: 'center', priority: 100 },
+        { eventId: 72, placement: 'both', priority: 96 },
+      ]);
+  });
+
   it('announces the newest CTF transition instead of a stale, higher-priority pickup', () => {
     const state = makeState();
     const presentations = presentGameEvents([
@@ -231,5 +251,52 @@ describe('match result and event collection', () => {
       eventId: 40,
       voice: 'Victoria',
     });
+  });
+
+  it('selects urgent announcements by priority, then by newest event id', () => {
+    const state = makeState();
+    state.winner = 'aurora';
+    const presentations = presentGameEvents([
+      event(83, 'flag', {
+        actorId: 'local', actorTeam: 'aurora', flagTeam: 'nova', flagAction: 'captured',
+      }),
+      event(81, 'match-end', { message: 'Victoria: Aurora' }),
+      event(84, 'flag', {
+        actorId: 'ally', actorTeam: 'aurora', flagTeam: 'nova', flagAction: 'captured',
+      }),
+    ], state, 'local');
+
+    expect(selectAnnouncementCandidate(presentations)).toMatchObject({
+      eventId: 81,
+      placement: 'center',
+      priority: 100,
+    });
+
+    const capturesOnly = presentations.filter((presentation) => presentation.priority === 96);
+    expect(selectAnnouncementCandidate(capturesOnly)).toMatchObject({
+      eventId: 84,
+      placement: 'both',
+      priority: 96,
+    });
+  });
+
+  it('selects the newest voiced transition when none is urgent, independent of input order', () => {
+    const state = makeState();
+    const presentations = presentGameEvents([
+      event(92, 'flag', {
+        actorId: 'ally', actorTeam: 'aurora', flagTeam: 'nova', flagAction: 'dropped',
+      }),
+      event(94, 'kill', { actorId: 'local', targetId: 'enemy' }),
+      event(91, 'flag', {
+        actorId: 'ally', actorTeam: 'aurora', flagTeam: 'nova', flagAction: 'taken',
+      }),
+    ], state, 'local');
+
+    expect(selectAnnouncementCandidate(presentations)).toMatchObject({
+      eventId: 92,
+      placement: 'both',
+      voice: 'Bandera perdida',
+    });
+    expect(selectAnnouncementCandidate(presentations.filter((presentation) => !presentation.voice))).toBeNull();
   });
 });
