@@ -10,11 +10,14 @@ describe('arena weapon balance', () => {
     const totalDurability = 170;
 
     expect(Math.ceil(totalDurability / WEAPONS['pulse-rifle'].damage)).toBe(14);
-    expect(Math.ceil(totalDurability / WEAPONS.sidearm.damage)).toBe(6);
+    expect(Math.ceil(totalDurability / WEAPONS.sidearm.damage)).toBe(8);
     expect(Math.ceil(totalDurability / WEAPONS.sniper.damage)).toBe(2);
     expect(WEAPONS.sniper.damage * WEAPONS.sniper.headMultiplier).toBeGreaterThan(totalDurability);
-    expect(WEAPONS.shotgun.damage * 10).toBeLessThan(totalDurability);
-    expect(WEAPONS.shotgun.damage * 11).toBeGreaterThan(totalDurability);
+    expect(WEAPONS['battle-rifle'].damage * 11).toBeLessThan(100);
+    expect(WEAPONS['battle-rifle'].damage * 12).toBeGreaterThanOrEqual(100);
+    expect(WEAPONS['battle-rifle'].burstCount).toBe(3);
+    expect(WEAPONS.shotgun.damage * 8).toBeLessThan(totalDurability);
+    expect(WEAPONS.shotgun.damage * 9).toBeGreaterThanOrEqual(totalDurability);
     expect(WEAPONS['rocket-launcher'].damage).toBeGreaterThan(totalDurability);
   });
 

@@ -29,7 +29,7 @@ const event = (id: number, type: GameEvent['type'], values: Partial<GameEvent> =
 });
 
 describe('combat event presentation', () => {
-  it('makes a local kill prominent without spending an announcer voice line', () => {
+  it('keeps a routine local kill readable in the feed without obscuring the duel', () => {
     const state = makeState('team-deathmatch');
     const result = presentGameEvent(event(1, 'kill', {
       actorId: 'local',
@@ -40,19 +40,55 @@ describe('combat event presentation', () => {
     expect(result).toMatchObject({
       headline: 'ENEMIGO ABATIDO',
       detail: 'Orion',
-      placement: 'both',
+      placement: 'feed',
       tone: 'success',
       cue: 'kill-confirmed',
+      priority: 34,
+      durationMs: 2600,
     });
     expect(result?.voice).toBeUndefined();
   });
 
+  it('promotes only a confirmed lethal local headshot to the central medal slot', () => {
+    const state = makeState('team-deathmatch');
+    const headshot = presentGameEvent(event(2, 'kill', {
+      actorId: 'local',
+      targetId: 'enemy',
+      message: 'Lince eliminó a Orion',
+      headshot: true,
+      fatal: true,
+    }), state, 'local');
+    const unconfirmed = presentGameEvent(event(3, 'kill', {
+      actorId: 'local',
+      targetId: 'enemy-two',
+      message: 'Lince eliminó a Draco',
+      headshot: true,
+      fatal: false,
+    }), state, 'local');
+
+    expect(headshot).toMatchObject({
+      headline: 'TIRO A LA CABEZA',
+      detail: 'Orion',
+      placement: 'both',
+      tone: 'success',
+      cue: 'headshot-confirmed',
+      priority: 72,
+      durationMs: 1550,
+    });
+    expect(headshot?.voice).toBeUndefined();
+    expect(unconfirmed).toMatchObject({
+      headline: 'ENEMIGO ABATIDO',
+      placement: 'feed',
+      cue: 'kill-confirmed',
+    });
+  });
+
   it('distinguishes the local death and a teammate death', () => {
     const state = makeState('team-deathmatch');
-    const localDeath = presentGameEvent(event(2, 'kill', {
+    const localDeath = presentGameEvent(event(4, 'kill', {
       actorId: 'enemy', targetId: 'local', message: 'Orion eliminó a Lince',
     }), state, 'local');
-    const teammateDeath = presentGameEvent(event(3, 'kill', {
+    const teammateDeath = presentGameEvent(event(5, 'kill', {
       actorId: 'enemy', targetId: 'ally', message: 'Orion eliminó a Vega',
     }), state, 'local');
 
@@ -62,7 +98,7 @@ describe('combat event presentation', () => {
 
   it('keeps unrelated free-for-all kills in the feed', () => {
     const state = makeState('deathmatch');
-    const result = presentGameEvent(event(4, 'kill', {
+    const result = presentGameEvent(event(6, 'kill', {
       actorId: 'enemy', targetId: 'enemy-two', message: 'Orion eliminó a Draco',
     }), state, 'local');
 

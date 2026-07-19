@@ -311,7 +311,7 @@ describe('combat hitboxes', () => {
 
   it('gives the helmet a forgiving but distinct headshot volume', () => {
     const hit = raycastWorld(
-      { x: 0.33, y: 1.55, z: -4 },
+      { x: 0.33, y: 1.65, z: -4 },
       forward,
       8,
       createMap(),
@@ -320,6 +320,32 @@ describe('combat hitboxes', () => {
 
     expect(hit?.playerId).toBe(target.id);
     expect(hit?.headshot).toBe(true);
+  });
+
+  it('keeps a high-chest shot outside the upper helmet band', () => {
+    const hit = raycastWorld(
+      { x: 0, y: 1.36, z: -4 },
+      forward,
+      8,
+      createMap(),
+      [target],
+    );
+
+    expect(hit?.playerId).toBe(target.id);
+    expect(hit?.headshot).toBe(false);
+  });
+
+  it('keeps the first torso impact when the torso and helmet volumes overlap', () => {
+    const hit = raycastWorld(
+      { x: 0, y: 1.5, z: -4 },
+      forward,
+      8,
+      createMap(),
+      [target],
+    );
+
+    expect(hit?.playerId).toBe(target.id);
+    expect(hit?.headshot).toBe(false);
   });
 
   it('still rejects a clearly missed shot outside the armour silhouette', () => {

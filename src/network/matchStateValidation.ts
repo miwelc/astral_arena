@@ -91,7 +91,11 @@ const isWeaponState = (value: unknown): boolean => {
     && isSafeNonNegativeInteger(value.magazine)
     && isSafeNonNegativeInteger(value.reserve)
     && isNonNegativeNumber(value.cooldown)
-    && isNonNegativeNumber(value.reloadTimer);
+    && isNonNegativeNumber(value.reloadTimer)
+    && isFiniteNumber(value.bloom) && value.bloom >= 0 && value.bloom <= 1.001
+    && isSafeNonNegativeInteger(value.burstRemaining) && value.burstRemaining <= 8
+    && isSafeNonNegativeInteger(value.burstRoundIndex) && value.burstRoundIndex <= 8
+    && isNonNegativeNumber(value.burstTimer);
 };
 
 const isPickupBlacklist = (value: unknown): boolean => {
@@ -142,11 +146,15 @@ const isPlayerState = (value: unknown, recordId: string): boolean => {
     value.spawnProtection,
     value.meleeCooldown,
     value.grenadeCooldown,
+    value.equipTimer,
   ];
   if (!finiteFields.every(isFiniteNumber) || !nonNegativeFields.every(isNonNegativeNumber)) return false;
   if (Math.abs(value.yaw as number) > Math.PI + 0.001 || Math.abs(value.pitch as number) > 1.481) return false;
   if ((value.radius as number) <= 0 || (value.height as number) <= 0) return false;
-  if (typeof value.grounded !== 'boolean' || typeof value.alive !== 'boolean' || typeof value.isJuggernaut !== 'boolean') return false;
+  if (typeof value.grounded !== 'boolean'
+    || typeof value.alive !== 'boolean'
+    || typeof value.isJuggernaut !== 'boolean'
+    || typeof value.aimSuppressed !== 'boolean') return false;
 
   if (!Array.isArray(value.inventory) || value.inventory.length === 0 || value.inventory.length > 2) return false;
   const weaponIds = new Set<string>();
@@ -178,14 +186,18 @@ const isMatchConfig = (value: unknown): boolean => {
 const isProjectile = (value: unknown): boolean => {
   if (!isRecord(value)) return false;
   return isIdentifier(value.id)
-    && (value.kind === 'rocket' || value.kind === 'grenade')
+    && (value.kind === 'rocket' || value.kind === 'grenade' || value.kind === 'bullet')
     && isIdentifier(value.ownerId)
     && isEnumValue(TEAMS, value.team)
+    && (value.kind === 'bullet'
+      ? isEnumValue(WEAPON_IDS, value.weaponId)
+      : value.weaponId === undefined)
     && isVec3(value.position)
     && isVec3(value.velocity)
     && isFiniteNumber(value.radius) && value.radius > 0
     && isFiniteNumber(value.damage) && value.damage >= 0
     && isFiniteNumber(value.blastRadius) && value.blastRadius >= 0
+    && typeof value.armed === 'boolean'
     && isFiniteNumber(value.fuse)
     && typeof value.alive === 'boolean';
 };
@@ -231,6 +243,7 @@ const isGameEvent = (value: unknown, elapsed: number, eventSequence: number): va
   if (!(value.actorTeam === undefined || isEnumValue(TEAMS, value.actorTeam))) return false;
   if (!(value.weaponId === undefined || isEnumValue(WEAPON_IDS, value.weaponId))) return false;
   if (!(value.position === undefined || isVec3(value.position))) return false;
+  if (!(value.sourcePosition === undefined || isVec3(value.sourcePosition))) return false;
   if (!(value.impact === undefined || typeof value.impact === 'boolean')) return false;
   if (!(value.traces === undefined || (
     Array.isArray(value.traces)
@@ -240,6 +253,12 @@ const isGameEvent = (value: unknown, elapsed: number, eventSequence: number): va
   ))) return false;
   if (!(value.message === undefined || (typeof value.message === 'string' && value.message.length <= 512))) return false;
   if (!(value.amount === undefined || isNonNegativeNumber(value.amount))) return false;
+  if (!(value.shieldDamage === undefined || isNonNegativeNumber(value.shieldDamage))) return false;
+  if (!(value.healthDamage === undefined || isNonNegativeNumber(value.healthDamage))) return false;
+  if (![value.headshot, value.fatal, value.backStrike].every((flag) => flag === undefined || typeof flag === 'boolean')) return false;
+  if (!(value.explosionKind === undefined || value.explosionKind === 'rocket' || value.explosionKind === 'grenade')) return false;
+  if (!(value.radius === undefined || isNonNegativeNumber(value.radius))) return false;
+  if ((value.explosionKind !== undefined || value.radius !== undefined) && value.type !== 'explosion') return false;
   if (!(value.flagTeam === undefined || isEnumValue(FLAG_TEAMS, value.flagTeam))) return false;
   if (!(value.flagAction === undefined || isEnumValue(FLAG_ACTIONS, value.flagAction))) return false;
   if ((value.flagTeam !== undefined || value.flagAction !== undefined) && value.type !== 'flag') return false;

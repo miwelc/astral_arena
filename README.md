@@ -21,7 +21,7 @@ El repositorio contiene una **primera vertical jugable completa**, no una versi�
 - animación procedural compartida entre primera y tercera persona: locomoción ligada a la distancia recorrida y diferenciada por dirección, respiración, salto, caída, aterrizaje, muerte/reaparición, retroceso, recarga, cambio de arma, cuerpo a cuerpo y lanzamiento de granada, con rodillas, pies, manos y piezas de arma móviles;
 - menús con formato canónico por modo, lobby manual P2P, HUD contextual para armas y torreta, radar de movimiento de 25 m, IFF aliado/enemigo, avisos contextuales, voz de objetivos, audio y pantalla de resultado integrados;
 - transporte WebRTC P2P nativo con señalización manual, mensajes tipados y un host con hasta siete invitados;
-- 235 pruebas automatizadas para combate, dispersión y retículas, interacciones manuales, movimiento, auto-step de rampas y deslizamiento por paredes, hitboxes, perfiles de bots, balance inicial, objetivos, radar, avisos contextuales, regeneración de escudo, validación de snapshots P2P, regresiones, navegación e interiores del mapa, pads de salto, acceso y manejo de la torreta, puntuación, determinismo, audio, curvas de animación, antirrepetición de materiales, arquitectura y piezas móviles de armamento.
+- 279 pruebas automatizadas para combate, daño de precisión, ráfagas y balística, dispersión y retículas, transiciones de input P2P, interacciones manuales, movimiento, auto-step de rampas y deslizamiento por paredes, hitboxes, perfiles de bots, balance inicial, objetivos, radar, avisos contextuales, regeneración, validación de snapshots P2P, regresiones, navegación e interiores del mapa, pads de salto, acceso y manejo de la torreta, puntuación, determinismo, audio, curvas de animación, antirrepetición de materiales, arquitectura y piezas móviles de armamento.
 
 El proyecto pasa `typecheck`, tests y build de producción. Aun así, el flujo WebRTC debe probarse con varios navegadores y redes reales antes de declarar soporte público 4v4; tampoco hay matchmaking, persistencia, cuentas, backend, migración de host ni anti-cheat.
 
@@ -68,7 +68,7 @@ Haz clic sobre el área de juego para capturar el puntero. `Esc` libera el punte
 | Moverse | `W`, `A`, `S`, `D` |
 | Mirar | Movimiento del ratón |
 | Disparar | Botón izquierdo |
-| Apuntar | Botón derecho |
+| Activar óptica compatible | Botón derecho |
 | Cambiar zoom del sniper | `Z` o rueda mientras se apunta (`5×` / `10×`) |
 | Saltar | `Espacio` |
 | Recargar | `R` |
@@ -90,7 +90,7 @@ Se lee el primer mando que exponga el navegador. La nomenclatura siguiente corre
 | Moverse | Stick izquierdo |
 | Mirar | Stick derecho |
 | Disparar | Gatillo derecho (`RT`) |
-| Apuntar | Gatillo izquierdo (`LT`) |
+| Activar óptica compatible | Gatillo izquierdo (`LT`) |
 | Saltar | `A` |
 | Recargar | `X` |
 | Cambiar de arma | `Y` |
@@ -120,20 +120,22 @@ El equipamiento inicial normal es rifle de pulso y pistola. Las armas de poder a
 
 | Arma | Función |
 | --- | --- |
-| Rifle de pulso | Automático equilibrado de corto y medio alcance, con retícula de cono. |
-| Pistola Vector | Semiautomática precisa. |
-| Rifle de batalla | Ráfaga de tres proyectiles para media distancia. |
+| Rifle de pulso | Automático equilibrado de corto y medio alcance, con bloom recuperable y retícula ligada al cono real. |
+| Pistola Vector | Semiautomática precisa con óptica smart-link y remate de cabeza sobre un rival expuesto. |
+| Rifle de batalla | Ráfaga temporal de tres proyectiles balísticos que exige adelantar blancos a distancia. |
 | Rifle de precisión | Cuatro disparos por cargador, gran daño a larga distancia y visor escalonado `5×` / `10×`. |
-| Escopeta de brecha | Doce perdigones y retícula circular vinculada a su dispersión real, fuerte a corta distancia. |
+| Escopeta de brecha | Doce perdigones con caída de daño, retícula circular y recarga interrumpible cartucho a cartucho. |
 | Lanzacohetes Nova | Proyectil lento con daño explosivo de área. |
 
-También hay granadas con fusible y rebote: nunca detonan suspendidas en el aire, explotan inmediatamente al impactar a un personaje y, una vez agotado el fusible, al siguiente contacto con suelo o escenario. Hay golpe cuerpo a cuerpo —incluido daño elevado por la espalda—, munición, sobreescudo y recarga automática de escudo tras dejar de recibir daño. Los valores son de prototipo y necesitan *playtesting* y balance competitivo.
+El modelo de daño separa barrera y salud: una cabeza no multiplica mágicamente el escudo, pero las armas de precisión ejecutan si el mismo proyectil consigue atravesarlo y alcanza la cabeza expuesta. Los impactos interrumpen la óptica hasta soltar el control, el radar desaparece durante el zoom y el HUD diferencia daño cian de barrera, daño rojo de salud, dirección del ataque, munición baja y bajas de cabeza. El combate también incorpora magnetismo leve para ratón/mando, asistencias por daño reciente, recuperación oculta de salud, cambio de arma con tiempo de equipamiento y un melee con impulso, rotura de escudo frontal y baja por la espalda.
+
+También hay granadas con núcleo letal, fusible y rebote: la mecha empieza con el primer impacto contra el escenario, nunca detonan suspendidas en el aire y explotan inmediatamente al tocar a un personaje. Hay munición, sobreescudo y una recarga de escudo más cercana al ritmo clásico tras dejar de recibir daño. Los valores siguen necesitando *playtesting* competitivo.
 
 Los dos accesos laterales a la torre son pads de salto físicos. Al pisarlos aplican un arco balístico continuo, conservan el impulso hacia la cubierta y permiten corrección lateral en vuelo; no trasladan instantáneamente al jugador.
 
 ## Multijugador P2P con señalización manual
 
-La red usa WebRTC en topología de estrella. El host abre una conexión independiente con cada invitado y actúa como autoridad de simulación. Los DataChannels son ordenados y fiables; las ofertas y respuestas esperan a que termine la recopilación ICE para incluir los candidatos en el propio SDP.
+La red usa WebRTC en topología de estrella. El host abre una conexión independiente con cada invitado y actúa como autoridad de simulación. Los DataChannels son ordenados y fiables; el invitado envía un flujo a 60 Hz y transmite además cada cambio digital inmediatamente, mientras el host conserva esas transiciones para que un clic corto ocupe al menos un tick y no se pierda. Las ofertas y respuestas esperan a que termine la recopilación ICE para incluir los candidatos en el propio SDP.
 
 No existe servidor de señalización. Los códigos base64 se intercambian por un canal externo elegido por los jugadores —por ejemplo, un mensaje privado— siguiendo exactamente este flujo:
 

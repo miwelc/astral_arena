@@ -63,6 +63,12 @@ import {
   type SurfaceUvTransform,
 } from './visualPresentation';
 import {
+  HIP_FIRE_FOV,
+  hitVisualProfile,
+  opticalZoomFov,
+  visualRecoilImpulse,
+} from './combatPresentation';
+import {
   createWeaponModel,
   getWeaponAnchor,
   WEAPON_VIEW_POSES,
@@ -72,6 +78,7 @@ import {
 const UP = new THREE.Vector3(0, 1, 0);
 const DOWN = new THREE.Vector3(0, -1, 0);
 const FORWARD = new THREE.Vector3(0, 0, -1);
+const WHITE = new THREE.Color(0xffffff);
 const ASTRONAUT_WAIST_HEIGHT = 1.05;
 const GROUND_TEXTURE_TILE_SIZE = 16;
 const FACILITY_PANEL_REPEAT = { x: 4, y: 1 } as const;
@@ -84,20 +91,6 @@ const TEAM_COLORS: Record<Team, { armor: number; accent: number; glow: number }>
   nova: { armor: 0xb95e69, accent: 0xff5068, glow: 0xff7186 },
   neutral: { armor: 0xe2e7e2, accent: 0xa9e83e, glow: 0xc7ff54 },
 };
-
-const WEAPON_AIM_FOV: Readonly<Record<WeaponId, number>> = {
-  'pulse-rifle': 57,
-  sidearm: 63,
-  'battle-rifle': 53,
-  sniper: 17.15,
-  shotgun: 64,
-  'rocket-launcher': 60,
-};
-
-// Optical FOVs corresponding to the classic 5x / 10x sniper steps from a
-// 74-degree hip-fire view. Keeping the values explicit makes the zoom honest:
-// the second level really resolves targets at twice the angular scale.
-const SNIPER_ZOOM_FOV = [17.15, 8.62] as const;
 
 const ARCHITECTURE_AUTHORED_SHELLS = new Set([
   'west-base-front-n',
@@ -207,7 +200,68 @@ interface TransientEffect {
   age: number;
   duration: number;
   update: (progress: number) => void;
+  release?: () => void;
 }
+
+interface ShotTraceVisual {
+  root: THREE.Group;
+  geometry: THREE.BufferGeometry;
+  positions: THREE.BufferAttribute;
+  trailMaterial: THREE.LineBasicMaterial;
+  coreMaterial: THREE.LineBasicMaterial;
+  inUse: boolean;
+}
+
+interface ShotEffectVisual {
+  worldRoot: THREE.Group;
+  flash: THREE.Mesh;
+  flashMaterial: THREE.MeshBasicMaterial;
+  outerFlame: THREE.Mesh;
+  outerFlameMaterial: THREE.MeshBasicMaterial;
+  innerFlame: THREE.Mesh;
+  innerFlameMaterial: THREE.MeshBasicMaterial;
+  muzzleSmoke: THREE.Mesh;
+  smokeMaterial: THREE.MeshBasicMaterial;
+  impactPoints: THREE.Points;
+  impactGeometry: THREE.BufferGeometry;
+  impactPositions: THREE.BufferAttribute;
+  impactMaterial: THREE.PointsMaterial;
+  impactVelocities: Float32Array;
+  impactGlow: THREE.Mesh;
+  impactGlowMaterial: THREE.MeshBasicMaterial;
+  impactEnd: THREE.Vector3;
+  localRoot: THREE.Group;
+  localCore: THREE.Mesh;
+  localFlashMaterial: THREE.MeshBasicMaterial;
+  localFlame: THREE.Mesh;
+  localFlameMaterial: THREE.MeshBasicMaterial;
+  localSmoke: THREE.Mesh;
+  localSmokeMaterial: THREE.MeshBasicMaterial;
+  inUse: boolean;
+  heavyShot: boolean;
+  localActive: boolean;
+  impactActive: boolean;
+  shotDuration: number;
+  flameLength: number;
+  outerFlameRadius: number;
+  innerFlameRadius: number;
+  innerFlameLength: number;
+  localFlameRadius: number;
+  localFlameLength: number;
+  impactCount: number;
+}
+
+interface HitRippleVisual {
+  mesh: THREE.Mesh<THREE.SphereGeometry, THREE.ShaderMaterial>;
+  color: THREE.Color;
+  opacity: { value: number };
+  inUse: boolean;
+  baseOpacity: number;
+  endScale: number;
+}
+
+const MAX_SHOT_TRACE_SEGMENTS = 12;
+const MAX_SHOT_IMPACT_SPARKS = 15;
 
 const clamp01 = (value: number): number => Math.min(1, Math.max(0, value));
 
@@ -379,6 +433,14 @@ export class ArenaRenderer {
   private readonly shotFlashGeometry = new THREE.IcosahedronGeometry(1, 1);
   private readonly muzzleConeGeometry = new THREE.ConeGeometry(1, 1, 7, 1, true);
   private readonly shotSmokeGeometry = new THREE.SphereGeometry(1, 8, 6);
+  private readonly bulletStreakGeometry = new THREE.CylinderGeometry(0.7, 1, 1, 5);
+  private readonly bulletCoreGeometry = new THREE.SphereGeometry(1, 6, 4);
+  private readonly bulletCoreMaterial = new THREE.MeshBasicMaterial({ color: 0xf4fbff, toneMapped: false });
+  private readonly bulletStreakMaterials = new Map<number, THREE.MeshBasicMaterial>();
+  private readonly shotTracePool: ShotTraceVisual[] = [];
+  private readonly shotEffectPool: ShotEffectVisual[] = [];
+  private readonly hitRippleGeometry = new THREE.SphereGeometry(0.48, 18, 12);
+  private readonly hitRipplePool: HitRippleVisual[] = [];
   private readonly explosionShellGeometry = new THREE.IcosahedronGeometry(1, 2);
   private readonly explosionShockGeometry = new THREE.TorusGeometry(1, 0.032, 7, 40);
   private readonly explosionGroundFlashGeometry = new THREE.CircleGeometry(1, 32);
@@ -683,7 +745,8 @@ export class ArenaRenderer {
     this.skyDome?.position.copy(this.camera.position);
 
     this.damagePulse = Math.max(0, this.damagePulse - delta * 2.65);
-    this.weaponKick = Math.max(0, this.weaponKick - delta * 7.5);
+    this.weaponKick = damp(this.weaponKick, 0, 13, delta);
+    if (this.weaponKick < 0.0005) this.weaponKick = 0;
     this.damageUniform.value = this.damagePulse * this.damagePulse * 0.78;
     this.fireUniform.value = this.weaponKick * this.weaponKick;
     this.gradePass.uniforms.uDamage!.value = this.damageUniform.value;
@@ -731,15 +794,26 @@ export class ArenaRenderer {
       effect.object.removeFromParent();
     }
     this.effects.length = 0;
+    for (const trace of this.shotTracePool) collect(trace.root);
+    for (const shot of this.shotEffectPool) {
+      collect(shot.worldRoot);
+      collect(shot.localRoot);
+    }
+    for (const ripple of this.hitRipplePool) collect(ripple.mesh);
     collect(this.scene);
     collect(this.viewScene);
     for (const template of this.weaponTemplates.values()) collect(template);
     geometries.add(this.shotFlashGeometry);
     geometries.add(this.muzzleConeGeometry);
     geometries.add(this.shotSmokeGeometry);
+    geometries.add(this.bulletStreakGeometry);
+    geometries.add(this.bulletCoreGeometry);
+    geometries.add(this.hitRippleGeometry);
     geometries.add(this.explosionShellGeometry);
     geometries.add(this.explosionShockGeometry);
     geometries.add(this.explosionGroundFlashGeometry);
+    materials.add(this.bulletCoreMaterial);
+    for (const material of this.bulletStreakMaterials.values()) materials.add(material);
     for (const geometry of geometries) geometry.dispose();
     for (const material of materials) material.dispose();
     for (const texture of this.ownedTextures) texture.dispose();
@@ -3458,11 +3532,13 @@ export class ArenaRenderer {
         this.scene.add(visual.root);
       }
       visual.root.position.set(projectile.position.x, projectile.position.y, projectile.position.z);
-      if (projectile.kind === 'rocket') {
+      if (projectile.kind === 'rocket' || projectile.kind === 'bullet') {
         const velocity = vectorFrom(projectile.velocity);
         if (velocity.lengthSq() > 0.001) visual.root.quaternion.setFromUnitVectors(UP, velocity.normalize());
-        const flame = visual.root.userData.flame as THREE.Mesh | undefined;
-        if (flame) flame.scale.y = 0.72 + Math.sin(worldTime * 45) * 0.18;
+        if (projectile.kind === 'rocket') {
+          const flame = visual.root.userData.flame as THREE.Mesh | undefined;
+          if (flame) flame.scale.y = 0.72 + Math.sin(worldTime * 45) * 0.18;
+        }
       } else {
         visual.root.rotation.x += 0.08;
         visual.root.rotation.z += 0.11;
@@ -3475,6 +3551,22 @@ export class ArenaRenderer {
       disposeObject(visual.root);
       this.projectileVisuals.delete(id);
     }
+  }
+
+  private bulletStreakMaterial(tint: number): THREE.MeshBasicMaterial {
+    let material = this.bulletStreakMaterials.get(tint);
+    if (!material) {
+      material = new THREE.MeshBasicMaterial({
+        color: tint,
+        transparent: true,
+        opacity: 0.9,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        toneMapped: false,
+      });
+      this.bulletStreakMaterials.set(tint, material);
+    }
+    return material;
   }
 
   private createProjectile(projectile: ProjectileState): ProjectileVisual {
@@ -3505,6 +3597,24 @@ export class ArenaRenderer {
       flame.position.y = -0.56;
       root.userData.flame = flame;
       root.add(flame);
+    } else if (projectile.kind === 'bullet') {
+      const tint = projectile.weaponId ? WEAPONS[projectile.weaponId].tint : TEAM_COLORS[projectile.team].glow;
+      const streak = new THREE.Mesh(
+        this.bulletStreakGeometry,
+        this.bulletStreakMaterial(tint),
+      );
+      const streakRadius = Math.max(0.02, projectile.radius);
+      streak.scale.set(streakRadius, 0.72, streakRadius);
+      streak.userData.sharedVisualTemplate = true;
+      root.add(streak);
+      const core = new THREE.Mesh(
+        this.bulletCoreGeometry,
+        this.bulletCoreMaterial,
+      );
+      core.scale.setScalar(Math.max(0.025, projectile.radius));
+      core.position.y = 0.34;
+      core.userData.sharedVisualTemplate = true;
+      root.add(core);
     } else {
       const shell = new THREE.Mesh(
         new THREE.IcosahedronGeometry(projectile.radius, 1),
@@ -3524,7 +3634,7 @@ export class ArenaRenderer {
       root.add(band);
     }
     root.traverse((object) => {
-      if (object instanceof THREE.Mesh) object.castShadow = true;
+      if (object instanceof THREE.Mesh) object.castShadow = projectile.kind !== 'bullet';
     });
     return { root, kind: projectile.kind };
   }
@@ -3548,10 +3658,476 @@ export class ArenaRenderer {
 
     for (const event of state.events) {
       if (event.id <= this.lastEventId) continue;
+      const redundantFatalShieldBreak = event.type === 'shield-break' && state.events.some((candidate) =>
+        candidate.type === 'hit'
+        && candidate.actorId === event.actorId
+        && candidate.targetId === event.targetId
+        && candidate.fatal === true
+        && Math.abs(candidate.time - event.time) < 0.001,
+      );
+      if (redundantFatalShieldBreak) {
+        this.lastEventId = Math.max(this.lastEventId, event.id);
+        continue;
+      }
       this.createEventEffect(event, state);
       this.lastEventId = Math.max(this.lastEventId, event.id);
     }
     this.lastEventId = Math.max(this.lastEventId, state.eventSequence);
+  }
+
+  private createShotTraceVisual(): ShotTraceVisual {
+    const positions = new THREE.BufferAttribute(
+      new Float32Array(MAX_SHOT_TRACE_SEGMENTS * 2 * 3),
+      3,
+    );
+    positions.setUsage(THREE.DynamicDrawUsage);
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', positions);
+    geometry.setDrawRange(0, 0);
+    const trailMaterial = new THREE.LineBasicMaterial({
+      color: 0xffffff,
+      transparent: true,
+      opacity: 0.32,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    const coreMaterial = new THREE.LineBasicMaterial({
+      color: 0xffffff,
+      transparent: true,
+      opacity: 0.96,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    const trail = new THREE.LineSegments(geometry, trailMaterial);
+    const core = new THREE.LineSegments(geometry, coreMaterial);
+    // Dynamic endpoints invalidate a static bounding sphere. These traces are
+    // tiny and short-lived, so bypassing frustum tests is both safer and cheaper.
+    trail.frustumCulled = false;
+    core.frustumCulled = false;
+    trail.userData.sharedVisualTemplate = true;
+    core.userData.sharedVisualTemplate = true;
+    const root = new THREE.Group();
+    root.add(trail, core);
+    const visual: ShotTraceVisual = {
+      root,
+      geometry,
+      positions,
+      trailMaterial,
+      coreMaterial,
+      inUse: false,
+    };
+    this.shotTracePool.push(visual);
+    return visual;
+  }
+
+  private acquireShotTrace(
+    origin: THREE.Vector3,
+    endpoints: readonly THREE.Vector3[],
+    tint: number,
+  ): ShotTraceVisual {
+    const visual = this.shotTracePool.find((candidate) => !candidate.inUse)
+      ?? this.createShotTraceVisual();
+    const segmentCount = Math.min(MAX_SHOT_TRACE_SEGMENTS, endpoints.length);
+    for (let index = 0; index < segmentCount; index += 1) {
+      const endpoint = endpoints[index]!;
+      const offset = index * 2;
+      visual.positions.setXYZ(offset, origin.x, origin.y, origin.z);
+      visual.positions.setXYZ(offset + 1, endpoint.x, endpoint.y, endpoint.z);
+    }
+    visual.geometry.setDrawRange(0, segmentCount * 2);
+    visual.positions.needsUpdate = true;
+    visual.trailMaterial.color.setHex(tint);
+    visual.trailMaterial.opacity = 0.32;
+    visual.coreMaterial.color.setHex(tint).lerp(WHITE, 0.64);
+    visual.coreMaterial.opacity = 0.96;
+    visual.inUse = true;
+    return visual;
+  }
+
+  private releaseShotTrace(visual: ShotTraceVisual): void {
+    visual.root.removeFromParent();
+    visual.geometry.setDrawRange(0, 0);
+    visual.inUse = false;
+  }
+
+  private createShotEffectVisual(): ShotEffectVisual {
+    const worldRoot = new THREE.Group();
+    const flashMaterial = new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      transparent: true,
+      opacity: 0.95,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    const flash = new THREE.Mesh(this.shotFlashGeometry, flashMaterial);
+    flash.userData.sharedVisualTemplate = true;
+    worldRoot.add(flash);
+
+    const outerFlameMaterial = new THREE.MeshBasicMaterial({
+      color: 0xff793d,
+      transparent: true,
+      opacity: 0.82,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    const outerFlame = new THREE.Mesh(this.muzzleConeGeometry, outerFlameMaterial);
+    outerFlame.userData.sharedVisualTemplate = true;
+    worldRoot.add(outerFlame);
+
+    const innerFlameMaterial = new THREE.MeshBasicMaterial({
+      color: 0xfff2c4,
+      transparent: true,
+      opacity: 1,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    const innerFlame = new THREE.Mesh(this.muzzleConeGeometry, innerFlameMaterial);
+    innerFlame.userData.sharedVisualTemplate = true;
+    worldRoot.add(innerFlame);
+
+    const smokeMaterial = new THREE.MeshBasicMaterial({
+      color: 0x8ea1a0,
+      transparent: true,
+      opacity: 0.11,
+      depthWrite: false,
+    });
+    const muzzleSmoke = new THREE.Mesh(this.shotSmokeGeometry, smokeMaterial);
+    muzzleSmoke.userData.sharedVisualTemplate = true;
+    worldRoot.add(muzzleSmoke);
+
+    const impactPositions = new THREE.BufferAttribute(
+      new Float32Array(MAX_SHOT_IMPACT_SPARKS * 3),
+      3,
+    );
+    impactPositions.setUsage(THREE.DynamicDrawUsage);
+    const impactGeometry = new THREE.BufferGeometry();
+    impactGeometry.setAttribute('position', impactPositions);
+    impactGeometry.setDrawRange(0, 0);
+    const impactMaterial = new THREE.PointsMaterial({
+      color: 0xffd08a,
+      size: 0.055,
+      transparent: true,
+      opacity: 0.95,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      sizeAttenuation: true,
+    });
+    const impactPoints = new THREE.Points(impactGeometry, impactMaterial);
+    impactPoints.frustumCulled = false;
+    impactPoints.visible = false;
+    impactPoints.userData.sharedVisualTemplate = true;
+    worldRoot.add(impactPoints);
+
+    const impactGlowMaterial = new THREE.MeshBasicMaterial({
+      color: 0xffb56d,
+      transparent: true,
+      opacity: 0.76,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    const impactGlow = new THREE.Mesh(this.shotSmokeGeometry, impactGlowMaterial);
+    impactGlow.visible = false;
+    impactGlow.userData.sharedVisualTemplate = true;
+    worldRoot.add(impactGlow);
+
+    const localRoot = new THREE.Group();
+    const localFlashMaterial = new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      transparent: true,
+      opacity: 1,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    const localCore = new THREE.Mesh(this.shotFlashGeometry, localFlashMaterial);
+    localCore.userData.sharedVisualTemplate = true;
+    localRoot.add(localCore);
+
+    const localFlameMaterial = new THREE.MeshBasicMaterial({
+      color: 0xff8a45,
+      transparent: true,
+      opacity: 0.95,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    const localFlame = new THREE.Mesh(this.muzzleConeGeometry, localFlameMaterial);
+    localFlame.quaternion.setFromUnitVectors(UP, FORWARD);
+    localFlame.userData.sharedVisualTemplate = true;
+    localRoot.add(localFlame);
+
+    const localSmokeMaterial = new THREE.MeshBasicMaterial({
+      color: 0xa7b3af,
+      transparent: true,
+      opacity: 0.08,
+      depthWrite: false,
+    });
+    const localSmoke = new THREE.Mesh(this.shotSmokeGeometry, localSmokeMaterial);
+    localSmoke.userData.sharedVisualTemplate = true;
+    localRoot.add(localSmoke);
+
+    const visual: ShotEffectVisual = {
+      worldRoot,
+      flash,
+      flashMaterial,
+      outerFlame,
+      outerFlameMaterial,
+      innerFlame,
+      innerFlameMaterial,
+      muzzleSmoke,
+      smokeMaterial,
+      impactPoints,
+      impactGeometry,
+      impactPositions,
+      impactMaterial,
+      impactVelocities: new Float32Array(MAX_SHOT_IMPACT_SPARKS * 3),
+      impactGlow,
+      impactGlowMaterial,
+      impactEnd: new THREE.Vector3(),
+      localRoot,
+      localCore,
+      localFlashMaterial,
+      localFlame,
+      localFlameMaterial,
+      localSmoke,
+      localSmokeMaterial,
+      inUse: false,
+      heavyShot: false,
+      localActive: false,
+      impactActive: false,
+      shotDuration: 0.115,
+      flameLength: 0.62,
+      outerFlameRadius: 0.13,
+      innerFlameRadius: 0.065,
+      innerFlameLength: 0.42,
+      localFlameRadius: 0.085,
+      localFlameLength: 0.51,
+      impactCount: 0,
+    };
+    this.shotEffectPool.push(visual);
+    return visual;
+  }
+
+  private acquireShotEffect(
+    origin: THREE.Vector3,
+    direction: THREE.Vector3,
+    endpoint: THREE.Vector3,
+    tint: number,
+    weaponId: WeaponId | undefined,
+    eventId: number,
+    reachedSurface: boolean,
+  ): ShotEffectVisual {
+    const visual = this.shotEffectPool.find((candidate) => !candidate.inUse)
+      ?? this.createShotEffectVisual();
+    visual.inUse = true;
+    visual.heavyShot = weaponId === 'shotgun' || weaponId === 'sniper' || weaponId === 'rocket-launcher';
+    visual.localActive = false;
+    visual.localRoot.removeFromParent();
+    visual.localRoot.visible = false;
+    visual.shotDuration = visual.heavyShot ? 0.16 : 0.115;
+    visual.flameLength = visual.heavyShot ? 0.92 : weaponId === 'sidearm' ? 0.48 : 0.62;
+    visual.outerFlameRadius = visual.heavyShot ? 0.19 : 0.13;
+    visual.innerFlameRadius = visual.heavyShot ? 0.09 : 0.065;
+    visual.innerFlameLength = visual.flameLength * 0.68;
+
+    visual.flashMaterial.color.setHex(tint);
+    visual.flashMaterial.opacity = 0.95;
+    visual.flash.position.copy(origin).addScaledVector(direction, 0.48);
+    visual.flash.scale.set(0.115 * 0.72, 0.115 * 0.72, 0.115 * 1.9);
+    visual.flash.quaternion.setFromUnitVectors(FORWARD, direction);
+
+    visual.outerFlameMaterial.opacity = 0.82;
+    visual.outerFlame.scale.set(visual.outerFlameRadius, visual.flameLength, visual.outerFlameRadius);
+    visual.outerFlame.quaternion.setFromUnitVectors(UP, direction);
+    visual.outerFlame.position.copy(origin).addScaledVector(direction, visual.flameLength * 0.52 + 0.14);
+
+    visual.innerFlameMaterial.opacity = 1;
+    visual.innerFlame.scale.set(visual.innerFlameRadius, visual.innerFlameLength, visual.innerFlameRadius);
+    visual.innerFlame.quaternion.copy(visual.outerFlame.quaternion);
+    visual.innerFlame.position.copy(origin).addScaledVector(direction, visual.flameLength * 0.37 + 0.1);
+
+    visual.smokeMaterial.opacity = visual.heavyShot ? 0.2 : 0.11;
+    visual.muzzleSmoke.scale.setScalar(0.1);
+    visual.muzzleSmoke.position.copy(origin).addScaledVector(direction, 0.34);
+
+    visual.impactActive = reachedSurface && weaponId !== 'rocket-launcher';
+    visual.impactPoints.visible = visual.impactActive;
+    visual.impactGlow.visible = visual.impactActive;
+    visual.impactEnd.copy(endpoint);
+    visual.impactCount = visual.impactActive ? (weaponId === 'shotgun' ? 15 : 9) : 0;
+    visual.impactGeometry.setDrawRange(0, visual.impactCount);
+    visual.impactMaterial.size = weaponId === 'shotgun' ? 0.075 : 0.055;
+    visual.impactMaterial.opacity = 0.95;
+    visual.impactGlowMaterial.opacity = 0.76;
+    visual.impactGlow.position.copy(endpoint);
+    visual.impactGlow.scale.setScalar(0.08);
+    if (visual.impactActive) {
+      const random = seededRandom(eventId * 0x9e3779b1);
+      for (let index = 0; index < visual.impactCount; index += 1) {
+        visual.impactPositions.setXYZ(index, endpoint.x, endpoint.y, endpoint.z);
+        const offset = index * 3;
+        visual.impactVelocities[offset] = (random() - 0.5) * 4.2 - direction.x * 1.6;
+        visual.impactVelocities[offset + 1] = 0.8 + random() * 3.2 - direction.y;
+        visual.impactVelocities[offset + 2] = (random() - 0.5) * 4.2 - direction.z * 1.6;
+      }
+      visual.impactPositions.needsUpdate = true;
+    }
+    return visual;
+  }
+
+  private activateLocalShotEffect(
+    visual: ShotEffectVisual,
+    parent: THREE.Group,
+    muzzle: THREE.Vector3,
+    tint: number,
+  ): void {
+    visual.localActive = true;
+    visual.localRoot.visible = true;
+    visual.localRoot.position.copy(muzzle);
+    visual.localFlashMaterial.color.setHex(tint).lerp(WHITE, 0.42);
+    visual.localFlashMaterial.opacity = 1;
+    visual.localCore.scale.set(0.13 * 0.9, 0.13 * 0.9, 0.13 * 2.3);
+    visual.localFlameRadius = visual.heavyShot ? 0.12 : 0.085;
+    visual.localFlameLength = visual.flameLength * 0.82;
+    visual.localFlameMaterial.opacity = 0.95;
+    visual.localFlame.scale.set(visual.localFlameRadius, visual.localFlameLength, visual.localFlameRadius);
+    visual.localFlame.position.set(0, 0, -visual.flameLength * 0.38);
+    visual.localSmokeMaterial.opacity = visual.heavyShot ? 0.18 : 0.08;
+    visual.localSmoke.scale.setScalar(0.07);
+    visual.localSmoke.position.set(0, 0, -0.16);
+    parent.add(visual.localRoot);
+  }
+
+  private updateShotEffect(visual: ShotEffectVisual, progress: number): void {
+    visual.flashMaterial.opacity = (1 - progress) * 0.95;
+    visual.outerFlameMaterial.opacity = (1 - progress) * 0.82;
+    visual.innerFlameMaterial.opacity = (1 - progress) * (1 - progress);
+    visual.smokeMaterial.opacity = (1 - progress) * (visual.heavyShot ? 0.2 : 0.11);
+    visual.flash.scale.multiplyScalar(0.93);
+    visual.outerFlame.scale.set(
+      visual.outerFlameRadius * (1 - progress * 0.42),
+      visual.flameLength * (1 - progress * 0.72),
+      visual.outerFlameRadius * (1 - progress * 0.42),
+    );
+    visual.innerFlame.scale.set(
+      visual.innerFlameRadius * (1 - progress * 0.58),
+      visual.innerFlameLength * (1 - progress * 0.58),
+      visual.innerFlameRadius * (1 - progress * 0.58),
+    );
+    visual.muzzleSmoke.scale.setScalar(0.1 * (0.7 + progress * (visual.heavyShot ? 5.2 : 3.2)));
+    visual.muzzleSmoke.position.y += 0.0035;
+    if (visual.impactActive) {
+      visual.impactMaterial.opacity = (1 - progress) * 0.95;
+      for (let index = 0; index < visual.impactCount; index += 1) {
+        const offset = index * 3;
+        visual.impactPositions.setXYZ(
+          index,
+          visual.impactEnd.x + visual.impactVelocities[offset]! * progress * 0.18,
+          visual.impactEnd.y + visual.impactVelocities[offset + 1]! * progress * 0.18 - progress * progress * 0.22,
+          visual.impactEnd.z + visual.impactVelocities[offset + 2]! * progress * 0.18,
+        );
+      }
+      visual.impactPositions.needsUpdate = true;
+      visual.impactGlowMaterial.opacity = (1 - progress) * 0.76;
+    }
+    if (visual.localActive) {
+      const localProgress = clamp01(progress * visual.shotDuration / 0.072);
+      visual.localRoot.visible = localProgress < 1;
+      visual.localFlashMaterial.opacity = 1 - localProgress;
+      visual.localFlameMaterial.opacity = (1 - localProgress) * 0.95;
+      visual.localSmokeMaterial.opacity = (1 - localProgress) * (visual.heavyShot ? 0.18 : 0.08);
+      visual.localCore.scale.multiplyScalar(0.92);
+      visual.localFlame.scale.set(
+        visual.localFlameRadius * (1 - localProgress * 0.45),
+        visual.localFlameLength * (1 - localProgress * 0.7),
+        visual.localFlameRadius * (1 - localProgress * 0.45),
+      );
+      visual.localSmoke.scale.setScalar(0.07 * (0.75 + localProgress * (visual.heavyShot ? 4.8 : 2.8)));
+      visual.localSmoke.position.y += 0.0025;
+    }
+  }
+
+  private releaseShotEffect(visual: ShotEffectVisual): void {
+    visual.worldRoot.removeFromParent();
+    visual.localRoot.removeFromParent();
+    visual.impactGeometry.setDrawRange(0, 0);
+    visual.impactPoints.visible = false;
+    visual.impactGlow.visible = false;
+    visual.localRoot.visible = false;
+    visual.localActive = false;
+    visual.impactActive = false;
+    visual.inUse = false;
+  }
+
+  private createHitRippleVisual(): HitRippleVisual {
+    const color = new THREE.Color(0xffffff);
+    const opacity = { value: 0 };
+    const material = new THREE.ShaderMaterial({
+      uniforms: {
+        uColor: { value: color },
+        uOpacity: opacity,
+      },
+      transparent: true,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      vertexShader: /* glsl */ `
+        varying vec3 vNormal;
+        varying vec3 vView;
+        void main() {
+          vec4 viewPosition = modelViewMatrix * vec4(position, 1.0);
+          vNormal = normalize(normalMatrix * normal);
+          vView = normalize(-viewPosition.xyz);
+          gl_Position = projectionMatrix * viewPosition;
+        }
+      `,
+      fragmentShader: /* glsl */ `
+        varying vec3 vNormal;
+        varying vec3 vView;
+        uniform vec3 uColor;
+        uniform float uOpacity;
+        void main() {
+          float fresnel = pow(1.0 - abs(dot(normalize(vNormal), normalize(vView))), 2.35);
+          float alpha = (0.08 + fresnel * 0.92) * uOpacity;
+          gl_FragColor = vec4(uColor * (0.58 + fresnel * 0.72), alpha);
+        }
+      `,
+    });
+    const mesh = new THREE.Mesh(this.hitRippleGeometry, material);
+    mesh.userData.sharedVisualTemplate = true;
+    const visual: HitRippleVisual = {
+      mesh,
+      color,
+      opacity,
+      inUse: false,
+      baseOpacity: 0,
+      endScale: 1,
+    };
+    this.hitRipplePool.push(visual);
+    return visual;
+  }
+
+  private acquireHitRipple(
+    position: Vec3,
+    verticalOffset: number,
+    profile: ReturnType<typeof hitVisualProfile>,
+  ): HitRippleVisual {
+    const visual = this.hitRipplePool.find((candidate) => !candidate.inUse)
+      ?? this.createHitRippleVisual();
+    visual.inUse = true;
+    visual.baseOpacity = profile.opacity;
+    visual.endScale = profile.endScale;
+    visual.color.setHex(profile.color);
+    visual.opacity.value = profile.opacity;
+    visual.mesh.position.set(position.x, position.y + verticalOffset, position.z);
+    visual.mesh.scale.setScalar(0.6);
+    return visual;
+  }
+
+  private releaseHitRipple(visual: HitRippleVisual): void {
+    visual.mesh.removeFromParent();
+    visual.opacity.value = 0;
+    visual.inUse = false;
   }
 
   private createEventEffect(event: GameEvent, state: MatchState): void {
@@ -3612,262 +4188,57 @@ export class ArenaRenderer {
       const direction = turretShot
         ? end.clone().sub(origin).normalize()
         : actorDirection;
-      const tracePoints = ends.flatMap((endpoint) => [origin, endpoint]);
-      const geometry = new THREE.BufferGeometry().setFromPoints(tracePoints);
       const tint = event.weaponId ? WEAPONS[event.weaponId].tint : TEAM_COLORS[actor.team].glow;
-      const material = new THREE.LineBasicMaterial({
-        color: tint,
-        transparent: true,
-        opacity: 0.32,
-        blending: THREE.AdditiveBlending,
-        depthWrite: false,
-      });
-      const line = new THREE.LineSegments(geometry, material);
-      const effect = new THREE.Group();
-      effect.add(line);
-      const coreMaterial = new THREE.LineBasicMaterial({
-        color: new THREE.Color(tint).lerp(new THREE.Color(0xffffff), 0.64),
-        transparent: true,
-        opacity: 0.96,
-        blending: THREE.AdditiveBlending,
-        depthWrite: false,
-      });
-      const coreLine = new THREE.LineSegments(geometry.clone(), coreMaterial);
-      coreLine.scale.set(1, 1, 1);
-      effect.add(coreLine);
-      const flashMaterial = new THREE.MeshBasicMaterial({
-        color: tint,
-        transparent: true,
-        opacity: 0.95,
-        blending: THREE.AdditiveBlending,
-        depthWrite: false,
-      });
-      const flash = new THREE.Mesh(this.shotFlashGeometry, flashMaterial);
-      flash.userData.sharedEffectGeometry = true;
-      flash.position.copy(origin).addScaledVector(direction, 0.48);
-      flash.scale.set(0.115 * 0.72, 0.115 * 0.72, 0.115 * 1.9);
-      flash.quaternion.setFromUnitVectors(FORWARD, direction);
-      effect.add(flash);
       const heavyShot = event.weaponId === 'shotgun'
         || event.weaponId === 'sniper'
         || event.weaponId === 'rocket-launcher';
-      const flameLength = heavyShot ? 0.92 : event.weaponId === 'sidearm' ? 0.48 : 0.62;
-      const outerFlameMaterial = new THREE.MeshBasicMaterial({
-        color: 0xff793d,
-        transparent: true,
-        opacity: 0.82,
-        blending: THREE.AdditiveBlending,
-        depthWrite: false,
-        side: THREE.DoubleSide,
-      });
-      const outerFlame = new THREE.Mesh(
-        this.muzzleConeGeometry,
-        outerFlameMaterial,
-      );
-      outerFlame.userData.sharedEffectGeometry = true;
-      const outerFlameRadius = heavyShot ? 0.19 : 0.13;
-      outerFlame.scale.set(outerFlameRadius, flameLength, outerFlameRadius);
-      outerFlame.quaternion.setFromUnitVectors(UP, direction);
-      outerFlame.position.copy(origin).addScaledVector(direction, flameLength * 0.52 + 0.14);
-      effect.add(outerFlame);
-      const innerFlameMaterial = new THREE.MeshBasicMaterial({
-        color: 0xfff2c4,
-        transparent: true,
-        opacity: 1,
-        blending: THREE.AdditiveBlending,
-        depthWrite: false,
-      });
-      const innerFlame = new THREE.Mesh(
-        this.muzzleConeGeometry,
-        innerFlameMaterial,
-      );
-      innerFlame.userData.sharedEffectGeometry = true;
-      const innerFlameRadius = heavyShot ? 0.09 : 0.065;
-      const innerFlameLength = flameLength * 0.68;
-      innerFlame.scale.set(innerFlameRadius, innerFlameLength, innerFlameRadius);
-      innerFlame.quaternion.copy(outerFlame.quaternion);
-      innerFlame.position.copy(origin).addScaledVector(direction, flameLength * 0.37 + 0.1);
-      effect.add(innerFlame);
-      const smokeMaterial = new THREE.MeshBasicMaterial({
-        color: 0x8ea1a0,
-        transparent: true,
-        opacity: heavyShot ? 0.2 : 0.11,
-        depthWrite: false,
-      });
-      const muzzleSmoke = new THREE.Mesh(this.shotSmokeGeometry, smokeMaterial);
-      muzzleSmoke.userData.sharedEffectGeometry = true;
-      muzzleSmoke.scale.setScalar(0.1);
-      muzzleSmoke.position.copy(origin).addScaledVector(direction, 0.34);
-      effect.add(muzzleSmoke);
-
-      const reachedSurface = event.impact === true;
-      let impactMaterial: THREE.PointsMaterial | null = null;
-      let impactPositions: THREE.BufferAttribute | null = null;
-      let impactVelocities: THREE.Vector3[] = [];
-      let impactGlowMaterial: THREE.MeshBasicMaterial | null = null;
-      if (reachedSurface && event.weaponId !== 'rocket-launcher') {
-        const sparkRandom = seededRandom(event.id * 0x9e3779b1);
-        const sparkCount = event.weaponId === 'shotgun' ? 15 : 9;
-        const sparkValues = new Float32Array(sparkCount * 3);
-        impactVelocities = [];
-        for (let index = 0; index < sparkCount; index += 1) {
-          sparkValues[index * 3] = end.x;
-          sparkValues[index * 3 + 1] = end.y;
-          sparkValues[index * 3 + 2] = end.z;
-          impactVelocities.push(new THREE.Vector3(
-            (sparkRandom() - 0.5) * 4.2 - direction.x * 1.6,
-            0.8 + sparkRandom() * 3.2 - direction.y,
-            (sparkRandom() - 0.5) * 4.2 - direction.z * 1.6,
-          ));
-        }
-        const sparkGeometry = new THREE.BufferGeometry();
-        impactPositions = new THREE.BufferAttribute(sparkValues, 3);
-        sparkGeometry.setAttribute('position', impactPositions);
-        impactMaterial = new THREE.PointsMaterial({
-          color: 0xffd08a,
-          size: event.weaponId === 'shotgun' ? 0.075 : 0.055,
-          transparent: true,
-          opacity: 0.95,
-          blending: THREE.AdditiveBlending,
-          depthWrite: false,
-          sizeAttenuation: true,
-        });
-        effect.add(new THREE.Points(sparkGeometry, impactMaterial));
-        impactGlowMaterial = new THREE.MeshBasicMaterial({
-          color: 0xffb56d,
-          transparent: true,
-          opacity: 0.76,
-          blending: THREE.AdditiveBlending,
-          depthWrite: false,
-        });
-        const impactGlow = new THREE.Mesh(this.shotSmokeGeometry, impactGlowMaterial);
-        impactGlow.userData.sharedEffectGeometry = true;
-        impactGlow.scale.setScalar(0.08);
-        impactGlow.position.copy(end);
-        effect.add(impactGlow);
-      }
-      this.scene.add(effect);
+      const shotDuration = heavyShot ? 0.16 : 0.115;
+      const trace = this.acquireShotTrace(origin, ends, tint);
+      this.scene.add(trace.root);
       this.effects.push({
-        object: effect,
+        object: trace.root,
         age: 0,
-        duration: heavyShot ? 0.16 : 0.115,
+        duration: shotDuration,
         update: (progress) => {
-          material.opacity = (1 - progress) * 0.32;
-          coreMaterial.opacity = (1 - progress) * 0.96;
-          flashMaterial.opacity = (1 - progress) * 0.95;
-          outerFlameMaterial.opacity = (1 - progress) * 0.82;
-          innerFlameMaterial.opacity = (1 - progress) * (1 - progress);
-          smokeMaterial.opacity = (1 - progress) * (heavyShot ? 0.2 : 0.11);
-          flash.scale.multiplyScalar(0.93);
-          outerFlame.scale.set(
-            outerFlameRadius * (1 - progress * 0.42),
-            flameLength * (1 - progress * 0.72),
-            outerFlameRadius * (1 - progress * 0.42),
-          );
-          innerFlame.scale.set(
-            innerFlameRadius * (1 - progress * 0.58),
-            innerFlameLength * (1 - progress * 0.58),
-            innerFlameRadius * (1 - progress * 0.58),
-          );
-          muzzleSmoke.scale.setScalar(0.1 * (0.7 + progress * (heavyShot ? 5.2 : 3.2)));
-          muzzleSmoke.position.y += 0.0035;
-          if (impactMaterial && impactPositions) {
-            impactMaterial.opacity = (1 - progress) * 0.95;
-            for (let index = 0; index < impactVelocities.length; index += 1) {
-              const velocity = impactVelocities[index]!;
-              impactPositions.setXYZ(
-                index,
-                end.x + velocity.x * progress * 0.18,
-                end.y + velocity.y * progress * 0.18 - progress * progress * 0.22,
-                end.z + velocity.z * progress * 0.18,
-              );
-            }
-            impactPositions.needsUpdate = true;
-          }
-          if (impactGlowMaterial) impactGlowMaterial.opacity = (1 - progress) * 0.76;
+          trace.trailMaterial.opacity = (1 - progress) * 0.32;
+          trace.coreMaterial.opacity = (1 - progress) * 0.96;
         },
+        release: () => this.releaseShotTrace(trace),
+      });
+      const reachedSurface = event.impact === true;
+      const shotEffect = this.acquireShotEffect(
+        origin,
+        direction,
+        end,
+        tint,
+        event.weaponId,
+        event.id,
+        reachedSurface,
+      );
+      this.scene.add(shotEffect.worldRoot);
+      this.effects.push({
+        object: shotEffect.worldRoot,
+        age: 0,
+        duration: shotDuration,
+        update: (progress) => this.updateShotEffect(shotEffect, progress),
+        release: () => this.releaseShotEffect(shotEffect),
       });
       if (event.message !== 'Torreta') {
         const rig = this.playerRigs.get(event.actorId);
+        const recoilStrength = event.weaponId
+          ? visualRecoilImpulse(WEAPONS[event.weaponId].recoil)
+          : 0.12;
         if (rig) {
-          const recoilStrength = event.weaponId === 'rocket-launcher'
-            ? 1.35
-            : event.weaponId === 'sniper' || event.weaponId === 'shotgun'
-              ? 1.15
-              : event.weaponId === 'sidearm'
-                ? 0.82
-                : 0.68;
           rig.recoil = Math.min(1.5, rig.recoil + recoilStrength);
           rig.fireTimer = 0.55;
         }
         if (event.actorId === this.localPlayerId) {
-          this.weaponKick = 1;
+          this.weaponKick = Math.min(1.5, this.weaponKick + recoilStrength);
           const viewMuzzle = this.viewWeaponModel
             ? getWeaponAnchor(this.viewWeaponModel, 'muzzle')
             : null;
           if (this.viewWeaponModel && viewMuzzle) {
-            const localFlash = new THREE.Group();
-            localFlash.position.copy(viewMuzzle);
-            const localFlashMaterial = new THREE.MeshBasicMaterial({
-              color: new THREE.Color(tint).lerp(new THREE.Color(0xffffff), 0.42),
-              transparent: true,
-              opacity: 1,
-              blending: THREE.AdditiveBlending,
-              depthWrite: false,
-            });
-            const localCore = new THREE.Mesh(this.shotFlashGeometry, localFlashMaterial);
-            localCore.userData.sharedEffectGeometry = true;
-            localCore.scale.set(0.13 * 0.9, 0.13 * 0.9, 0.13 * 2.3);
-            localFlash.add(localCore);
-            const localFlameMaterial = new THREE.MeshBasicMaterial({
-              color: 0xff8a45,
-              transparent: true,
-              opacity: 0.95,
-              blending: THREE.AdditiveBlending,
-              depthWrite: false,
-              side: THREE.DoubleSide,
-            });
-            const localFlame = new THREE.Mesh(
-              this.muzzleConeGeometry,
-              localFlameMaterial,
-            );
-            localFlame.userData.sharedEffectGeometry = true;
-            const localFlameRadius = heavyShot ? 0.12 : 0.085;
-            const localFlameLength = flameLength * 0.82;
-            localFlame.scale.set(localFlameRadius, localFlameLength, localFlameRadius);
-            localFlame.quaternion.setFromUnitVectors(UP, FORWARD);
-            localFlame.position.z = -flameLength * 0.38;
-            localFlash.add(localFlame);
-            const localSmokeMaterial = new THREE.MeshBasicMaterial({
-              color: 0xa7b3af,
-              transparent: true,
-              opacity: heavyShot ? 0.18 : 0.08,
-              depthWrite: false,
-            });
-            const localSmoke = new THREE.Mesh(this.shotSmokeGeometry, localSmokeMaterial);
-            localSmoke.userData.sharedEffectGeometry = true;
-            localSmoke.scale.setScalar(0.07);
-            localSmoke.position.z = -0.16;
-            localFlash.add(localSmoke);
-            this.viewWeaponModel.add(localFlash);
-            this.effects.push({
-              object: localFlash,
-              age: 0,
-              duration: 0.072,
-              update: (progress) => {
-                localFlashMaterial.opacity = 1 - progress;
-                localFlameMaterial.opacity = (1 - progress) * 0.95;
-                localSmokeMaterial.opacity = (1 - progress) * (heavyShot ? 0.18 : 0.08);
-                localCore.scale.multiplyScalar(0.92);
-                localFlame.scale.set(
-                  localFlameRadius * (1 - progress * 0.45),
-                  localFlameLength * (1 - progress * 0.7),
-                  localFlameRadius * (1 - progress * 0.45),
-                );
-                localSmoke.scale.setScalar(0.07 * (0.75 + progress * (heavyShot ? 4.8 : 2.8)));
-                localSmoke.position.y += 0.0025;
-              },
-            });
+            this.activateLocalShotEffect(shotEffect, this.viewWeaponModel, viewMuzzle, tint);
           }
         }
       }
@@ -4067,51 +4438,103 @@ export class ArenaRenderer {
     if (event.type === 'hit' || event.type === 'shield-break' || event.type === 'melee') {
       const position = event.position ?? (event.targetId ? state.players[event.targetId]?.position : undefined);
       if (!position) return;
-      const opacity = { value: 0.68 };
-      const material = new THREE.ShaderMaterial({
-        uniforms: {
-          uColor: { value: new THREE.Color(event.type === 'shield-break' ? 0x73f4ee : 0xe4b3d8) },
-          uOpacity: opacity,
-        },
-        transparent: true,
-        blending: THREE.AdditiveBlending,
-        depthWrite: false,
-        side: THREE.DoubleSide,
-        vertexShader: /* glsl */ `
-          varying vec3 vNormal;
-          varying vec3 vView;
-          void main() {
-            vec4 viewPosition = modelViewMatrix * vec4(position, 1.0);
-            vNormal = normalize(normalMatrix * normal);
-            vView = normalize(-viewPosition.xyz);
-            gl_Position = projectionMatrix * viewPosition;
-          }
-        `,
-        fragmentShader: /* glsl */ `
-          varying vec3 vNormal;
-          varying vec3 vView;
-          uniform vec3 uColor;
-          uniform float uOpacity;
-          void main() {
-            float fresnel = pow(1.0 - abs(dot(normalize(vNormal), normalize(vView))), 2.35);
-            float alpha = (0.08 + fresnel * 0.92) * uOpacity;
-            gl_FragColor = vec4(uColor * (0.58 + fresnel * 0.72), alpha);
-          }
-        `,
-      });
-      const ripple = new THREE.Mesh(new THREE.SphereGeometry(0.48, 18, 12), material);
+      const profile = hitVisualProfile(event);
       const verticalOffset = event.type === 'hit' ? 0 : 0.9;
-      ripple.position.set(position.x, position.y + verticalOffset, position.z);
-      this.scene.add(ripple);
+      const ripple = this.acquireHitRipple(position, verticalOffset, profile);
+      this.scene.add(ripple.mesh);
       this.effects.push({
-        object: ripple,
+        object: ripple.mesh,
         age: 0,
-        duration: 0.24,
+        duration: profile.duration,
         update: (progress) => {
-          ripple.scale.setScalar(0.6 + progress * 1.8);
-          opacity.value = (1 - progress) * 0.68;
+          ripple.mesh.scale.setScalar(0.6 + progress * (ripple.endScale - 0.6));
+          ripple.opacity.value = (1 - progress) * ripple.baseOpacity;
         },
+        release: () => this.releaseHitRipple(ripple),
       });
+
+      if (profile.fatalHeadshot) {
+        const burst = new THREE.Group();
+        burst.position.set(position.x, position.y, position.z);
+        const coreMaterial = new THREE.MeshBasicMaterial({
+          color: 0xfff2cc,
+          transparent: true,
+          opacity: 1,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+          toneMapped: false,
+        });
+        const core = new THREE.Mesh(this.shotFlashGeometry, coreMaterial);
+        core.userData.sharedEffectGeometry = true;
+        core.scale.setScalar(0.13);
+        burst.add(core);
+
+        const ringMaterial = new THREE.MeshBasicMaterial({
+          color: profile.color,
+          transparent: true,
+          opacity: 0.92,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+          side: THREE.DoubleSide,
+          toneMapped: false,
+        });
+        const ring = new THREE.Mesh(new THREE.TorusGeometry(0.18, 0.018, 8, 28), ringMaterial);
+        ring.rotation.x = Math.PI / 2;
+        burst.add(ring);
+
+        const sparkCount = 14;
+        const sparkValues = new Float32Array(sparkCount * 3);
+        const sparkGeometry = new THREE.BufferGeometry();
+        const sparkPositions = new THREE.BufferAttribute(sparkValues, 3);
+        sparkGeometry.setAttribute('position', sparkPositions);
+        const sparkMaterial = new THREE.PointsMaterial({
+          color: 0xffc276,
+          size: 0.065,
+          transparent: true,
+          opacity: 1,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+          sizeAttenuation: true,
+          toneMapped: false,
+        });
+        const random = seededRandom(event.id * 0x85ebca6b);
+        const sparkVelocities = Array.from({ length: sparkCount }, () => {
+          const azimuth = random() * Math.PI * 2;
+          const elevation = (random() - 0.3) * 1.25;
+          const speed = 1.8 + random() * 3.8;
+          return new THREE.Vector3(
+            Math.cos(azimuth) * Math.cos(elevation) * speed,
+            Math.sin(elevation) * speed + 1.15,
+            Math.sin(azimuth) * Math.cos(elevation) * speed,
+          );
+        });
+        burst.add(new THREE.Points(sparkGeometry, sparkMaterial));
+        this.scene.add(burst);
+        this.effects.push({
+          object: burst,
+          age: 0,
+          duration: profile.duration,
+          update: (progress) => {
+            core.scale.setScalar(0.13 + progress * 0.44);
+            coreMaterial.opacity = (1 - progress) * (1 - progress);
+            ring.scale.setScalar(0.72 + progress * 3.2);
+            ring.rotation.z = progress * 0.9;
+            ringMaterial.opacity = (1 - progress) * 0.92;
+            sparkMaterial.opacity = 1 - progress;
+            const elapsed = progress * profile.duration;
+            for (let index = 0; index < sparkVelocities.length; index += 1) {
+              const velocity = sparkVelocities[index]!;
+              sparkPositions.setXYZ(
+                index,
+                velocity.x * elapsed,
+                velocity.y * elapsed - 4.8 * elapsed * elapsed,
+                velocity.z * elapsed,
+              );
+            }
+            sparkPositions.needsUpdate = true;
+          },
+        });
+      }
     }
   }
 
@@ -4123,8 +4546,11 @@ export class ArenaRenderer {
       const progress = clamp01(effect.age / effect.duration);
       effect.update(progress);
       if (progress < 1) continue;
-      effect.object.removeFromParent();
-      disposeObject(effect.object);
+      if (effect.release) effect.release();
+      else {
+        effect.object.removeFromParent();
+        disposeObject(effect.object);
+      }
       this.effects.splice(index, 1);
     }
   }
@@ -4185,11 +4611,10 @@ export class ArenaRenderer {
     if (firstPerson && operatingTurret) {
       this.towerTurret.updateWorldMatrix(true, true);
       this.towerTurretCameraMount.getWorldPosition(this.camera.position);
-      const damageShake = this.damagePulse * 0.012;
       this.camera.rotation.set(
-        state.tower.turretPitch + Math.sin(worldTime * 58) * damageShake,
-        state.tower.turretYaw + Math.cos(worldTime * 47) * damageShake,
-        Math.sin(worldTime * 69) * damageShake * 0.24,
+        state.tower.turretPitch,
+        state.tower.turretYaw,
+        Math.sin(worldTime * 69) * this.damagePulse * 0.0015,
         'YXZ',
       );
       const turretFov = 68;
@@ -4205,6 +4630,19 @@ export class ArenaRenderer {
     }
 
     if (firstPerson && localPlayer && localRig && alive) {
+      const activeWeapon = localPlayer.inventory[localPlayer.activeWeapon] ?? localPlayer.inventory[0];
+      const activeDefinition = activeWeapon ? WEAPONS[activeWeapon.id] : undefined;
+      const hasOpticalZoom = Boolean(activeDefinition?.zoomFov?.length);
+      const opticalAiming = Boolean(hasOpticalZoom && this.localViewAim);
+      this.viewAimBlend = damp(
+        this.viewAimBlend,
+        opticalAiming ? 1 : 0,
+        opticalAiming ? 17 : 21,
+        delta,
+      );
+      // Halo-style optical zoom does not pull non-sniper viewmodels into a
+      // modern ADS pose. The sniper is still lowered before its scope mask wins.
+      const modelAimBlend = activeWeapon?.id === 'sniper' ? this.viewAimBlend : 0;
       const speed = Math.hypot(localPlayer.velocity.x, localPlayer.velocity.z);
       const bobAmount = localRig.moveBlend * localRig.groundBlend;
       const bobPhase = localRig.locomotionPhase;
@@ -4218,7 +4656,7 @@ export class ArenaRenderer {
         bobPhase,
         viewLocomotion,
         localRig.groundBlend,
-        this.viewAimBlend,
+        modelAimBlend,
       );
       const landingWeight = trianglePulse(
         normalizedTimer(localRig.landingTimer, 0.34),
@@ -4227,7 +4665,6 @@ export class ArenaRenderer {
         1,
       ) * localRig.landingStrength;
       const jumpWeight = trianglePulse(normalizedTimer(localRig.jumpTimer, 0.32), 0, 0.18, 1);
-      const damageShake = this.damagePulse * 0.018;
       const eyeHeight = localPlayer.height * 0.86;
       this.camera.position.copy(localRig.root.position);
       this.camera.position.y += eyeHeight
@@ -4237,25 +4674,22 @@ export class ArenaRenderer {
       this.camera.position.x += Math.cos(localPlayer.yaw) * weaponBob.x * 0.5;
       this.camera.position.z -= Math.sin(localPlayer.yaw) * weaponBob.x * 0.5;
       this.camera.rotation.set(
-        localPlayer.pitch + Math.sin(worldTime * 58) * damageShake,
-        localPlayer.yaw + Math.cos(worldTime * 47) * damageShake,
+        localPlayer.pitch,
+        localPlayer.yaw,
         weaponBob.roll * 0.45
           - localRig.strafeBlend * 0.0035 * bobAmount
-          + Math.sin(worldTime * 69) * damageShake * 0.35,
+          + Math.sin(worldTime * 69) * this.damagePulse * 0.002,
         'YXZ',
       );
 
-      const activeWeapon = localPlayer.inventory[localPlayer.activeWeapon] ?? localPlayer.inventory[0];
       this.setViewWeapon(activeWeapon?.id ?? null);
-      const aiming = Boolean(activeWeapon && this.localViewAim);
-      this.viewAimBlend = damp(this.viewAimBlend, aiming ? 1 : 0, aiming ? 17 : 21, delta);
-      const aimedFov = activeWeapon?.id === 'sniper'
-        ? SNIPER_ZOOM_FOV[this.sniperZoomLevel]
-        : activeWeapon
-          ? WEAPON_AIM_FOV[activeWeapon.id]
-          : 74;
+      const aimedFov = opticalZoomFov(
+        activeDefinition?.zoomFov,
+        hasOpticalZoom,
+        this.sniperZoomLevel,
+      );
       const targetFov = THREE.MathUtils.lerp(
-        74,
+        HIP_FIRE_FOV,
         aimedFov,
         this.viewAimBlend,
       );
@@ -4265,7 +4699,7 @@ export class ArenaRenderer {
       }
       const palette = TEAM_COLORS[localPlayer.team];
       this.viewArmMaterial.color.setHex(palette.armor);
-      this.viewModel.visible = !(activeWeapon?.id === 'sniper' && this.viewAimBlend > 0.72);
+      this.viewModel.visible = !(activeWeapon?.id === 'sniper' && opticalAiming && this.viewAimBlend > 0.72);
 
       if (this.previousViewYaw === null || this.previousViewPitch === null) {
         this.previousViewYaw = localPlayer.yaw;
@@ -4305,7 +4739,7 @@ export class ArenaRenderer {
       }
 
       const recoil = Math.max(localRig.recoil, this.weaponKick);
-      const steadying = 1 - this.viewAimBlend * 0.88;
+      const steadying = 1 - modelAimBlend * 0.88;
       const bobX = weaponBob.x;
       const bobY = weaponBob.y;
       const airDrift = (1 - localRig.groundBlend) * THREE.MathUtils.clamp(localPlayer.velocity.y / 8, -1, 1);
@@ -4313,19 +4747,19 @@ export class ArenaRenderer {
       const aimedY = activeWeapon?.id === 'sniper' ? -0.2 : -0.225;
       const aimedZ = activeWeapon?.id === 'sniper' ? -0.5 : -0.55;
       this.viewModel.position.set(
-        THREE.MathUtils.lerp(0.31, aimedX, this.viewAimBlend) + bobX,
-        THREE.MathUtils.lerp(-0.28, aimedY, this.viewAimBlend)
+        THREE.MathUtils.lerp(0.31, aimedX, modelAimBlend) + bobX,
+        THREE.MathUtils.lerp(-0.28, aimedY, modelAimBlend)
           - bobY
           - landingWeight * 0.06 * steadying
           + airDrift * 0.025 * steadying,
-        THREE.MathUtils.lerp(-0.62, aimedZ, this.viewAimBlend),
+        THREE.MathUtils.lerp(-0.62, aimedZ, modelAimBlend),
       );
       this.viewModel.rotation.set(
-        THREE.MathUtils.lerp(-0.03, 0, this.viewAimBlend)
+        THREE.MathUtils.lerp(-0.03, 0, modelAimBlend)
           + landingWeight * 0.045 * steadying
           + weaponBob.pitch,
-        THREE.MathUtils.lerp(-0.045, 0, this.viewAimBlend),
-        THREE.MathUtils.lerp(0.012, 0, this.viewAimBlend)
+        THREE.MathUtils.lerp(-0.045, 0, modelAimBlend),
+        THREE.MathUtils.lerp(0.012, 0, modelAimBlend)
           + weaponBob.roll
           - localRig.strafeBlend * 0.012 * bobAmount * steadying,
       );

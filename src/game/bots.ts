@@ -522,6 +522,7 @@ const avoidNearbyExplosives = (state: MatchState, player: PlayerState, intended:
   let dangerX = 0;
   let dangerZ = 0;
   for (const projectile of state.projectiles) {
+    if (projectile.kind === 'bullet') continue;
     if (!projectile.alive || (projectile.ownerId === player.id && projectile.kind !== 'grenade')) continue;
     const range = horizontalDistance(player.position, projectile.position);
     if (range > projectile.blastRadius + 3 || range < 0.01) continue;

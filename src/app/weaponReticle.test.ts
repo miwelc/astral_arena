@@ -23,7 +23,7 @@ describe('weapon-specific reticles', () => {
   it('matches wide sights to the authoritative projectile cone', () => {
     expect(WEAPONS.shotgun.pellets).toBe(12);
     expect(WEAPONS.shotgun.spread).toBeGreaterThan(WEAPONS['pulse-rifle'].spread);
-    expect(WEAPONS['pulse-rifle'].spread).toBeGreaterThan(WEAPONS.sidearm.spread);
+    expect(WEAPONS['pulse-rifle'].maxSpread).toBeGreaterThan(WEAPONS.sidearm.maxSpread);
     expect(WEAPONS.sniper.spread).toBeLessThan(0.001);
   });
 });

@@ -2,7 +2,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { GameEvent, WeaponId } from '../game/types';
 import {
+  COMBAT_FEEDBACK_SOUND_PROFILE,
   GameAudio,
+  hitMarkerKindFor,
+  killConfirmationKindFor,
   MOVEMENT_SOUND_PROFILE,
   SHIELD_RECHARGE_SOUND_PROFILE,
   shieldRechargeCueWasInterrupted,
@@ -55,6 +58,112 @@ describe('procedural weapon sound profiles', () => {
     expect(shotgun.body.to).toBeLessThan(rifle.body.to);
     expect(rocket.body.from).toBeLessThan(shotgun.body.from);
     expect(rocket.tail.duration).toBeGreaterThan(shotgun.tail.duration);
+  });
+});
+
+describe('combat confirmation audio', () => {
+  it('discards silent event history instead of replaying it after audio unlocks', () => {
+    const audio = new GameAudio();
+    const pastShot: GameEvent = {
+      id: 7,
+      time: 1,
+      type: 'shot',
+      actorId: 'local',
+      weaponId: 'battle-rifle',
+    };
+    audio.consume([pastShot], 'local');
+
+    let playedShots = 0;
+    Object.assign(audio, {
+      context: {} as AudioContext,
+      master: {} as GainNode,
+      shot: () => { playedShots += 1; },
+    });
+    audio.consume([pastShot], 'local');
+    expect(playedShots).toBe(0);
+
+    audio.consume([
+      pastShot,
+      { ...pastShot, id: 8, time: 1.1 },
+    ], 'local');
+    expect(playedShots).toBe(1);
+  });
+
+  it('uses one kill confirmation instead of stacking ordinary cues on a fatal shield break', () => {
+    const audio = new GameAudio();
+    const hitMarker = vi.fn();
+    const bulletImpact = vi.fn();
+    const shieldBreak = vi.fn();
+    const killConfirmed = vi.fn();
+    Object.assign(audio, {
+      context: {} as AudioContext,
+      master: {} as GainNode,
+      hitMarker,
+      bulletImpact,
+      shieldBreak,
+      killConfirmed,
+    });
+    const events: GameEvent[] = [
+      {
+        id: 1,
+        time: 2,
+        type: 'hit',
+        actorId: 'local',
+        targetId: 'enemy',
+        fatal: true,
+        headshot: true,
+        shieldDamage: 8,
+        healthDamage: 70,
+      },
+      { id: 2, time: 2, type: 'shield-break', actorId: 'local', targetId: 'enemy' },
+      { id: 3, time: 2, type: 'kill', actorId: 'local', targetId: 'enemy', fatal: true, headshot: true },
+    ];
+
+    audio.consume(events, 'local');
+
+    expect(hitMarker).not.toHaveBeenCalled();
+    expect(bulletImpact).not.toHaveBeenCalled();
+    expect(shieldBreak).not.toHaveBeenCalled();
+    expect(killConfirmed).toHaveBeenCalledOnce();
+    expect(killConfirmed).toHaveBeenCalledWith('headshot');
+  });
+
+  it('selects shield, exposed-health and mixed hit confirmations from authoritative damage', () => {
+    expect(hitMarkerKindFor({ shieldDamage: 13, healthDamage: 0 })).toBe('shield');
+    expect(hitMarkerKindFor({ shieldDamage: 0, healthDamage: 13 })).toBe('health');
+    expect(hitMarkerKindFor({ shieldDamage: 4, healthDamage: 9 })).toBe('mixed');
+    expect(hitMarkerKindFor({})).toBe('generic');
+  });
+
+  it('keeps shield contact brighter than the exposed-armour confirmation', () => {
+    const shieldFloor = Math.min(...COMBAT_FEEDBACK_SOUND_PROFILE.shieldHit.map((tone) => tone.from));
+    const healthCeiling = Math.max(...COMBAT_FEEDBACK_SOUND_PROFILE.healthHit.map((tone) => tone.from));
+    expect(shieldFloor).toBeGreaterThan(healthCeiling);
+    expect(COMBAT_FEEDBACK_SOUND_PROFILE.shieldHit).not.toEqual(COMBAT_FEEDBACK_SOUND_PROFILE.healthHit);
+  });
+
+  it('reserves the distinct headshot cue for a confirmed lethal head hit', () => {
+    expect(killConfirmationKindFor({ headshot: true, fatal: true })).toBe('headshot');
+    expect(killConfirmationKindFor({ headshot: true, fatal: false })).toBe('standard');
+    expect(killConfirmationKindFor({ headshot: false, fatal: true })).toBe('standard');
+
+    const headshot = COMBAT_FEEDBACK_SOUND_PROFILE.headshotConfirmed;
+    const standard = COMBAT_FEEDBACK_SOUND_PROFILE.killConfirmed;
+    expect(headshot).not.toEqual(standard);
+    expect(Math.max(...headshot.map((tone) => tone.from))).toBeGreaterThan(
+      Math.max(...standard.map((tone) => tone.from)),
+    );
+  });
+
+  it('keeps every combat confirmation short and within safe gain bounds', () => {
+    for (const profile of Object.values(COMBAT_FEEDBACK_SOUND_PROFILE)) {
+      for (const tone of profile) {
+        expect(tone.duration).toBeGreaterThan(0);
+        expect(tone.duration).toBeLessThan(0.2);
+        expect(tone.volume).toBeGreaterThan(0);
+        expect(tone.volume).toBeLessThanOrEqual(1);
+      }
+    }
   });
 });
 

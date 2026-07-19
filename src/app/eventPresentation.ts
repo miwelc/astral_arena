@@ -5,6 +5,7 @@ export type EventPresentationTone = 'success' | 'danger' | 'team' | 'objective' 
 export type EventPresentationPlacement = 'center' | 'feed' | 'both';
 export type EventPresentationCue =
   | 'kill-confirmed'
+  | 'headshot-confirmed'
   | 'player-down'
   | 'teammate-down'
   | 'objective-positive'
@@ -106,14 +107,25 @@ const presentKill = (event: GameEvent, state: MatchState, localPlayerId: string)
   }
 
   if (killer?.id === localPlayerId) {
+    if (event.headshot === true && event.fatal === true) {
+      return basePresentation(event, 'TIRO A LA CABEZA', {
+        detail: playerName(victim),
+        feedText,
+        placement: 'both',
+        tone: 'success',
+        cue: 'headshot-confirmed',
+        priority: 72,
+        durationMs: 1550,
+      });
+    }
     return basePresentation(event, 'ENEMIGO ABATIDO', {
       detail: playerName(victim),
       feedText,
-      placement: 'both',
+      placement: 'feed',
       tone: 'success',
       cue: 'kill-confirmed',
-      priority: 64,
-      durationMs: 1800,
+      priority: 34,
+      durationMs: 2600,
     });
   }
 

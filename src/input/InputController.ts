@@ -25,6 +25,12 @@ export class InputController {
     public readonly element: HTMLElement,
     private readonly onLockChange?: (locked: boolean) => void,
     private readonly onZoomStep?: (direction: -1 | 1) => void,
+    /**
+     * Notifies the network layer immediately when a digital combat control
+     * changes. Periodic input snapshots alone can miss a click shorter than
+     * their send interval.
+     */
+    private readonly onActionChange?: () => void,
   ) {
     element.tabIndex = 0;
     element.addEventListener('click', this.requestLock);
@@ -108,25 +114,31 @@ export class InputController {
   private preventDefault = (event: Event): void => event.preventDefault();
 
   private handleKeyDown = (event: KeyboardEvent): void => {
+    if (!this.enabled) return;
     if (event.code === 'Space' || event.code.startsWith('Arrow')) event.preventDefault();
+    const wasPressed = this.keys.has(event.code);
     this.keys.add(event.code);
+    if (!wasPressed && this.isActionCode(event.code)) this.onActionChange?.();
   };
 
   private handleKeyUp = (event: KeyboardEvent): void => {
-    this.keys.delete(event.code);
+    const wasPressed = this.keys.delete(event.code);
+    if (wasPressed && this.isActionCode(event.code)) this.onActionChange?.();
   };
 
   private handleMouseDown = (event: MouseEvent): void => {
     if (!this.enabled || document.pointerLockElement !== this.element) return;
-    if (event.button === 0) this.buttons.fire = true;
-    if (event.button === 2) this.buttons.aim = true;
-    if (event.button === 1) this.buttons.swap = true;
+    const key = event.button === 0 ? 'fire' : event.button === 2 ? 'aim' : event.button === 1 ? 'swap' : null;
+    if (!key || this.buttons[key]) return;
+    this.buttons[key] = true;
+    this.onActionChange?.();
   };
 
   private handleMouseUp = (event: MouseEvent): void => {
-    if (event.button === 0) this.buttons.fire = false;
-    if (event.button === 2) this.buttons.aim = false;
-    if (event.button === 1) this.buttons.swap = false;
+    const key = event.button === 0 ? 'fire' : event.button === 2 ? 'aim' : event.button === 1 ? 'swap' : null;
+    if (!key || !this.buttons[key]) return;
+    this.buttons[key] = false;
+    this.onActionChange?.();
   };
 
   private handleMouseMove = (event: MouseEvent): void => {
@@ -145,8 +157,24 @@ export class InputController {
     this.onLockChange?.(document.pointerLockElement === this.element);
   };
 
+  private isActionCode(code: string): boolean {
+    return code === 'Space'
+      || code === 'KeyR'
+      || code === 'KeyQ'
+      || code === 'Digit1'
+      || code === 'Digit2'
+      || code === 'KeyF'
+      || code === 'KeyG'
+      || code === 'KeyE';
+  }
+
   private clear = (): void => {
+    const hadInput = this.keys.size > 0
+      || (Object.keys(this.buttons) as ButtonKey[]).some((key) => this.buttons[key]);
     this.keys.clear();
     for (const key of Object.keys(this.buttons) as ButtonKey[]) this.buttons[key] = false;
+    // A background tab may suspend requestAnimationFrame immediately. Send the
+    // neutral edge now so the host cannot retain movement or automatic fire.
+    if (hadInput) this.onActionChange?.();
   };
 }

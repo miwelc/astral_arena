@@ -1,6 +1,7 @@
 import { hasLineOfSight, moveCapsule, raycastWorld } from './collision';
 import { isJumpPad, MAPS } from './map';
 import { canonicalFormatForMode, isTeamGameMode, rulesForMode } from './modeRules';
+import { damageScaleAtDistance, sampleDirectionInCone, shotSpread } from './gunplay';
 import {
   add,
   clamp,
@@ -47,9 +48,14 @@ export const PLAYER_MOVEMENT_TUNING = Object.freeze({
   gravity: 15.5,
   jumpVelocity: 6.85,
 });
-const SHIELD_RECHARGE_DELAY = 4;
-const SHIELD_RECHARGE_RATE = 25;
+const SHIELD_RECHARGE_DELAY = 5;
+const SHIELD_RECHARGE_RATE = 100 / 1.75;
 const MAX_HEALTH = 70;
+const HEALTH_RECHARGE_DELAY = 10;
+const HEALTH_RECHARGE_RATE = 14;
+const WEAPON_EQUIP_SECONDS = 0.42;
+const MELEE_DAMAGE = 100;
+const MELEE_LUNGE_RANGE = 2.55;
 const JUMP_PAD_APEX_CLEARANCE = 1.75;
 const JUMP_PAD_RETRIGGER_DELAY = 0.85;
 const GRENADE_FUSE_SECONDS = 1.7;
@@ -77,6 +83,33 @@ interface ButtonState {
 interface JumpPadMomentum {
   direction: Vec3;
   minimumSpeed: number;
+}
+
+interface DamageOptions {
+  weaponId?: WeaponId;
+  position?: Vec3;
+  sourcePosition?: Vec3;
+  headshot?: boolean;
+  headshotFraction?: number;
+  headshotMode?: 'none' | 'bonus' | 'precision';
+  headMultiplier?: number;
+  backStrike?: boolean;
+  /** The target was vulnerable when a same-tick melee was committed. */
+  bypassSpawnProtection?: boolean;
+}
+
+interface DamageResult {
+  shieldDamage: number;
+  healthDamage: number;
+  fatal: boolean;
+  effectiveHeadshot: boolean;
+}
+
+interface PendingMeleeHit {
+  attackerId: string;
+  targetId: string;
+  amount: number;
+  options: DamageOptions;
 }
 
 const noButtons = (): ButtonState => ({
@@ -158,6 +191,12 @@ export class GameSimulation {
   private readonly usePressedThisTick = new Set<string>();
   /** One context action may activate at most one world interaction. */
   private readonly consumedUseThisTick = new Set<string>();
+  /** Recent authoritative damage used to award Halo-style assists on a kill. */
+  private readonly damageContributors = new Map<string, Map<string, { at: number; amount: number }>>();
+  /** Deferred until every player has acted so same-tick melees can trade. */
+  private readonly pendingMeleeHits: PendingMeleeHit[] = [];
+  private resolvingMeleeHits = false;
+  private pendingJuggernautSuccessorId: string | null = null;
   private projectileSequence = 0;
 
   public constructor(config: MatchConfig, initialHumans: Array<{ id: string; name: string; kind?: PlayerKind }> = []) {
@@ -262,6 +301,8 @@ export class GameSimulation {
         this.previousButtons.delete(replacement.id);
         this.jumpPadReadyAt.delete(replacement.id);
         this.jumpPadMomentum.delete(replacement.id);
+        this.damageContributors.delete(replacement.id);
+        for (const contributors of this.damageContributors.values()) contributors.delete(replacement.id);
         this.releaseTurret(replacement.id);
       }
       slot = Object.keys(this.state.players).length;
@@ -282,6 +323,8 @@ export class GameSimulation {
     this.jumpPadReadyAt.delete(id);
     this.jumpPadMomentum.delete(id);
     this.shieldRechargeActive.delete(id);
+    this.damageContributors.delete(id);
+    for (const contributors of this.damageContributors.values()) contributors.delete(id);
     this.releaseTurret(id);
     if (this.state.config.botFill && this.state.phase !== 'finished') this.fillWithBots();
     if (wasJuggernaut && this.state.config.mode === 'juggernaut') {
@@ -311,7 +354,9 @@ export class GameSimulation {
     updateBotInputs(this.state, this.map, safeDt, (from, to) => hasLineOfSight(from, to, this.map));
     this.usePressedThisTick.clear();
     this.consumedUseThisTick.clear();
+    this.pendingMeleeHits.length = 0;
     for (const player of Object.values(this.state.players)) this.updatePlayer(player, safeDt);
+    this.resolveMeleeHits();
     this.updateProjectiles(safeDt);
     if (this.state.phase === 'playing') {
       // Turret interaction wins over a colocated weapon prompt for the same
@@ -352,6 +397,8 @@ export class GameSimulation {
       grenades: 2,
       meleeCooldown: 0,
       grenadeCooldown: 0,
+      equipTimer: 0,
+      aimSuppressed: false,
       input: emptyInput(),
       lastProcessedInput: 0,
       kills: 0,
@@ -390,18 +437,30 @@ export class GameSimulation {
   private updatePlayer(player: PlayerState, dt: number): void {
     player.meleeCooldown = Math.max(0, player.meleeCooldown - dt);
     player.grenadeCooldown = Math.max(0, player.grenadeCooldown - dt);
+    player.equipTimer = Math.max(0, player.equipTimer - dt);
     player.spawnProtection = Math.max(0, player.spawnProtection - dt);
+    if (!player.input.aim) player.aimSuppressed = false;
+
+    const activeAtFrameStart = player.inventory[player.activeWeapon];
+    let activeCooldownCarry = 0;
     for (const weapon of player.inventory) {
-      weapon.cooldown = Math.max(0, weapon.cooldown - dt);
-      if (weapon.reloadTimer > 0) {
-        weapon.reloadTimer = Math.max(0, weapon.reloadTimer - dt);
-        if (weapon.reloadTimer === 0) {
-          const definition = WEAPONS[weapon.id];
-          const amount = Math.min(definition.magazineSize - weapon.magazine, weapon.reserve);
-          weapon.magazine += amount;
-          weapon.reserve -= amount;
-        }
+      if (weapon.cooldown > 0) {
+        const cooledDown = weapon.cooldown - dt;
+        if (weapon === activeAtFrameStart && cooledDown < 0) activeCooldownCarry = cooledDown;
+        weapon.cooldown = Math.max(0, cooledDown);
       }
+      weapon.bloom = Math.max(0, weapon.bloom - WEAPONS[weapon.id].bloomRecovery * dt);
+      if (weapon !== activeAtFrameStart) {
+        // Halo-style weapon handling never completes a magazine in the holster.
+        weapon.reloadTimer = 0;
+        weapon.burstRemaining = 0;
+        weapon.burstRoundIndex = 0;
+        weapon.burstTimer = 0;
+      }
+    }
+    if (activeAtFrameStart?.reloadTimer && activeAtFrameStart.reloadTimer > 0) {
+      activeAtFrameStart.reloadTimer = Math.max(0, activeAtFrameStart.reloadTimer - dt);
+      if (activeAtFrameStart.reloadTimer === 0) this.finishReload(player, activeAtFrameStart);
     }
 
     if (!player.alive) {
@@ -412,6 +471,7 @@ export class GameSimulation {
     }
 
     this.updateShieldRecharge(player, dt);
+    this.updateHealthRecharge(player, dt);
 
     player.yaw = player.input.yaw;
     player.pitch = clamp(player.input.pitch, -1.48, 1.48);
@@ -432,15 +492,33 @@ export class GameSimulation {
       else this.updateMovement(player, dt, !previous.jump && player.input.jump);
     }
 
-    const currentWeapon = player.inventory[player.activeWeapon];
+    let currentWeapon = player.inventory[player.activeWeapon];
     if (currentWeapon && canAct && !operatingTurret && !enteringTurret) {
-      if (!previous.swap && player.input.swap && player.inventory.length > 1) player.activeWeapon = (player.activeWeapon + 1) % player.inventory.length;
-      if (!previous.reload && player.input.reload) this.startReload(player);
-      const definition = WEAPONS[currentWeapon.id];
-      const wantsFire = player.input.fire && (definition.automatic || !previous.fire);
-      if (wantsFire) this.fireWeapon(player);
-      if (!previous.melee && player.input.melee) this.melee(player);
-      if (!previous.grenade && player.input.grenade) this.throwGrenade(player);
+      const swapPressed = !previous.swap && player.input.swap && player.inventory.length > 1;
+      const meleePressed = !previous.melee && player.input.melee;
+      const grenadePressed = !previous.grenade && player.input.grenade;
+      if (swapPressed) {
+        this.cancelWeaponAction(currentWeapon);
+        player.activeWeapon = (player.activeWeapon + 1) % player.inventory.length;
+        player.equipTimer = WEAPON_EQUIP_SECONDS;
+        currentWeapon = player.inventory[player.activeWeapon];
+      } else if (player.equipTimer <= 0 && currentWeapon) {
+        // Mutually exclusive action priority prevents fire, melee and grenade
+        // from all resolving on the same authoritative tick.
+        if (meleePressed) {
+          this.cancelWeaponAction(currentWeapon);
+          this.melee(player);
+        } else if (grenadePressed) {
+          this.cancelWeaponAction(currentWeapon);
+          this.throwGrenade(player);
+        } else {
+          if (currentWeapon.burstRemaining > 0) this.updateWeaponBurst(player, currentWeapon, dt);
+          const definition = WEAPONS[currentWeapon.id];
+          const wantsFire = player.input.fire && (definition.automatic || !previous.fire);
+          if (wantsFire) this.fireWeapon(player, activeCooldownCarry);
+          if (!previous.reload && player.input.reload) this.startReload(player);
+        }
+      }
     }
 
     this.previousButtons.set(player.id, {
@@ -559,6 +637,12 @@ export class GameSimulation {
     }
   }
 
+  private updateHealthRecharge(player: PlayerState, dt: number): void {
+    if (dt <= 0 || player.health >= MAX_HEALTH) return;
+    if (this.state.elapsed - player.lastDamageAt < HEALTH_RECHARGE_DELAY) return;
+    player.health = Math.min(MAX_HEALTH, player.health + HEALTH_RECHARGE_RATE * dt);
+  }
+
   private tryLaunchFromJumpPad(player: PlayerState): boolean {
     const padReadyAt = this.jumpPadReadyAt.get(player.id) ?? 0;
     if (!player.grounded || !isJumpPad(player.position) || this.state.elapsed < padReadyAt) return false;
@@ -593,33 +677,146 @@ export class GameSimulation {
 
   private startReload(player: PlayerState): void {
     const weapon = player.inventory[player.activeWeapon];
-    if (!weapon || weapon.reloadTimer > 0 || weapon.reserve <= 0) return;
+    if (!weapon || weapon.reloadTimer > 0 || weapon.burstRemaining > 0 || weapon.reserve <= 0) return;
     const definition = WEAPONS[weapon.id];
     if (weapon.magazine >= definition.magazineSize) return;
     weapon.reloadTimer = definition.reloadSeconds;
     this.pushEvent({ type: 'reload', actorId: player.id, weaponId: weapon.id });
   }
 
-  private fireWeapon(player: PlayerState): void {
-    const weapon = player.inventory[player.activeWeapon];
-    if (!weapon || weapon.cooldown > 0 || weapon.reloadTimer > 0) return;
+  private finishReload(player: PlayerState, weapon: PlayerState['inventory'][number]): void {
     const definition = WEAPONS[weapon.id];
-    const ammunitionCost = weapon.id === 'battle-rifle' ? 3 : 1;
-    if (weapon.magazine < ammunitionCost) {
+    if (definition.reloadStyle === 'shell') {
+      if (weapon.magazine < definition.magazineSize && weapon.reserve > 0) {
+        weapon.magazine += 1;
+        weapon.reserve -= 1;
+      }
+      if (weapon.magazine < definition.magazineSize && weapon.reserve > 0) {
+        weapon.reloadTimer = definition.reloadSeconds;
+        this.pushEvent({ type: 'reload', actorId: player.id, weaponId: weapon.id });
+      }
+      return;
+    }
+    const amount = Math.min(definition.magazineSize - weapon.magazine, weapon.reserve);
+    weapon.magazine += amount;
+    weapon.reserve -= amount;
+  }
+
+  private cancelWeaponAction(weapon: PlayerState['inventory'][number]): void {
+    weapon.reloadTimer = 0;
+    weapon.burstRemaining = 0;
+    weapon.burstRoundIndex = 0;
+    weapon.burstTimer = 0;
+  }
+
+  private updateWeaponBurst(
+    player: PlayerState,
+    weapon: PlayerState['inventory'][number],
+    dt: number,
+  ): void {
+    const definition = WEAPONS[weapon.id];
+    if (!definition.burstCount || weapon.burstRemaining <= 0) return;
+    weapon.burstTimer -= dt;
+    while (weapon.burstRemaining > 0 && weapon.burstTimer <= 0.000001) {
+      if (weapon.magazine <= 0) {
+        weapon.burstRemaining = 0;
+        weapon.burstRoundIndex = 0;
+        weapon.burstTimer = 0;
+        this.startReload(player);
+        return;
+      }
+      this.fireWeaponRound(player, weapon, weapon.burstRoundIndex);
+      weapon.burstRoundIndex += 1;
+      weapon.burstRemaining -= 1;
+      if (weapon.burstRemaining > 0) weapon.burstTimer += definition.burstInterval ?? 0.067;
+    }
+    if (weapon.burstRemaining === 0) {
+      weapon.burstRoundIndex = 0;
+      weapon.burstTimer = 0;
+      if (weapon.magazine === 0) this.startReload(player);
+    }
+  }
+
+  private fireWeapon(player: PlayerState, cooldownCarry = 0): void {
+    const weapon = player.inventory[player.activeWeapon];
+    if (!weapon || weapon.cooldown > 0 || weapon.burstRemaining > 0 || player.equipTimer > 0) return;
+    const definition = WEAPONS[weapon.id];
+    if (weapon.reloadTimer > 0) {
+      // A tube-fed shotgun may fire a shell that has already been loaded.
+      if (definition.reloadStyle === 'shell' && weapon.magazine > 0) weapon.reloadTimer = 0;
+      else return;
+    }
+    if (weapon.magazine <= 0) {
       this.startReload(player);
       return;
     }
-    weapon.magazine -= ammunitionCost;
-    weapon.cooldown = definition.fireInterval;
+    // A fixed step can pass the exact ready time by a fraction of a tick. Carry
+    // that excess into the next interval so held automatic fire keeps its
+    // authored average cadence instead of rounding every shot up to 1/60 s.
+    weapon.cooldown = Math.max(0, definition.fireInterval + Math.min(0, cooldownCarry));
+    const rounds = Math.min(definition.burstCount ?? 1, weapon.magazine);
+    this.fireWeaponRound(player, weapon, 0);
+    weapon.burstRemaining = Math.max(0, rounds - 1);
+    weapon.burstRoundIndex = weapon.burstRemaining > 0 ? 1 : 0;
+    weapon.burstTimer = weapon.burstRemaining > 0 ? definition.burstInterval ?? 0.067 : 0;
+    if (weapon.burstRemaining === 0 && weapon.magazine === 0) this.startReload(player);
+  }
+
+  private fireWeaponRound(
+    player: PlayerState,
+    weapon: PlayerState['inventory'][number],
+    burstIndex: number,
+  ): void {
+    if (weapon.magazine <= 0) return;
+    const definition = WEAPONS[weapon.id];
+    weapon.magazine -= 1;
     player.spawnProtection = 0;
     const origin = { x: player.position.x, y: player.position.y + 1.5, z: player.position.z };
-    const baseDirection = directionFromAngles(player.yaw, player.pitch);
+    const rawDirection = directionFromAngles(player.yaw, player.pitch);
+    const baseDirection = this.assistedAimDirection(player, origin, rawDirection, definition);
+    if (definition.ballisticSpeed) {
+      const direction = sampleDirectionInCone(
+        baseDirection,
+        shotSpread(definition, weapon, burstIndex),
+        randomRange(this.state, 0, 1),
+        randomRange(this.state, 0, 1),
+      );
+      this.pushEvent({
+        type: 'shot',
+        actorId: player.id,
+        weaponId: weapon.id,
+        position: add(origin, scale(direction, 6)),
+        sourcePosition: cloneVec3(origin),
+        impact: false,
+      });
+      this.state.projectiles.push({
+        id: `projectile-${this.projectileSequence++}`,
+        kind: 'bullet',
+        ownerId: player.id,
+        team: player.team,
+        weaponId: weapon.id,
+        // Collision starts at the authoritative eye/muzzle origin. Presentation
+        // may render the round ahead of it, but the initial 0.7 u must still be
+        // swept so nearby cover and targets cannot be skipped.
+        position: cloneVec3(origin),
+        velocity: scale(direction, definition.ballisticSpeed),
+        radius: 0.025,
+        damage: definition.damage,
+        blastRadius: 0,
+        armed: true,
+        fuse: definition.range / definition.ballisticSpeed,
+        alive: true,
+      });
+      weapon.bloom = Math.min(1, weapon.bloom + definition.bloomPerShot);
+      return;
+    }
     if (definition.projectile === 'rocket') {
       this.pushEvent({
         type: 'shot',
         actorId: player.id,
         weaponId: weapon.id,
         position: add(origin, scale(baseDirection, Math.min(5, definition.range))),
+        sourcePosition: cloneVec3(origin),
         impact: false,
       });
       this.state.projectiles.push({
@@ -632,21 +829,24 @@ export class GameSimulation {
         radius: 0.22,
         damage: definition.damage,
         blastRadius: definition.splashRadius ?? 5.5,
+        armed: true,
         fuse: 5,
         alive: true,
       });
+      weapon.bloom = Math.min(1, weapon.bloom + definition.bloomPerShot);
       return;
     }
 
     const traces: Vec3[] = [];
     const resolvedHits: Array<ReturnType<typeof raycastWorld>> = [];
+    const spreadScale = shotSpread(definition, weapon, burstIndex);
     for (let pellet = 0; pellet < definition.pellets; pellet += 1) {
-      const spreadScale = definition.spread;
-      const direction = normalize({
-        x: baseDirection.x + randomRange(this.state, -spreadScale, spreadScale),
-        y: baseDirection.y + randomRange(this.state, -spreadScale, spreadScale),
-        z: baseDirection.z + randomRange(this.state, -spreadScale, spreadScale),
-      });
+      const direction = sampleDirectionInCone(
+        baseDirection,
+        spreadScale,
+        randomRange(this.state, 0, 1),
+        randomRange(this.state, 0, 1),
+      );
       const hit = raycastWorld(origin, direction, definition.range, this.map, Object.values(this.state.players), player.id);
       resolvedHits.push(hit);
       traces.push(hit?.point ?? add(origin, scale(direction, definition.range)));
@@ -656,19 +856,82 @@ export class GameSimulation {
       actorId: player.id,
       weaponId: weapon.id,
       position: traces[0],
+      sourcePosition: cloneVec3(origin),
       impact: resolvedHits.some((hit) => hit !== null),
       traces: traces.length > 1 ? traces : undefined,
     });
 
+    const damageByTarget = new Map<string, {
+      amount: number;
+      headAmount: number;
+      position: Vec3;
+    }>();
     for (const hit of resolvedHits) {
       if (!hit?.playerId) continue;
       const target = this.state.players[hit.playerId];
       if (!target || !isEnemy(this.state, player, target)) continue;
-      let amount = definition.damage;
-      if (hit.headshot && (target.shield <= 0 || weapon.id === 'sniper')) amount *= definition.headMultiplier;
-      this.applyDamage(target, amount, player, weapon.id, hit.point);
+      const amount = definition.damage * damageScaleAtDistance(definition, hit.distance);
+      const aggregate = damageByTarget.get(target.id) ?? {
+        amount: 0,
+        headAmount: 0,
+        position: hit.point,
+      };
+      aggregate.amount += amount;
+      if (hit.headshot) aggregate.headAmount += amount;
+      damageByTarget.set(target.id, aggregate);
     }
-    if (weapon.magazine === 0) this.startReload(player);
+    for (const [targetId, aggregate] of damageByTarget) {
+      const target = this.state.players[targetId];
+      if (!target) continue;
+      this.applyDamage(target, aggregate.amount, player, {
+        weaponId: weapon.id,
+        position: aggregate.position,
+        sourcePosition: origin,
+        headshot: aggregate.headAmount > 0,
+        headshotFraction: aggregate.amount > 0 ? aggregate.headAmount / aggregate.amount : 0,
+        headshotMode: definition.headshotMode,
+        headMultiplier: definition.headMultiplier,
+      });
+    }
+    weapon.bloom = Math.min(1, weapon.bloom + definition.bloomPerShot);
+  }
+
+  private assistedAimDirection(
+    player: PlayerState,
+    origin: Vec3,
+    direction: Vec3,
+    definition: (typeof WEAPONS)[WeaponId],
+  ): Vec3 {
+    const angleLimit = definition.magnetismAngle ?? 0;
+    const assistRange = Math.min(definition.range, definition.magnetismRange ?? 0);
+    if (player.kind === 'bot' || angleLimit <= 0 || assistRange <= 0) return direction;
+
+    // Never pull an already valid body/head ray away from the point the player chose.
+    const directHit = raycastWorld(
+      origin,
+      direction,
+      definition.range,
+      this.map,
+      Object.values(this.state.players),
+      player.id,
+    );
+    if (directHit?.playerId) return direction;
+
+    let bestDirection: Vec3 | null = null;
+    let bestAngle = angleLimit;
+    for (const target of Object.values(this.state.players)) {
+      if (!target.alive || target.spawnProtection > 0 || !isEnemy(this.state, player, target)) continue;
+      const targetPoint = add(target.position, vec3(0, target.height * 0.62, 0));
+      const delta = subtract(targetPoint, origin);
+      const targetDistance = distance(origin, targetPoint);
+      if (targetDistance > assistRange || !hasLineOfSight(origin, targetPoint, this.map)) continue;
+      const candidateDirection = normalize(delta);
+      const angle = Math.acos(clamp(dot(direction, candidateDirection), -1, 1));
+      if (angle >= bestAngle) continue;
+      bestAngle = angle;
+      bestDirection = candidateDirection;
+    }
+    return bestDirection ?? direction;
   }
 
   private melee(player: PlayerState): void {
@@ -677,12 +940,12 @@ export class GameSimulation {
     player.spawnProtection = 0;
     const forward = directionFromAngles(player.yaw, 0);
     let best: PlayerState | null = null;
-    let bestDistance = 2.15;
+    let bestDistance = MELEE_LUNGE_RANGE;
     for (const target of Object.values(this.state.players)) {
       if (!target.alive || !isEnemy(this.state, player, target)) continue;
       const delta = subtract(target.position, player.position);
       const targetDistance = distance(player.position, target.position);
-      if (targetDistance < bestDistance && dot(normalize(delta), forward) > 0.55 && hasLineOfSight(add(player.position, vec3(0, 1.2, 0)), add(target.position, vec3(0, 1.2, 0)), this.map)) {
+      if (targetDistance < bestDistance && dot(normalize(delta), forward) > 0.48 && hasLineOfSight(add(player.position, vec3(0, 1.2, 0)), add(target.position, vec3(0, 1.2, 0)), this.map)) {
         best = target;
         bestDistance = targetDistance;
       }
@@ -690,9 +953,57 @@ export class GameSimulation {
     if (!best) return;
     const targetForward = directionFromAngles(best.yaw, 0);
     const targetToAttacker = normalize(subtract(player.position, best.position));
-    const backStrike = dot(targetForward, targetToAttacker) > 0.62;
-    this.pushEvent({ type: 'melee', actorId: player.id, targetId: best.id, position: cloneVec3(best.position) });
-    this.applyDamage(best, backStrike ? 220 : 90, player, undefined, best.position);
+    // targetForward points out of the victim's face; an attacker behind them is
+    // therefore in the opposite hemisphere. The old comparison was inverted.
+    const backStrike = dot(targetForward, targetToAttacker) < -0.62;
+    if (bestDistance > 1.25) {
+      const lungeDirection = normalize(subtract(best.position, player.position));
+      player.velocity.x = lungeDirection.x * 6.2;
+      player.velocity.z = lungeDirection.z * 6.2;
+    }
+    this.pushEvent({
+      type: 'melee',
+      actorId: player.id,
+      targetId: best.id,
+      position: cloneVec3(best.position),
+      sourcePosition: cloneVec3(player.position),
+      backStrike,
+    });
+    this.pendingMeleeHits.push({
+      attackerId: player.id,
+      targetId: best.id,
+      amount: backStrike ? 220 : MELEE_DAMAGE,
+      options: {
+        position: cloneVec3(best.position),
+        sourcePosition: cloneVec3(player.position),
+        backStrike,
+        bypassSpawnProtection: true,
+      },
+    });
+  }
+
+  private resolveMeleeHits(): void {
+    this.resolvingMeleeHits = true;
+    try {
+      for (const pending of this.pendingMeleeHits) {
+        const target = this.state.players[pending.targetId];
+        const attacker = this.state.players[pending.attackerId] ?? null;
+        if (target) this.applyDamage(target, pending.amount, attacker, pending.options);
+      }
+    } finally {
+      this.resolvingMeleeHits = false;
+      this.pendingMeleeHits.length = 0;
+    }
+    if (this.state.config.mode === 'juggernaut' && !this.state.juggernautId) {
+      const nominated = this.pendingJuggernautSuccessorId
+        ? this.state.players[this.pendingJuggernautSuccessorId]
+        : null;
+      const successor = nominated?.alive
+        ? nominated
+        : Object.values(this.state.players).find((candidate) => candidate.alive);
+      if (successor) this.makeJuggernaut(successor);
+    }
+    this.pendingJuggernautSuccessorId = null;
   }
 
   private throwGrenade(player: PlayerState): void {
@@ -710,27 +1021,108 @@ export class GameSimulation {
       position: add(origin, scale(direction, 0.8)),
       velocity: add(scale(direction, 14), vec3(0, 5.5, 0)),
       radius: 0.16,
-      damage: 120,
+      damage: 210,
       blastRadius: 5.5,
-      fuse: 1.7,
+      armed: false,
+      fuse: GRENADE_FUSE_SECONDS,
       alive: true,
     });
   }
 
-  private applyDamage(target: PlayerState, amount: number, attacker: PlayerState | null, weaponId?: WeaponId, position?: Vec3): void {
-    if (!target.alive || target.spawnProtection > 0 || amount <= 0) return;
-    if (attacker && attacker.id !== target.id && !isEnemy(this.state, attacker, target)) return;
+  private applyDamage(
+    target: PlayerState,
+    amount: number,
+    attacker: PlayerState | null,
+    options: DamageOptions = {},
+  ): DamageResult {
+    const emptyResult: DamageResult = {
+      shieldDamage: 0,
+      healthDamage: 0,
+      fatal: false,
+      effectiveHeadshot: false,
+    };
+    if (!target.alive || (target.spawnProtection > 0 && !options.bypassSpawnProtection) || amount <= 0) return emptyResult;
+    if (attacker && attacker.id !== target.id && !isEnemy(this.state, attacker, target)) return emptyResult;
     target.lastDamageAt = this.state.elapsed;
     const shieldBefore = target.shield;
-    const absorbed = Math.min(target.shield, amount);
-    target.shield -= absorbed;
-    target.health -= amount - absorbed;
-    this.pushEvent({ type: 'hit', actorId: attacker?.id, targetId: target.id, weaponId, position: position ? cloneVec3(position) : cloneVec3(target.position), amount });
-    if (shieldBefore > 0 && target.shield <= 0) this.pushEvent({ type: 'shield-break', actorId: attacker?.id, targetId: target.id, position: cloneVec3(target.position) });
-    if (target.health <= 0) this.killPlayer(target, attacker, weaponId);
+    const healthBefore = target.health;
+    const shieldDamage = Math.min(target.shield, amount);
+    target.shield -= shieldDamage;
+    const exposedBaseDamage = Math.max(0, amount - shieldDamage);
+    const headshotFraction = clamp(options.headshotFraction ?? (options.headshot ? 1 : 0), 0, 1);
+    const effectiveHeadshot = Boolean(options.headshot && exposedBaseDamage > 0 && headshotFraction > 0);
+    let requestedHealthDamage = exposedBaseDamage;
+    if (effectiveHeadshot && options.headshotMode === 'precision') {
+      // Precision headshots execute only after the base projectile reaches
+      // health. Shields still absorb ordinary damage, including overshields.
+      requestedHealthDamage = healthBefore;
+    } else if (effectiveHeadshot && options.headshotMode === 'bonus') {
+      const weightedMultiplier = 1 + ((options.headMultiplier ?? 1) - 1) * headshotFraction;
+      requestedHealthDamage *= weightedMultiplier;
+    }
+    const healthDamage = Math.min(healthBefore, requestedHealthDamage);
+    target.health -= healthDamage;
+    const fatal = target.health <= 0;
+    // Grouped pellet weapons may brush the helmet with one pellet while the
+    // body carries the hit. Reserve precision feedback for shots whose sampled
+    // damage was predominantly a head hit.
+    const confirmedHeadshot = Boolean(options.headshot) && headshotFraction >= 0.5;
+    const eventPosition = options.position ? cloneVec3(options.position) : cloneVec3(target.position);
+    const sourcePosition = options.sourcePosition
+      ? cloneVec3(options.sourcePosition)
+      : attacker
+        ? cloneVec3(attacker.position)
+        : undefined;
+    target.aimSuppressed = target.input.aim;
+    if (attacker && attacker.id !== target.id && shieldDamage + healthDamage > 0) {
+      const contributors = this.damageContributors.get(target.id) ?? new Map();
+      const previous = contributors.get(attacker.id);
+      contributors.set(attacker.id, {
+        at: this.state.elapsed,
+        amount: (previous && this.state.elapsed - previous.at <= 5 ? previous.amount : 0)
+          + shieldDamage
+          + healthDamage,
+      });
+      this.damageContributors.set(target.id, contributors);
+    }
+    this.pushEvent({
+      type: 'hit',
+      actorId: attacker?.id,
+      targetId: target.id,
+      weaponId: options.weaponId,
+      position: eventPosition,
+      sourcePosition,
+      amount: shieldDamage + healthDamage,
+      shieldDamage,
+      healthDamage,
+      headshot: confirmedHeadshot,
+      fatal,
+      backStrike: options.backStrike,
+    });
+    if (shieldBefore > 0 && target.shield <= 0) {
+      this.pushEvent({
+        type: 'shield-break',
+        actorId: attacker?.id,
+        targetId: target.id,
+        position: cloneVec3(target.position),
+        sourcePosition,
+      });
+    }
+    if (fatal) {
+      this.killPlayer(target, attacker, options.weaponId, {
+        headshot: effectiveHeadshot && confirmedHeadshot && options.headshotMode !== 'none',
+        backStrike: options.backStrike,
+      });
+    }
+    return { shieldDamage, healthDamage, fatal, effectiveHeadshot };
   }
 
-  private killPlayer(victim: PlayerState, killer: PlayerState | null, weaponId?: WeaponId): void {
+  private killPlayer(
+    victim: PlayerState,
+    killer: PlayerState | null,
+    weaponId?: WeaponId,
+    metadata: Pick<GameEvent, 'headshot' | 'backStrike'> = {},
+  ): void {
     if (!victim.alive) return;
     victim.alive = false;
     victim.health = 0;
@@ -744,12 +1136,25 @@ export class GameSimulation {
       killer.kills += 1;
       killer.streak += 1;
     }
+    const contributors = this.damageContributors.get(victim.id);
+    if (contributors) {
+      for (const [attackerId, contribution] of contributors) {
+        if (attackerId === killer?.id || this.state.elapsed - contribution.at > 5 || contribution.amount <= 0) continue;
+        const assistant = this.state.players[attackerId];
+        if (assistant && assistant.id !== victim.id && isEnemy(this.state, assistant, victim)) assistant.assists += 1;
+      }
+      this.damageContributors.delete(victim.id);
+    }
     this.pushEvent({
       type: 'kill',
       actorId: killer?.id,
       targetId: victim.id,
       weaponId,
       position: cloneVec3(victim.position),
+      sourcePosition: killer ? cloneVec3(killer.position) : undefined,
+      headshot: metadata.headshot,
+      fatal: true,
+      backStrike: metadata.backStrike,
       message: killer ? `${killer.name} eliminó a ${victim.name}` : `${victim.name} cayó`,
     });
 
@@ -764,7 +1169,13 @@ export class GameSimulation {
         if (killer.isJuggernaut) this.awardJuggernautPoint(killer);
         if (victim.isJuggernaut) {
           this.awardJuggernautPoint(killer);
-          this.makeJuggernaut(killer);
+          if (this.resolvingMeleeHits) {
+            victim.isJuggernaut = false;
+            this.state.juggernautId = null;
+            this.pendingJuggernautSuccessorId = killer.id;
+          } else {
+            this.makeJuggernaut(killer);
+          }
         }
       }
     }
@@ -806,8 +1217,45 @@ export class GameSimulation {
   private updateProjectiles(dt: number): void {
     for (const projectile of this.state.projectiles) {
       if (!projectile.alive) continue;
-      projectile.fuse -= dt;
+      if (projectile.kind !== 'grenade' || projectile.armed) projectile.fuse -= dt;
       const previous = cloneVec3(projectile.position);
+      if (projectile.kind === 'bullet') {
+        const movementDt = projectile.fuse < 0 ? Math.max(0, dt + projectile.fuse) : dt;
+        projectile.position = add(projectile.position, scale(projectile.velocity, movementDt));
+        const directionDelta = subtract(projectile.position, previous);
+        const travel = distance(previous, projectile.position);
+        const hit = travel > 0.0001
+          ? raycastWorld(
+            previous,
+            scale(directionDelta, 1 / travel),
+            travel + projectile.radius,
+            this.map,
+            Object.values(this.state.players),
+            projectile.ownerId,
+          )
+          : null;
+        if (hit) {
+          projectile.position = cloneVec3(hit.point);
+          projectile.alive = false;
+          const owner = this.state.players[projectile.ownerId];
+          const target = hit.playerId ? this.state.players[hit.playerId] : undefined;
+          const weaponId = projectile.weaponId ?? 'battle-rifle';
+          const definition = WEAPONS[weaponId];
+          if (owner && target && isEnemy(this.state, owner, target)) {
+            this.applyDamage(target, projectile.damage, owner, {
+              weaponId,
+              position: hit.point,
+              sourcePosition: owner.position,
+              headshot: Boolean(hit.headshot),
+              headshotMode: definition.headshotMode,
+              headMultiplier: definition.headMultiplier,
+            });
+          }
+        } else if (projectile.fuse <= 0) {
+          projectile.alive = false;
+        }
+        continue;
+      }
       if (projectile.kind === 'grenade') projectile.velocity.y -= PROJECTILE_GRAVITY * dt;
       projectile.position = add(projectile.position, scale(projectile.velocity, dt));
       let explode = projectile.kind === 'rocket' && projectile.fuse <= 0;
@@ -815,6 +1263,7 @@ export class GameSimulation {
       if (projectile.position.y <= this.map.bounds.floorY + projectile.radius) {
         if (projectile.kind === 'rocket') explode = true;
         else {
+          this.armGrenade(projectile);
           projectile.position.y = this.map.bounds.floorY + projectile.radius;
           if (projectile.fuse <= 0) {
             explode = true;
@@ -850,6 +1299,7 @@ export class GameSimulation {
             explode = true;
           } else if (hit.obstacleId) {
             const obstacle = this.map.obstacles.find((candidate) => candidate.id === hit.obstacleId);
+            this.armGrenade(projectile);
             const hitTop = Boolean(
               obstacle
               && directionDelta.y < 0
@@ -907,9 +1357,23 @@ export class GameSimulation {
     this.state.projectiles = this.state.projectiles.filter((projectile) => projectile.alive);
   }
 
+  private armGrenade(projectile: ProjectileState): void {
+    if (projectile.kind !== 'grenade' || projectile.armed) return;
+    projectile.armed = true;
+    projectile.fuse = GRENADE_FUSE_SECONDS;
+  }
+
   private explode(projectile: ProjectileState): void {
+    if (projectile.kind === 'bullet') return;
     projectile.alive = false;
-    this.pushEvent({ type: 'explosion', actorId: projectile.ownerId, position: cloneVec3(projectile.position) });
+    this.pushEvent({
+      type: 'explosion',
+      actorId: projectile.ownerId,
+      position: cloneVec3(projectile.position),
+      sourcePosition: cloneVec3(projectile.position),
+      explosionKind: projectile.kind,
+      radius: projectile.blastRadius,
+    });
     const owner = this.state.players[projectile.ownerId] ?? null;
     for (const target of Object.values(this.state.players)) {
       if (!target.alive) continue;
@@ -917,9 +1381,14 @@ export class GameSimulation {
       const targetDistance = distance(projectile.position, targetCenter);
       if (targetDistance > projectile.blastRadius) continue;
       if (!hasLineOfSight(projectile.position, targetCenter, this.map)) continue;
-      let amount = projectile.damage * (1 - targetDistance / projectile.blastRadius * 0.82);
-      if (owner && target.id === owner.id) amount *= 0.7;
-      this.applyDamage(target, amount, owner, projectile.kind === 'rocket' ? 'rocket-launcher' : undefined, projectile.position);
+      const normalizedDistance = clamp(targetDistance / projectile.blastRadius, 0, 1);
+      let amount = projectile.damage * (1 - normalizedDistance ** 1.35 * 0.88);
+      if (owner && target.id === owner.id) amount *= projectile.kind === 'grenade' ? 0.9 : 1;
+      this.applyDamage(target, amount, owner, {
+        weaponId: projectile.kind === 'rocket' ? 'rocket-launcher' : undefined,
+        position: projectile.position,
+        sourcePosition: projectile.position,
+      });
       const impulse = normalize(subtract(targetCenter, projectile.position));
       target.velocity = add(target.velocity, scale(impulse, Math.max(0, 8 - targetDistance)));
     }
@@ -1162,7 +1631,15 @@ export class GameSimulation {
     if (!hit?.playerId) return;
     const target = this.state.players[hit.playerId];
     if (target && isEnemy(this.state, controller, target)) {
-      this.applyDamage(target, 13, controller, 'pulse-rifle', hit.point);
+      const definition = WEAPONS['pulse-rifle'];
+      this.applyDamage(target, 13, controller, {
+        weaponId: 'pulse-rifle',
+        position: hit.point,
+        sourcePosition: turretOrigin,
+        headshot: Boolean(hit.headshot),
+        headshotMode: definition.headshotMode,
+        headMultiplier: definition.headMultiplier,
+      });
     }
   }
 
@@ -1172,6 +1649,7 @@ export class GameSimulation {
 
   private spawnPlayer(player: PlayerState, initial: boolean): void {
     this.releaseTurret(player.id);
+    this.damageContributors.delete(player.id);
     const matching = this.map.spawns.filter((spawn) => {
       if (!isTeamMode(this.state)) return true;
       return spawn.team === player.team;
@@ -1207,6 +1685,10 @@ export class GameSimulation {
     player.shield = player.maxShield;
     player.overshieldDecayDelay = 0;
     player.grenades = 2;
+    player.meleeCooldown = 0;
+    player.grenadeCooldown = 0;
+    player.equipTimer = 0;
+    player.aimSuppressed = false;
     player.spawnProtection = 1;
     player.respawnTimer = 0;
     const loadout = this.state.config.mode === 'towah-of-powah' ? TOWER_LOADOUT : DEFAULT_LOADOUT;

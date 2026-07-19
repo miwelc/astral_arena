@@ -93,6 +93,7 @@ describe('gameplay regressions', () => {
       radius: 0.22,
       damage: WEAPONS['rocket-launcher'].damage,
       blastRadius: 5.5,
+      armed: true,
       fuse: 5,
       alive: true,
     };

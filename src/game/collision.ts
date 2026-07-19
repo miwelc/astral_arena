@@ -17,7 +17,11 @@ type HorizontalAxis = 'x' | 'z';
 export const COMBAT_HITBOX_TUNING = Object.freeze({
   pelvisRadiusPadding: 0.045,
   torsoRadiusPadding: 0.09,
+  /** Horizontal helmet allowance; vertical precision is constrained separately. */
   headRadiusScale: 0.74,
+  /** The helmet occupies the upper 17% of the authored player height. */
+  headCenterHeightScale: 0.915,
+  headHalfHeightScale: 0.085,
 });
 
 const overlapsExpandedAxis = (
@@ -254,6 +258,35 @@ const raySphere = (origin: Vec3, direction: Vec3, center: Vec3, radius: number):
   return far >= 0 ? far : null;
 };
 
+const rayEllipsoid = (
+  origin: Vec3,
+  direction: Vec3,
+  center: Vec3,
+  radii: Vec3,
+): number | null => {
+  const offset = subtract(origin, center);
+  const normalizedOffset = {
+    x: offset.x / radii.x,
+    y: offset.y / radii.y,
+    z: offset.z / radii.z,
+  };
+  const normalizedDirection = {
+    x: direction.x / radii.x,
+    y: direction.y / radii.y,
+    z: direction.z / radii.z,
+  };
+  const a = lengthSquared(normalizedDirection);
+  const b = dot(normalizedOffset, normalizedDirection);
+  const c = lengthSquared(normalizedOffset) - 1;
+  const discriminant = b * b - a * c;
+  if (discriminant < 0 || a < EPSILON) return null;
+  const root = Math.sqrt(discriminant);
+  const near = (-b - root) / a;
+  const far = (-b + root) / a;
+  if (near >= 0) return near;
+  return far >= 0 ? far : null;
+};
+
 const rayAabb = (origin: Vec3, direction: Vec3, obstacle: AabbObstacle): number | null => {
   let near = -Infinity;
   let far = Infinity;
@@ -300,7 +333,11 @@ export const raycastWorld = (
     // (and deliberately smaller) precision zone.
     const pelvisCenter = { x: player.position.x, y: player.position.y + player.height * 0.3, z: player.position.z };
     const torsoCenter = { x: player.position.x, y: player.position.y + player.height * 0.58, z: player.position.z };
-    const headCenter = { x: player.position.x, y: player.position.y + player.height * 0.86, z: player.position.z };
+    const headCenter = {
+      x: player.position.x,
+      y: player.position.y + player.height * COMBAT_HITBOX_TUNING.headCenterHeightScale,
+      z: player.position.z,
+    };
     const pelvisDistance = raySphere(
       origin,
       direction,
@@ -315,26 +352,35 @@ export const raycastWorld = (
     );
     const bodyDistances = [pelvisDistance, torsoDistance].filter((value): value is number => value !== null);
     const bodyDistance = bodyDistances.length > 0 ? Math.min(...bodyDistances) : null;
-    const headDistance = raySphere(
+    const headHorizontalRadius = player.radius * COMBAT_HITBOX_TUNING.headRadiusScale;
+    const headDistance = rayEllipsoid(
       origin,
       direction,
       headCenter,
-      player.radius * COMBAT_HITBOX_TUNING.headRadiusScale,
+      {
+        x: headHorizontalRadius,
+        y: player.height * COMBAT_HITBOX_TUNING.headHalfHeightScale,
+        z: headHorizontalRadius,
+      },
     );
-    if (bodyDistance !== null) {
-      consider({
-        distance: bodyDistance,
-        point: add(origin, scale(direction, bodyDistance)),
-        playerId: player.id,
-        headshot: false,
-      });
-    }
-    if (headDistance !== null) {
+    // Armour volumes overlap around the neck and shoulder plates. Classify the
+    // first surface actually struck: a ray cannot enter the torso and later be
+    // upgraded to a precision hit merely because it also crosses the helmet.
+    const headWasHitFirst = headDistance !== null
+      && (bodyDistance === null || headDistance + CONTACT_EPSILON < bodyDistance);
+    if (headWasHitFirst) {
       consider({
         distance: headDistance,
         point: add(origin, scale(direction, headDistance)),
         playerId: player.id,
         headshot: true,
+      });
+    } else if (bodyDistance !== null) {
+      consider({
+        distance: bodyDistance,
+        point: add(origin, scale(direction, bodyDistance)),
+        playerId: player.id,
+        headshot: false,
       });
     }
   }

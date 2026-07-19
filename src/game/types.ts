@@ -46,6 +46,14 @@ export interface WeaponState {
   reserve: number;
   cooldown: number;
   reloadTimer: number;
+  /** Normalized firing error used by both authoritative spread and the reticle. */
+  bloom: number;
+  /** Follow-up rounds still owed by a burst weapon. */
+  burstRemaining: number;
+  /** Zero-based authored spread index for the next round in the active burst. */
+  burstRoundIndex: number;
+  /** Seconds until the next round in the current burst. */
+  burstTimer: number;
 }
 
 export interface PlayerState {
@@ -73,6 +81,10 @@ export interface PlayerState {
   grenades: number;
   meleeCooldown: number;
   grenadeCooldown: number;
+  /** Brief draw delay after changing weapons; prevents same-tick swap shots. */
+  equipTimer: number;
+  /** Damage breaks smart-link zoom until the player releases the aim control. */
+  aimSuppressed: boolean;
   input: PlayerInput;
   lastProcessedInput: number;
   kills: number;
@@ -109,14 +121,18 @@ export interface BotMemory {
 
 export interface ProjectileState {
   id: string;
-  kind: 'rocket' | 'grenade';
+  kind: 'rocket' | 'grenade' | 'bullet';
   ownerId: string;
   team: Team;
+  /** Present for lightweight ballistic rounds such as the battle rifle. */
+  weaponId?: WeaponId;
   position: Vec3;
   velocity: Vec3;
   radius: number;
   damage: number;
   blastRadius: number;
+  /** Grenades start their fuse on the first surface impact; other rounds are armed immediately. */
+  armed: boolean;
   fuse: number;
   alive: boolean;
 }
@@ -175,12 +191,22 @@ export interface GameEvent {
   targetId?: string;
   weaponId?: WeaponId;
   position?: Vec3;
+  /** World-space origin of incoming damage, retained for directional HUD feedback. */
+  sourcePosition?: Vec3;
   /** True when a shot endpoint is an actual world/player impact, not max range. */
   impact?: boolean;
   /** Authoritative pellet/burst endpoints used to render the same cone that dealt damage. */
   traces?: Vec3[];
   message?: string;
   amount?: number;
+  /** Authoritative damage classification for audiovisual feedback and medals. */
+  headshot?: boolean;
+  fatal?: boolean;
+  shieldDamage?: number;
+  healthDamage?: number;
+  backStrike?: boolean;
+  explosionKind?: 'rocket' | 'grenade';
+  radius?: number;
   flagTeam?: Exclude<Team, 'neutral'>;
   flagAction?: 'taken' | 'dropped' | 'returned' | 'captured';
 }
@@ -215,13 +241,34 @@ export interface WeaponDefinition {
   fireInterval: number;
   damage: number;
   headMultiplier: number;
+  /** Precision hits execute once base damage reaches health; bonus only multiplies exposed health. */
+  headshotMode: 'none' | 'bonus' | 'precision';
   magazineSize: number;
   startingReserve: number;
   maxReserve: number;
   reloadSeconds: number;
   range: number;
+  /** Minimum and maximum half-angle of the shot cone, in radians. */
   spread: number;
+  maxSpread: number;
+  /** Normalized bloom added per round and recovered per second. */
+  bloomPerShot: number;
+  bloomRecovery: number;
   pellets: number;
+  burstCount?: number;
+  burstInterval?: number;
+  /** Optional authored per-round error for a burst, in radians. */
+  burstSpread?: readonly number[];
+  /** Units per second for a lightweight ballistic round; absent means hitscan. */
+  ballisticSpeed?: number;
+  reloadStyle?: 'magazine' | 'shell';
+  /** Smart-link optical FOV steps. Absence means the weapon does not zoom. */
+  zoomFov?: readonly number[];
+  magnetismAngle?: number;
+  magnetismRange?: number;
+  damageFalloffStart?: number;
+  damageFalloffEnd?: number;
+  minimumDamageScale?: number;
   recoil: number;
   projectile?: 'rocket';
   splashRadius?: number;
@@ -270,13 +317,13 @@ export interface SerializedSnapshot {
 }
 
 export type ClientMessage =
-  | { kind: 'hello'; name: string; protocol: 1 }
+  | { kind: 'hello'; name: string; protocol: 2 }
   | { kind: 'input'; playerId: string; input: PlayerInput }
   | { kind: 'ready'; playerId: string }
   | { kind: 'ping'; sentAt: number };
 
 export type HostMessage =
   | SerializedSnapshot
-  | { kind: 'welcome'; playerId: string; config: MatchConfig; protocol: 1 }
+  | { kind: 'welcome'; playerId: string; config: MatchConfig; protocol: 2 }
   | { kind: 'pong'; sentAt: number; serverAt: number }
   | { kind: 'error'; message: string };

@@ -1,7 +1,7 @@
 import { GameAudio } from '../audio/GameAudio';
-import { raycastWorld } from '../game/collision';
+import { hasLineOfSight, raycastWorld } from '../game/collision';
 import { MAPS } from '../game/map';
-import { add, clamp, directionFromAngles, vec3 } from '../game/math';
+import { add, clamp, directionFromAngles, distance, dot, normalize, subtract, vec3 } from '../game/math';
 import { canonicalFormatForMode, isTeamGameMode, rulesForMode } from '../game/modeRules';
 import { createDefaultConfig, GameSimulation, recommendedScoreLimit, recommendedTimeLimit } from '../game/simulation';
 import type { ClientMessage, GameMode, HostMessage, MatchConfig, MatchState, PlayerInput, Team } from '../game/types';
@@ -9,7 +9,9 @@ import { WEAPONS } from '../game/weapons';
 import { InputController } from '../input/InputController';
 import { isValidMatchState } from '../network/matchStateValidation';
 import { P2PNetwork, P2PNetworkError } from '../network/P2PNetwork';
+import { RemoteInputBuffer } from '../network/RemoteInputBuffer';
 import type { ArenaRenderer } from '../render/ArenaRenderer';
+import { directionalDamagePresentation, selectCombatWarning } from './combatHud';
 import { presentGameEvents, selectAnnouncementCandidate, type EventPresentation } from './eventPresentation';
 import { interactionPromptFor } from './interactionPrompt';
 import { buildMotionRadarContacts } from './motionRadar';
@@ -77,6 +79,7 @@ export class AstralArenaApp {
   private networkStatus: 'connecting' | 'connected' | 'lost' = 'connecting';
   private inputSequence = 0;
   private lastInput: PlayerInput | null = null;
+  private readonly remoteInputBuffer = new RemoteInputBuffer();
   private guestName = 'Astronauta';
   private gameViewActive = false;
   private lastDamageEvent = 0;
@@ -371,7 +374,7 @@ export class AstralArenaApp {
       if (event.status === 'connected') {
         this.networkStatus = 'connected';
         if (this.role === 'guest') {
-          this.network?.sendToHost({ kind: 'hello', name: this.guestName, protocol: 1 });
+          this.network?.sendToHost({ kind: 'hello', name: this.guestName, protocol: 2 });
           const status = this.root.querySelector<HTMLElement>('#guest-status');
           if (status) status.innerHTML = '<i></i> Canal abierto. Sincronizando arena…';
         } else {
@@ -390,6 +393,7 @@ export class AstralArenaApp {
       }
       if (this.role === 'host' && ['disconnected', 'failed', 'closed'].includes(event.status)) {
         this.simulation?.removeRemotePlayer(event.peerId);
+        this.remoteInputBuffer.delete(event.peerId);
         this.updateLobbyRoster();
       }
     });
@@ -402,16 +406,17 @@ export class AstralArenaApp {
       if (!this.simulation) return;
       if (message.kind === 'hello') {
         if (typeof message.name !== 'string') return;
+        this.remoteInputBuffer.delete(peerId);
         const player = this.simulation.addRemotePlayer(peerId, message.name);
         if (!player) {
           this.network?.sendToPeer(peerId, { kind: 'error', message: 'La arena está completa.' });
           return;
         }
-        this.network?.sendToPeer(peerId, { kind: 'welcome', playerId: player.id, config: this.simulation.state.config, protocol: 1 });
+        this.network?.sendToPeer(peerId, { kind: 'welcome', playerId: player.id, config: this.simulation.state.config, protocol: 2 });
         this.network?.sendToPeer(peerId, this.createSnapshot());
         this.updateLobbyRoster();
       } else if (message.kind === 'input') {
-        if (isValidPlayerInput(message.input)) this.simulation.setInput(peerId, { ...message.input });
+        if (isValidPlayerInput(message.input)) this.queueRemoteInput(peerId, message.input);
       } else if (message.kind === 'ping') {
         this.network?.sendToPeer(peerId, { kind: 'pong', sentAt: message.sentAt, serverAt: performance.now() });
       }
@@ -469,7 +474,7 @@ export class AstralArenaApp {
       <main class="game-shell">
         <div id="scene-host" class="scene-host"></div>
         <div class="hud-vignette"></div>
-        <div id="damage-hud" class="damage-hud" aria-hidden="true"></div>
+        <div id="damage-hud" class="damage-hud" aria-hidden="true"><i></i></div>
         <div class="hud-top">
           <div class="hud-mode"><span id="hud-mode-name">${MODE_LABELS[state.config.mode]}</span><small id="hud-objective"></small></div>
           <div class="hud-score">
@@ -481,6 +486,7 @@ export class AstralArenaApp {
         <div id="combat-alerts" class="combat-alerts" aria-live="polite"></div>
         <div id="objective-marker" class="objective-marker"></div>
         <div id="crosshair" class="crosshair" aria-hidden="true"><i></i><i></i><i></i><i></i><b></b></div>
+        <div id="combat-warning" class="combat-warning" aria-live="polite"></div>
         <div id="interaction-prompt" class="interaction-prompt" aria-live="polite"></div>
         <div id="turret-hud" class="turret-hud" aria-hidden="true"><span>EMPLAZAMIENTO M41</span><strong>CONTROL MANUAL</strong><small>RATÓN · APUNTAR &nbsp; LMB · FUEGO &nbsp; E · SALIR</small></div>
         <div id="scope-overlay" class="scope-overlay"><div></div><span id="scope-zoom">5×</span><small>RUEDA / Z · CAMBIAR AUMENTO</small></div>
@@ -526,6 +532,7 @@ export class AstralArenaApp {
         else if (this.currentState?.phase !== 'finished') this.root.querySelector('#pause-panel')?.classList.remove('hidden');
       },
       (direction) => this.stepSniperZoom(direction),
+      () => this.sendGuestInputEdge(),
     );
     this.input.setEnabled(false);
     const local = this.localPlayerId ? state.players[this.localPlayerId] : undefined;
@@ -571,6 +578,7 @@ export class AstralArenaApp {
           this.lastInput = this.input.sample(++this.inputSequence);
           this.simulation.setInput(this.localPlayerId, this.lastInput);
         }
+        if (this.role === 'host') this.applyRemoteInputsForTick();
         this.simulation.step(fixed);
         this.accumulator -= fixed;
       }
@@ -591,8 +599,8 @@ export class AstralArenaApp {
         presentedPlayer.pitch = this.lastInput.pitch;
       }
       const hostConnected = this.network.connectedPeerIds.includes('host');
-      if (hostConnected && this.inputSendTimer >= 1 / 30) {
-        this.inputSendTimer %= 1 / 30;
+      if (hostConnected && this.inputSendTimer >= 1 / 60) {
+        this.inputSendTimer %= 1 / 60;
         this.network.sendToHost({ kind: 'input', playerId: this.localPlayerId, input: this.lastInput });
       }
       this.pingTimer += delta;
@@ -603,14 +611,29 @@ export class AstralArenaApp {
     }
 
     if (this.currentState && this.renderer) {
-      this.renderer.setLocalViewAim(Boolean(this.lastInput?.aim), this.sniperZoomLevel);
+      const opticalAimActive = this.effectiveOpticalAim(this.currentState);
+      const localPlayer = this.localPlayerId ? this.currentState.players[this.localPlayerId] : undefined;
+      const activeWeapon = localPlayer?.inventory[localPlayer.activeWeapon];
+      if (!opticalAimActive || activeWeapon?.id !== 'sniper') this.sniperZoomLevel = 0;
+      this.renderer.setLocalViewAim(opticalAimActive, this.sniperZoomLevel);
       this.renderer.render(this.currentState, this.accumulator / fixed, true);
-      this.updateHud(this.currentState);
+      this.updateHud(this.currentState, opticalAimActive);
       this.audio.consume(this.currentState.events, this.localPlayerId);
     }
   }
 
-  private updateHud(state: MatchState): void {
+  private effectiveOpticalAim(state: MatchState): boolean {
+    if (!this.localPlayerId || !this.lastInput?.aim) return false;
+    const player = state.players[this.localPlayerId];
+    if (!player?.alive || player.aimSuppressed) return false;
+    const operatingTurret = state.config.mode === 'towah-of-powah'
+      && state.tower.turretOwnerId === player.id;
+    if (operatingTurret) return false;
+    const weapon = player.inventory[player.activeWeapon];
+    return Boolean(weapon && WEAPONS[weapon.id].zoomFov?.length);
+  }
+
+  private updateHud(state: MatchState, opticalAimActive: boolean): void {
     if (!this.localPlayerId) return;
     const player = state.players[this.localPlayerId];
     if (!player) return;
@@ -640,7 +663,7 @@ export class AstralArenaApp {
     const shieldRecharging = player.alive
       && player.maxShield > 0
       && player.shield < player.maxShield
-      && state.elapsed - player.lastDamageAt >= (player.isJuggernaut ? 5 : 4);
+      && state.elapsed - player.lastDamageAt >= 5;
     this.root.querySelector('#shield-block')?.classList.toggle('recharging', shieldRecharging);
     if (operatingTurret) {
       this.setText('#weapon-name', 'Torreta M41');
@@ -658,22 +681,42 @@ export class AstralArenaApp {
     this.setText('#match-time', formatTime(state.timeRemaining));
     this.setText('#ping-value', this.role === 'guest' && this.networkStatus === 'connected' ? `${this.latency} MS` : '');
     if (this.role === 'guest') this.setText('#net-state', this.networkStatus === 'connected' ? 'P2P' : this.networkStatus === 'lost' ? 'SIN HOST' : 'RECONECTANDO');
-    const sniperScoped = Boolean(!operatingTurret && this.lastInput?.aim && weapon?.id === 'sniper' && player.alive);
+    const sniperScoped = opticalAimActive && weapon?.id === 'sniper';
     if (!sniperScoped) this.sniperZoomLevel = 0;
+    const zoomFov = definition?.zoomFov?.[weapon?.id === 'sniper' ? this.sniperZoomLevel : 0];
     this.input?.setLookSensitivityScale(
-      sniperScoped ? (this.sniperZoomLevel === 0 ? 0.24 : 0.12) : 1,
+      opticalAimActive ? clamp((zoomFov ?? 62) / 74, 0.12, 0.86) : 1,
     );
     this.root.querySelector('#scope-overlay')?.classList.toggle('active', sniperScoped);
     const crosshair = this.root.querySelector<HTMLElement>('#crosshair');
     crosshair?.classList.toggle('scoped', sniperScoped);
     crosshair?.classList.toggle('firing', Boolean(this.lastInput?.fire && (operatingTurret ? state.tower.turretCooldown : weapon?.cooldown)));
-    if (crosshair) crosshair.dataset.reticle = operatingTurret ? 'turret' : weaponReticle(weapon?.id);
+    if (crosshair) {
+      const bloom = operatingTurret ? 0 : clamp(weapon?.bloom ?? 0, 0, 1);
+      crosshair.dataset.reticle = operatingTurret ? 'turret' : weaponReticle(weapon?.id);
+      crosshair.style.setProperty('--weapon-bloom', bloom.toFixed(3));
+      crosshair.style.setProperty('--reticle-bloom-scale', (1 + bloom * 0.32).toFixed(3));
+    }
+    const warning = !operatingTurret && player.alive
+      ? selectCombatWarning(weapon, definition?.magazineSize, player.grenades, Boolean(this.lastInput?.grenade))
+      : null;
+    const combatWarning = this.root.querySelector<HTMLElement>('#combat-warning');
+    if (combatWarning) {
+      const warningLabel = warning?.label ?? '';
+      if (combatWarning.textContent !== warningLabel) combatWarning.textContent = warningLabel;
+      combatWarning.classList.remove('critical', 'warning', 'utility');
+      combatWarning.classList.toggle('visible', warning !== null);
+      if (warning) combatWarning.classList.add(warning.tone);
+    }
     this.root.querySelector('.hud-bottom-right')?.classList.toggle('turret-active', operatingTurret);
     const turretHud = this.root.querySelector<HTMLElement>('#turret-hud');
     turretHud?.classList.toggle('active', operatingTurret);
     turretHud?.setAttribute('aria-hidden', String(!operatingTurret));
     this.updateInteractionPrompt(state, player);
     this.setText('#scope-zoom', this.sniperZoomLevel === 0 ? '5×' : '10×');
+    const radar = this.root.querySelector<HTMLElement>('#motion-radar');
+    radar?.classList.toggle('zoom-hidden', opticalAimActive);
+    radar?.setAttribute('aria-hidden', String(opticalAimActive));
     const hudNow = performance.now();
     if (hudNow >= this.nextTacticalHudAt) {
       const tacticalState = this.presentedTacticalState(state);
@@ -716,8 +759,11 @@ export class AstralArenaApp {
       this.renderer?.pulseDamage();
       const damageHud = this.root.querySelector<HTMLElement>('#damage-hud');
       if (damageHud) {
-        const strength = clamp((damage.amount ?? 25) / 95, 0.42, 1);
-        damageHud.style.setProperty('--damage-strength', strength.toFixed(2));
+        const presentation = directionalDamagePresentation(damage, player);
+        damageHud.style.setProperty('--damage-strength', presentation.strength.toFixed(2));
+        damageHud.style.setProperty('--damage-angle', `${presentation.angleDegrees.toFixed(1)}deg`);
+        damageHud.classList.toggle('shield-only', presentation.tone === 'shield');
+        damageHud.classList.toggle('health-hit', presentation.tone === 'health');
         damageHud.classList.remove('active');
         void damageHud.offsetWidth;
         damageHud.classList.add('active');
@@ -764,16 +810,39 @@ export class AstralArenaApp {
       && state.tower.turretOwnerId === player.id;
     const origin = operatingTurret
       ? add(state.tower.center, vec3(0, 2.7, 0))
-      : add(player.position, vec3(0, player.height * 0.86, 0));
+      : add(player.position, vec3(0, 1.5, 0));
+    const aimDirection = directionFromAngles(player.yaw, player.pitch);
+    const map = MAPS[state.config.mapId];
     const hit = raycastWorld(
       origin,
-      directionFromAngles(player.yaw, player.pitch),
+      aimDirection,
       weaponRange,
-      MAPS[state.config.mapId],
+      map,
       Object.values(state.players),
       player.id,
     );
-    const target = hit?.playerId ? state.players[hit.playerId] : undefined;
+    let target = hit?.playerId ? state.players[hit.playerId] : undefined;
+    if (!target && !operatingTurret) {
+      const weapon = player.inventory[player.activeWeapon];
+      const definition = weapon ? WEAPONS[weapon.id] : null;
+      const angleLimit = definition?.magnetismAngle ?? 0;
+      const assistRange = Math.min(weaponRange, definition?.magnetismRange ?? 0);
+      let bestAngle = angleLimit;
+      if (angleLimit > 0 && assistRange > 0) {
+        for (const candidate of Object.values(state.players)) {
+          if (!candidate.alive || candidate.id === player.id) continue;
+          const enemy = !isTeamMode(state) || candidate.team !== player.team;
+          if (!enemy) continue;
+          const targetPoint = add(candidate.position, vec3(0, candidate.height * 0.62, 0));
+          if (distance(origin, targetPoint) > assistRange || !hasLineOfSight(origin, targetPoint, map)) continue;
+          const candidateDirection = normalize(subtract(targetPoint, origin));
+          const angle = Math.acos(clamp(dot(aimDirection, candidateDirection), -1, 1));
+          if (angle >= bestAngle) continue;
+          bestAngle = angle;
+          target = candidate;
+        }
+      }
+    }
     if (!target) return;
     const relation = isTeamMode(state) && target.team === player.team ? 'ally' : 'enemy';
     crosshair?.classList.add(relation);
@@ -887,7 +956,8 @@ export class AstralArenaApp {
     if (!this.localPlayerId || !this.currentState || !this.lastInput?.aim) return;
     const player = this.currentState.players[this.localPlayerId];
     const weapon = player?.inventory[player.activeWeapon];
-    if (!player?.alive || weapon?.id !== 'sniper') return;
+    const zoomSteps = weapon ? WEAPONS[weapon.id].zoomFov : undefined;
+    if (!player?.alive || player.aimSuppressed || weapon?.id !== 'sniper' || (zoomSteps?.length ?? 0) < 2) return;
     this.sniperZoomLevel = direction > 0 ? 1 : 0;
   }
 
@@ -994,6 +1064,7 @@ export class AstralArenaApp {
     this.renderer = null;
     this.network = null;
     this.simulation = null;
+    this.remoteInputBuffer.clear();
     this.currentState = null;
     this.role = null;
     this.localPlayerId = null;
@@ -1027,6 +1098,41 @@ export class AstralArenaApp {
     }
     if (event.code === 'Escape' && this.gameViewActive && !document.pointerLockElement) this.root.querySelector('#pause-panel')?.classList.remove('hidden');
   };
+
+  /**
+   * Digital combat edges are sent immediately in addition to the fixed input
+   * stream. This preserves quick taps and the release between two semi-auto
+   * shots over the ordered WebRTC data channel.
+   */
+  private sendGuestInputEdge(): void {
+    if (this.role !== 'guest' || !this.gameViewActive || !this.network || !this.input || !this.localPlayerId) return;
+    if (!this.network.connectedPeerIds.includes('host')) return;
+    const input = this.input.sample(++this.inputSequence);
+    this.lastInput = input;
+    const presentedPlayer = this.currentState?.players[this.localPlayerId];
+    if (presentedPlayer) {
+      presentedPlayer.yaw = input.yaw;
+      presentedPlayer.pitch = input.pitch;
+    }
+    this.network.sendToHost({ kind: 'input', playerId: this.localPlayerId, input });
+  }
+
+  /**
+   * Keeps every digital transition alive for at least one authoritative tick.
+   * A DOWN and UP can otherwise arrive in the same 16 ms window and overwrite
+   * each other before the host simulation observes either edge.
+   */
+  private queueRemoteInput(peerId: string, input: PlayerInput): void {
+    this.remoteInputBuffer.push(peerId, input);
+  }
+
+  private applyRemoteInputsForTick(): void {
+    if (!this.simulation) return;
+    for (const peerId of this.remoteInputBuffer.peerIds()) {
+      const next = this.remoteInputBuffer.next(peerId);
+      if (next) this.simulation.setInput(peerId, next);
+    }
+  }
 
   private handleGlobalKeyUp = (event: KeyboardEvent): void => {
     if (event.code === 'Tab') this.root.querySelector('#scoreboard')?.classList.remove('visible');

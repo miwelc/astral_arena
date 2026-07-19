@@ -86,6 +86,7 @@ const grenade = (
   radius: 0.16,
   damage: 120,
   blastRadius: 5.5,
+  armed: true,
   fuse: 1.7,
   alive: true,
   ...overrides,
@@ -227,26 +228,33 @@ describe('jump pad movement', () => {
 });
 
 describe('grenade detonation', () => {
-  it('keeps an expired grenade alive in flight and detonates it on ground contact', () => {
+  it('starts a frag fuse on first ground contact instead of while airborne', () => {
     const simulation = createSimulation();
     const owner = player(simulation, 'local');
     const { start } = findClearLine(simulation.map);
     owner.position = { x: simulation.map.bounds.maxX - 1, y: simulation.map.bounds.floorY, z: simulation.map.bounds.maxZ - 1 };
     const projectile = grenade(owner, { ...start, y: simulation.map.bounds.floorY + 8 }, {
       velocity: { x: 0.5, y: 0, z: 0 },
-      fuse: 0.01,
+      armed: false,
+      fuse: 1.7,
     });
     simulation.state.projectiles.push(projectile);
 
-    simulation.step(0.05);
+    simulation.step(0.5);
 
     expect(simulation.state.projectiles).toHaveLength(1);
-    expect(projectile.fuse).toBeLessThanOrEqual(0);
+    expect(projectile.armed).toBe(false);
+    expect(projectile.fuse).toBeCloseTo(1.7, 6);
     expect(simulation.state.events.some((event) => event.type === 'explosion')).toBe(false);
 
     projectile.position.y = simulation.map.bounds.floorY + projectile.radius + 0.01;
     projectile.velocity = { x: 0, y: -1, z: 0 };
     simulation.step(0.05);
+
+    expect(projectile.armed).toBe(true);
+    expect(projectile.fuse).toBeCloseTo(1.7, 6);
+    expect(simulation.state.projectiles).toHaveLength(1);
+    for (let index = 0; index < 36 && projectile.alive; index += 1) simulation.step(0.05);
 
     expect(simulation.state.projectiles).toHaveLength(0);
     expect(simulation.state.events.some((event) => event.type === 'explosion')).toBe(true);
@@ -336,6 +344,7 @@ describe('grenade detonation', () => {
     target.spawnProtection = 0;
     const projectile = grenade(owner, start, {
       velocity: { x: 24, y: 0, z: 0 },
+      armed: false,
       fuse: 1.2,
     });
     simulation.state.projectiles.push(projectile);

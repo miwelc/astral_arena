@@ -73,6 +73,7 @@ const explosiveAt = (
   radius: 0.2,
   damage,
   blastRadius,
+  armed: true,
   fuse: 0,
   alive: true,
 });
@@ -170,7 +171,7 @@ describe('combat rules', () => {
     });
   });
 
-  it('waits four seconds before recharging shields at 25 points per second', () => {
+  it('waits five seconds then restores a full shield in about 1.75 seconds', () => {
     const simulation = createSimulation({ mode: 'deathmatch' }, ['alpha']);
     const alpha = player(simulation, 'alpha');
     startMatch(simulation);
@@ -179,17 +180,17 @@ describe('combat rules', () => {
     alpha.shield = 20;
     alpha.lastDamageAt = 0;
 
-    simulation.state.elapsed = 3.99;
+    simulation.state.elapsed = 4.99;
     simulation.step(0);
     expect(alpha.shield).toBe(20);
 
-    simulation.state.elapsed = 4;
-    simulation.step(0.04);
-    expect(alpha.shield).toBeCloseTo(21, 8);
+    simulation.state.elapsed = 5;
+    simulation.step(0.035);
+    expect(alpha.shield).toBeCloseTo(22, 8);
     expect(simulation.state.events.filter((event) => event.type === 'shield-recharge-start' && event.targetId === alpha.id)).toHaveLength(1);
 
-    advance(simulation, 1);
-    expect(alpha.shield).toBeCloseTo(46, 8);
+    advance(simulation, 1.05);
+    expect(alpha.shield).toBeCloseTo(82, 8);
     expect(simulation.state.events.filter((event) => event.type === 'shield-recharge-start' && event.targetId === alpha.id)).toHaveLength(1);
 
     alpha.shield = 99.5;

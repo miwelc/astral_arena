@@ -987,16 +987,35 @@ kbd {
 
 .damage-hud {
   --damage-strength: 0.6;
+  --damage-angle: 0deg;
+  --damage-rgb: 255, 24, 51;
   position: absolute;
   z-index: 4;
   inset: -2px;
+  overflow: hidden;
   opacity: 0;
   pointer-events: none;
   background:
-    radial-gradient(circle at center, transparent 34%, rgba(95, 0, 13, calc(var(--damage-strength) * 0.22)) 66%, rgba(255, 24, 51, calc(var(--damage-strength) * 0.74)) 104%),
-    linear-gradient(90deg, rgba(255, 32, 60, calc(var(--damage-strength) * 0.3)), transparent 13% 87%, rgba(255, 32, 60, calc(var(--damage-strength) * 0.3)));
-  box-shadow: inset 0 0 90px rgba(255, 15, 44, calc(var(--damage-strength) * 0.5));
+    radial-gradient(circle at center, transparent 34%, rgba(var(--damage-rgb), calc(var(--damage-strength) * 0.18)) 66%, rgba(var(--damage-rgb), calc(var(--damage-strength) * 0.68)) 104%),
+    linear-gradient(90deg, rgba(var(--damage-rgb), calc(var(--damage-strength) * 0.28)), transparent 13% 87%, rgba(var(--damage-rgb), calc(var(--damage-strength) * 0.28)));
+  box-shadow: inset 0 0 90px rgba(var(--damage-rgb), calc(var(--damage-strength) * 0.48));
   mix-blend-mode: screen;
+}
+
+.damage-hud.shield-only { --damage-rgb: 55, 218, 235; }
+.damage-hud.health-hit { --damage-rgb: 255, 24, 51; }
+.damage-hud > i {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  display: block;
+  width: clamp(82px, 12vw, 184px);
+  height: 54vh;
+  transform: translate(-50%, -100%) rotate(var(--damage-angle));
+  transform-origin: 50% 100%;
+  clip-path: polygon(39% 0, 61% 0, 100% 100%, 0 100%);
+  background: linear-gradient(to top, transparent 0 47%, rgba(var(--damage-rgb), calc(var(--damage-strength) * 0.18)) 72%, rgba(var(--damage-rgb), calc(var(--damage-strength) * 0.88)) 100%);
+  filter: blur(1px) drop-shadow(0 0 13px rgba(var(--damage-rgb), 0.72));
 }
 
 .damage-hud.active { animation: damage-hud-impact 740ms cubic-bezier(0.12, 0.74, 0.2, 1); }
@@ -1121,17 +1140,19 @@ kbd {
 }
 
 .crosshair {
+  --weapon-bloom: 0;
+  --reticle-bloom-scale: 1;
   z-index: 5;
   position: absolute;
   top: 50%;
   left: 50%;
   width: 38px;
   height: 38px;
-  transform: translate(-50%, -50%);
+  transform: translate(-50%, -50%) scale(var(--reticle-bloom-scale));
   color: rgba(222, 255, 248, 0.88);
   pointer-events: none;
   filter: drop-shadow(0 0 3px rgba(0, 0, 0, 0.8));
-  transition: width 120ms ease, height 120ms ease, color 100ms ease;
+  transition: width 120ms ease, height 120ms ease, color 100ms ease, transform 70ms linear, opacity 110ms ease;
 }
 
 .crosshair.scoped { opacity: 0; }
@@ -1220,7 +1241,7 @@ kbd {
   inset: 15px;
   border: 1px solid currentColor;
   border-radius: 50%;
-  opacity: 0.22;
+  opacity: clamp(0.22, calc(0.22 + var(--weapon-bloom)), 0.72);
 }
 .crosshair[data-reticle="automatic"] i:nth-child(1) { top: 0; left: 26px; height: 8px; }
 .crosshair[data-reticle="automatic"] i:nth-child(2) { bottom: 0; left: 26px; height: 8px; }
@@ -1285,6 +1306,31 @@ kbd {
 .crosshair[data-reticle="turret"] i:nth-child(4) { top: 30px; right: 0; width: 12px; }
 .crosshair[data-reticle="turret"] b { display: none; }
 .crosshair[data-reticle="turret"].firing::before { transform: scale(1.1); opacity: 1; }
+
+.combat-warning {
+  position: absolute;
+  z-index: 7;
+  top: calc(50% + 50px);
+  left: 50%;
+  min-width: 92px;
+  padding: 3px 9px 2px;
+  transform: translate(-50%, -4px);
+  border-inline: 1px solid currentColor;
+  opacity: 0;
+  color: #f4dc86;
+  background: linear-gradient(90deg, transparent, rgba(3, 17, 24, 0.8) 17% 83%, transparent);
+  font-family: var(--display);
+  font-size: 8px;
+  letter-spacing: 0.17em;
+  text-align: center;
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.94), 0 0 8px currentColor;
+  pointer-events: none;
+  transition: opacity 100ms ease, transform 100ms ease;
+}
+.combat-warning.visible { transform: translate(-50%, 0); opacity: 0.92; }
+.combat-warning.critical { color: #ff6379; }
+.combat-warning.warning { color: #ffd875; }
+.combat-warning.utility { color: #80dce1; opacity: 0.72; }
 
 .interaction-prompt {
   position: absolute;
@@ -1353,12 +1399,18 @@ kbd {
   z-index: 3;
   position: absolute;
   inset: 0;
-  display: none;
+  opacity: 0;
+  visibility: hidden;
   pointer-events: none;
   background: radial-gradient(circle at center, transparent 0 36%, rgba(1, 8, 13, 0.88) 36.3% 100%);
+  transition: opacity 110ms ease, visibility 0s linear 110ms;
 }
 
-.scope-overlay.active { display: block; }
+.scope-overlay.active {
+  opacity: 1;
+  visibility: visible;
+  transition-delay: 0s;
+}
 .scope-overlay div {
   position: absolute;
   top: 50%; left: 50%;
@@ -1410,7 +1462,9 @@ kbd {
   font-family: var(--display);
   pointer-events: none;
   filter: drop-shadow(0 4px 14px rgba(0, 0, 0, 0.62));
+  transition: opacity 100ms ease, filter 100ms ease, visibility 100ms;
 }
+.motion-radar.zoom-hidden { visibility: hidden; opacity: 0; filter: none; }
 
 .radar-face {
   position: relative;
@@ -1746,6 +1800,7 @@ kbd {
   .motion-radar > small { display: none; }
   .combat-alerts { top: 19%; width: 88vw; }
   .combat-alert strong { font-size: 15px; }
+  .combat-warning { top: calc(50% + 44px); font-size: 7px; }
   .click-hint { bottom: 84px; font-size: 6px; }
   .interaction-prompt { top: calc(50% + 58px); min-width: 225px; }
   .turret-hud { min-width: 260px; }

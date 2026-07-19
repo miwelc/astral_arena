@@ -79,7 +79,23 @@ describe('P2P MatchState validation', () => {
       radius: 0.16,
       damage: 120,
       blastRadius: 5.5,
+      armed: true,
       fuse: -0.05,
+      alive: true,
+    });
+    state.projectiles.push({
+      id: 'bullet-fixture',
+      kind: 'bullet',
+      ownerId: 'local-player',
+      team: state.players['local-player']?.team ?? 'aurora',
+      weaponId: 'battle-rifle',
+      position: { x: 0, y: 1.5, z: 0 },
+      velocity: { x: 180, y: 0, z: 0 },
+      radius: 0.025,
+      damage: 9,
+      blastRadius: 0,
+      armed: true,
+      fuse: 0.4,
       alive: true,
     });
     const startId = ++state.eventSequence;
@@ -99,6 +115,21 @@ describe('P2P MatchState validation', () => {
       flagTeam: 'nova',
       flagAction: 'taken',
       message: 'Lince tomó la bandera',
+    });
+    state.events.push({
+      id: ++state.eventSequence,
+      time: state.elapsed,
+      type: 'hit',
+      actorId: 'local-player',
+      targetId: Object.keys(state.players).find((id) => id !== 'local-player'),
+      weaponId: 'battle-rifle',
+      position: { x: 2, y: 1.5, z: 3 },
+      sourcePosition: { x: -2, y: 1.5, z: 3 },
+      amount: 70,
+      shieldDamage: 10,
+      healthDamage: 60,
+      headshot: true,
+      fatal: true,
     });
 
     expect(isValidMatchState(state)).toBe(true);
@@ -146,6 +177,12 @@ describe('P2P MatchState validation', () => {
     ['invalid input number', (state: MatchState) => { firstPlayer(state).input.yaw = Number.POSITIVE_INFINITY; }],
     ['invalid use input', (state: MatchState) => { (firstPlayer(state).input as unknown as { use: string }).use = 'yes'; }],
     ['invalid weapon', (state: MatchState) => { firstPlayer(state).inventory[0]!.id = 'laser' as WeaponId; }],
+    ['invalid weapon bloom', (state: MatchState) => { firstPlayer(state).inventory[0]!.bloom = 1.5; }],
+    ['invalid burst counter', (state: MatchState) => { firstPlayer(state).inventory[0]!.burstRemaining = 99; }],
+    ['invalid burst round index', (state: MatchState) => { firstPlayer(state).inventory[0]!.burstRoundIndex = 99; }],
+    ['invalid aim suppression', (state: MatchState) => {
+      (firstPlayer(state) as unknown as { aimSuppressed: string }).aimSuppressed = 'yes';
+    }],
     ['invalid active weapon', (state: MatchState) => { firstPlayer(state).activeWeapon = 99; }],
     ['invalid bot memory', (state: MatchState) => {
       const bot = Object.values(state.players).find((player) => player.kind === 'bot');
@@ -187,6 +224,11 @@ describe('P2P MatchState validation', () => {
       const event = state.events[0];
       if (!event) throw new Error('Missing event fixture');
       event.traces = Array.from({ length: 13 }, () => ({ x: 0, y: 0, z: 0 }));
+    }],
+    ['explosion metadata on a hit', (state: MatchState) => {
+      const event = state.events[0];
+      if (!event) throw new Error('Missing event fixture');
+      event.explosionKind = 'grenade';
     }],
   ])('rejects malformed arrays/events: %s', (_label, mutate) => {
     const state = copy(makeState('juggernaut'));

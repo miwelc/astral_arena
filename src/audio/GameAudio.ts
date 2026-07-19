@@ -45,6 +45,71 @@ export const MOVEMENT_SOUND_PROFILE = Object.freeze({
   land: Object.freeze({ duration: 0.16, from: 116, to: 42, volume: 0.38 }),
 });
 
+export type HitMarkerKind = 'shield' | 'health' | 'mixed' | 'generic';
+export type KillConfirmationKind = 'headshot' | 'standard';
+
+export interface CombatFeedbackTone {
+  duration: number;
+  volume: number;
+  type: OscillatorType;
+  from: number;
+  to: number;
+  delay?: number;
+}
+
+export interface CombatFeedbackSoundProfile {
+  shieldHit: readonly CombatFeedbackTone[];
+  healthHit: readonly CombatFeedbackTone[];
+  genericHit: readonly CombatFeedbackTone[];
+  killConfirmed: readonly CombatFeedbackTone[];
+  headshotConfirmed: readonly CombatFeedbackTone[];
+}
+
+/**
+ * Compact HUD confirmations deliberately occupy different frequency bands:
+ * shield contact is a bright electronic chirp, exposed armour is a dry low
+ * click, and a lethal headshot has its own unmistakable rising signature.
+ */
+export const COMBAT_FEEDBACK_SOUND_PROFILE: CombatFeedbackSoundProfile = Object.freeze({
+  shieldHit: Object.freeze([
+    Object.freeze({ duration: 0.036, volume: 1, type: 'sine', from: 1120, to: 1580 }),
+    Object.freeze({ duration: 0.03, volume: 0.42, type: 'triangle', from: 1840, to: 1320, delay: 0.004 }),
+  ]),
+  healthHit: Object.freeze([
+    Object.freeze({ duration: 0.04, volume: 1, type: 'triangle', from: 820, to: 560 }),
+    Object.freeze({ duration: 0.052, volume: 0.36, type: 'sine', from: 430, to: 250, delay: 0.003 }),
+  ]),
+  genericHit: Object.freeze([
+    Object.freeze({ duration: 0.034, volume: 1, type: 'sine', from: 920, to: 720 }),
+    Object.freeze({ duration: 0.025, volume: 0.48, type: 'triangle', from: 1380, to: 1040, delay: 0.004 }),
+  ]),
+  killConfirmed: Object.freeze([
+    Object.freeze({ duration: 0.085, volume: 0.3, type: 'triangle', from: 330, to: 330 }),
+    Object.freeze({ duration: 0.13, volume: 0.27, type: 'triangle', from: 495, to: 495, delay: 0.065 }),
+  ]),
+  headshotConfirmed: Object.freeze([
+    Object.freeze({ duration: 0.055, volume: 0.34, type: 'sine', from: 1480, to: 2180 }),
+    Object.freeze({ duration: 0.12, volume: 0.25, type: 'triangle', from: 2380, to: 1240, delay: 0.036 }),
+    Object.freeze({ duration: 0.1, volume: 0.16, type: 'sine', from: 520, to: 780, delay: 0.082 }),
+  ]),
+});
+
+/** Selects one confirmation without guessing from total damage alone. */
+export const hitMarkerKindFor = (
+  damage: Pick<GameEvent, 'shieldDamage' | 'healthDamage'>,
+): HitMarkerKind => {
+  const shieldDamage = Math.max(0, damage.shieldDamage ?? 0);
+  const healthDamage = Math.max(0, damage.healthDamage ?? 0);
+  if (shieldDamage > 0 && healthDamage > 0) return 'mixed';
+  if (healthDamage > 0) return 'health';
+  if (shieldDamage > 0) return 'shield';
+  return 'generic';
+};
+
+export const killConfirmationKindFor = (
+  event: Pick<GameEvent, 'headshot' | 'fatal'>,
+): KillConfirmationKind => event.headshot === true && event.fatal === true ? 'headshot' : 'standard';
+
 export const shieldRechargeCueWasInterrupted = (
   rechargeEvent: GameEvent,
   events: readonly GameEvent[],
@@ -126,7 +191,13 @@ export class GameAudio {
   }
 
   public consume(events: GameEvent[], localPlayerId: string | null): void {
-    if (!this.context || !this.master) return;
+    if (!this.context || !this.master) {
+      // The match keeps running before the browser grants WebAudio permission.
+      // Discard that silent history so the first interaction cannot unleash a
+      // compressed backlog of several seconds of shots and impacts.
+      for (const event of events) this.seenEvent = Math.max(this.seenEvent, event.id);
+      return;
+    }
     for (const event of events) {
       if (event.id <= this.seenEvent) continue;
       this.seenEvent = Math.max(this.seenEvent, event.id);
@@ -139,13 +210,26 @@ export class GameAudio {
           break;
         case 'hit': {
           const damageWeight = Math.min(1, Math.max(0.35, (event.amount ?? 18) / 38));
-          if (actorLocal) this.hitMarker(0.16 + damageWeight * 0.08);
-          if (locallyRelevant) this.bulletImpact(targetLocal ? 0.42 * damageWeight : 0.14);
+          const localFatalConfirmationFollows = actorLocal && event.fatal === true;
+          if (actorLocal && !localFatalConfirmationFollows) {
+            this.hitMarker(hitMarkerKindFor(event), 0.16 + damageWeight * 0.08);
+          }
+          if (locallyRelevant && !localFatalConfirmationFollows) {
+            this.bulletImpact(targetLocal ? 0.42 * damageWeight : 0.14);
+          }
           break;
         }
-        case 'shield-break':
-          if (locallyRelevant) this.shieldBreak(targetLocal ? 0.62 : 0.24);
+        case 'shield-break': {
+          const localFatalConfirmationFollows = actorLocal && events.some((candidate) =>
+            candidate.type === 'hit'
+            && candidate.actorId === event.actorId
+            && candidate.targetId === event.targetId
+            && candidate.fatal === true
+            && Math.abs(candidate.time - event.time) < 0.001,
+          );
+          if (locallyRelevant && !localFatalConfirmationFollows) this.shieldBreak(targetLocal ? 0.62 : 0.24);
           break;
+        }
         case 'shield-recharge-start':
           if (targetLocal && !shieldRechargeCueWasInterrupted(event, events)) {
             this.shieldRechargeStart(SHIELD_RECHARGE_SOUND_PROFILE.start.volume);
@@ -157,10 +241,7 @@ export class GameAudio {
           }
           break;
         case 'kill':
-          if (actorLocal) {
-            this.tone(330, 330, 0.085, 'triangle', 0.3);
-            this.tone(495, 495, 0.13, 'triangle', 0.27, 0.065);
-          }
+          if (actorLocal) this.killConfirmed(killConfirmationKindFor(event));
           break;
         case 'explosion':
           this.explosion(locallyRelevant ? 0.78 : 0.36);
@@ -288,9 +369,40 @@ export class GameAudio {
     }
   }
 
-  private hitMarker(volume: number): void {
-    this.tone(920, 720, 0.034, 'sine', volume);
-    this.tone(1380, 1040, 0.025, 'triangle', volume * 0.48, 0.004);
+  private hitMarker(kind: HitMarkerKind, volume: number): void {
+    if (kind === 'mixed') {
+      this.playFeedbackTone(COMBAT_FEEDBACK_SOUND_PROFILE.shieldHit, volume * 0.68);
+      this.playFeedbackTone(COMBAT_FEEDBACK_SOUND_PROFILE.healthHit, volume * 0.82);
+      return;
+    }
+    const profile = kind === 'shield'
+      ? COMBAT_FEEDBACK_SOUND_PROFILE.shieldHit
+      : kind === 'health'
+        ? COMBAT_FEEDBACK_SOUND_PROFILE.healthHit
+        : COMBAT_FEEDBACK_SOUND_PROFILE.genericHit;
+    this.playFeedbackTone(profile, volume);
+  }
+
+  private killConfirmed(kind: KillConfirmationKind): void {
+    this.playFeedbackTone(
+      kind === 'headshot'
+        ? COMBAT_FEEDBACK_SOUND_PROFILE.headshotConfirmed
+        : COMBAT_FEEDBACK_SOUND_PROFILE.killConfirmed,
+      1,
+    );
+  }
+
+  private playFeedbackTone(profile: readonly CombatFeedbackTone[], scale: number): void {
+    for (const layer of profile) {
+      this.tone(
+        layer.from,
+        layer.to,
+        layer.duration,
+        layer.type,
+        layer.volume * scale,
+        layer.delay ?? 0,
+      );
+    }
   }
 
   private bulletImpact(volume: number): void {
