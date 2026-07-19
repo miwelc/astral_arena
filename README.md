@@ -201,10 +201,10 @@ La vertical se construyó en seis capas verificables, actualmente completadas:
 2. **Arena shooter:** movimiento, colisiones, escudos, salud, respawn, dos armas, pickups, melee, granadas, hitscan y proyectiles.
 3. **Contenido competitivo:** mapas Cresta del Cráter y Estación Umbra, seis armas, formatos de 2/8 plazas y reglas de los cinco modos.
 4. **Oponentes:** percepción limitada, memoria, dificultad, navegación, desatasco y conducta específica por objetivo.
-5. **Presentación y red:** arte 3D procedural combinado con modelos CC0, astronautas, cámara FPS, HUD/audio, host autoritativo y señalización WebRTC manual.
-6. **Endurecimiento de la vertical:** validación de inputs, backpressure de snapshots, regresiones y simulaciones largas de bots.
+5. **Presentación y red:** arte 3D procedural combinado con modelos CC0, astronautas, cámara FPS, HUD/audio, host autoritativo, predicción/reconciliación del invitado y señalización WebRTC manual.
+6. **Endurecimiento de la vertical:** validación de inputs, backpressure de snapshots, memoria de movimiento autoritativa, regresiones y simulaciones largas de bots.
 
-Para convertir la vertical en un lanzamiento público, el orden recomendado es: pruebas reales Chrome/Firefox/Safari; sesiones sostenidas de ocho navegadores sobre varias redes; snapshots no fiables y predicción/reconciliación del cliente; captura de movimiento y audio finales; opciones de accesibilidad; y, solo si se acepta infraestructura, señalización automática, TURN y/o migración de host.
+Para convertir la vertical en un lanzamiento público, el orden recomendado es: pruebas reales Chrome/Firefox/Safari; sesiones sostenidas de ocho navegadores sobre varias redes; separar snapshots parcialmente fiables del canal de control y reducir su DTO; captura de movimiento y audio finales; opciones de accesibilidad; y, solo si se acepta infraestructura, señalización automática, TURN y/o migración de host.
 
 ## Arquitectura
 

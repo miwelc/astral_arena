@@ -5,7 +5,7 @@ export type Team = 'aurora' | 'nova' | 'neutral';
 export type PlayerKind = 'human' | 'bot' | 'remote';
 export type WeaponId = 'pulse-rifle' | 'sidearm' | 'battle-rifle' | 'sniper' | 'shotgun' | 'rocket-launcher';
 export type PickupKind = 'weapon' | 'overshield' | 'ammo' | 'grenade';
-export const GAME_PROTOCOL_VERSION = 3 as const;
+export const GAME_PROTOCOL_VERSION = 4 as const;
 
 export interface Vec3 {
   x: number;
@@ -43,6 +43,15 @@ export interface PlayerInput {
   crouch: boolean;
   /** Context action: take a weapon or enter/leave an emplaced turret. */
   use: boolean;
+}
+
+/** Authoritative state required to predict jump-pad movement without drift. */
+export interface PlayerMovementMemory {
+  jumpPadReadyAt: number;
+  jumpPadMomentum: {
+    direction: Vec3;
+    minimumSpeed: number;
+  } | null;
 }
 
 export interface WeaponState {
@@ -93,6 +102,7 @@ export interface PlayerState {
   aimSuppressed: boolean;
   input: PlayerInput;
   lastProcessedInput: number;
+  movementMemory: PlayerMovementMemory;
   kills: number;
   deaths: number;
   assists: number;

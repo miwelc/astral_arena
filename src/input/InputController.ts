@@ -59,7 +59,7 @@ export class InputController {
     this.lookSensitivityScale = clamp(scale, 0.05, 1);
   }
 
-  public sample(sequence: number): PlayerInput {
+  public sample(sequence: number, deltaSeconds = 1 / 60): PlayerInput {
     if (!this.enabled) return { ...emptyInput(), sequence, yaw: this.yaw, pitch: this.pitch };
     let moveX = Number(this.keys.has('KeyD')) - Number(this.keys.has('KeyA'));
     let moveZ = Number(this.keys.has('KeyW')) - Number(this.keys.has('KeyS'));
@@ -76,10 +76,19 @@ export class InputController {
     const gamepad = navigator.getGamepads?.()[0];
     if (gamepad) {
       const deadzone = (value: number): number => (Math.abs(value) < 0.14 ? 0 : value);
+      const lookStepScale = clamp(deltaSeconds * 60, 0, 6);
       moveX = clamp(moveX + deadzone(gamepad.axes[0] ?? 0), -1, 1);
       moveZ = clamp(moveZ - deadzone(gamepad.axes[1] ?? 0), -1, 1);
-      this.yaw = wrapAngle(this.yaw - deadzone(gamepad.axes[2] ?? 0) * 0.045 * this.lookSensitivityScale);
-      this.pitch = clamp(this.pitch - deadzone(gamepad.axes[3] ?? 0) * 0.035 * this.lookSensitivityScale, -1.48, 1.48);
+      this.yaw = wrapAngle(
+        this.yaw
+        - deadzone(gamepad.axes[2] ?? 0) * 0.045 * this.lookSensitivityScale * lookStepScale,
+      );
+      this.pitch = clamp(
+        this.pitch
+        - deadzone(gamepad.axes[3] ?? 0) * 0.035 * this.lookSensitivityScale * lookStepScale,
+        -1.48,
+        1.48,
+      );
       fire ||= (gamepad.buttons[7]?.value ?? 0) > 0.4;
       aim ||= (gamepad.buttons[6]?.value ?? 0) > 0.4;
       jump ||= gamepad.buttons[0]?.pressed ?? false;

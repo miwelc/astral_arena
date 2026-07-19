@@ -701,7 +701,12 @@ export class ArenaRenderer {
     this.damageOverlay?.scale.set(overlayHeight * this.camera.aspect, overlayHeight, 1);
   }
 
-  public render(state: MatchState, alpha: number, firstPerson: boolean): void {
+  public render(
+    state: MatchState,
+    alpha: number,
+    firstPerson: boolean,
+    localAlpha = alpha,
+  ): void {
     if (this.disposed) return;
 
     const delta = Math.min(this.clock.getDelta(), 0.05);
@@ -724,7 +729,14 @@ export class ArenaRenderer {
     this.previousStateElapsed = state.elapsed;
     const worldTime = this.visualSimulationTime + interpolation / 60;
 
-    this.syncPlayers(state, interpolation, worldTime, firstPerson, delta);
+    this.syncPlayers(
+      state,
+      interpolation,
+      clamp01(localAlpha),
+      worldTime,
+      firstPerson,
+      delta,
+    );
     this.syncPickups(state.pickups, worldTime);
     this.syncFlags(state.config.mode === 'capture-the-flag' ? state.flags : [], state, worldTime);
     this.syncProjectiles(state.projectiles, worldTime);
@@ -2402,6 +2414,7 @@ export class ArenaRenderer {
   private syncPlayers(
     state: MatchState,
     alpha: number,
+    localAlpha: number,
     worldTime: number,
     firstPerson: boolean,
     delta: number,
@@ -2421,7 +2434,27 @@ export class ArenaRenderer {
       if (rig.team !== player.team) this.updateRigTeam(rig, player.team);
       const operatingTowerTurret = state.config.mode === 'towah-of-powah'
         && state.tower.turretOwnerId === player.id;
-      if (rig.lastTick !== state.tick) {
+      const locallyPresented = player.id === this.localPlayerId;
+      if (locallyPresented) {
+        // The locally controlled body is also the first-person camera anchor.
+        // Present its latest predicted/authoritative pose directly: routing it
+        // through the snapshot interpolation buffer adds a full snapshot of
+        // avoidable input lag on guests. Keeping all interpolation endpoints in
+        // sync also makes teleports and later ownership changes safe.
+        const extrapolationSeconds = localAlpha / 60;
+        rig.root.position.set(
+          player.position.x + player.velocity.x * extrapolationSeconds,
+          player.position.y + player.velocity.y * extrapolationSeconds,
+          player.position.z + player.velocity.z * extrapolationSeconds,
+        );
+        rig.previousPosition.copy(rig.root.position);
+        rig.targetPosition.copy(rig.root.position);
+        rig.previousYaw = player.yaw;
+        rig.targetYaw = player.yaw;
+        rig.root.rotation.y = player.yaw;
+        rig.operatingTowerTurret = operatingTowerTurret;
+        rig.lastTick = state.tick;
+      } else if (rig.lastTick !== state.tick) {
         const nextPosition = vectorFrom(player.position);
         const turretMountChanged = rig.operatingTowerTurret !== operatingTowerTurret;
         if (turretMountChanged || rig.targetPosition.distanceToSquared(nextPosition) > 36) {
@@ -2439,15 +2472,17 @@ export class ArenaRenderer {
         rig.operatingTowerTurret = operatingTowerTurret;
         rig.lastTick = state.tick;
       }
-      const desiredPosition = new THREE.Vector3().lerpVectors(
-        rig.previousPosition,
-        rig.targetPosition,
-        alpha,
-      );
-      const desiredYaw = lerpAngle(rig.previousYaw, rig.targetYaw, alpha);
-      const presentationDamping = alpha > 0.001 ? 1 : 1 - Math.exp(-delta * 18);
-      rig.root.position.lerp(desiredPosition, presentationDamping);
-      rig.root.rotation.y = lerpAngle(rig.root.rotation.y, desiredYaw, presentationDamping);
+      if (!locallyPresented) {
+        const desiredPosition = new THREE.Vector3().lerpVectors(
+          rig.previousPosition,
+          rig.targetPosition,
+          alpha,
+        );
+        const desiredYaw = lerpAngle(rig.previousYaw, rig.targetYaw, alpha);
+        const presentationDamping = alpha > 0.001 ? 1 : 1 - Math.exp(-delta * 18);
+        rig.root.position.lerp(desiredPosition, presentationDamping);
+        rig.root.rotation.y = lerpAngle(rig.root.rotation.y, desiredYaw, presentationDamping);
+      }
 
       const activeWeapon = player.inventory[player.activeWeapon] ?? player.inventory[0];
       const weaponId = activeWeapon?.id ?? null;

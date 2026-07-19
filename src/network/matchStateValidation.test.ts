@@ -265,6 +265,18 @@ describe('P2P MatchState validation', () => {
     ['invalid input number', (state: MatchState) => { firstPlayer(state).input.yaw = Number.POSITIVE_INFINITY; }],
     ['invalid use input', (state: MatchState) => { (firstPlayer(state).input as unknown as { use: string }).use = 'yes'; }],
     ['invalid crouch input', (state: MatchState) => { (firstPlayer(state).input as unknown as { crouch: string }).crouch = 'yes'; }],
+    ['missing movement memory', (state: MatchState) => {
+      delete (firstPlayer(state) as Partial<PlayerState>).movementMemory;
+    }],
+    ['invalid jump-pad cooldown', (state: MatchState) => {
+      firstPlayer(state).movementMemory.jumpPadReadyAt = -1;
+    }],
+    ['invalid jump-pad momentum', (state: MatchState) => {
+      firstPlayer(state).movementMemory.jumpPadMomentum = {
+        direction: { x: Number.NaN, y: 0, z: 0 },
+        minimumSpeed: 4,
+      };
+    }],
     ['invalid weapon', (state: MatchState) => { firstPlayer(state).inventory[0]!.id = 'laser' as WeaponId; }],
     ['invalid weapon bloom', (state: MatchState) => { firstPlayer(state).inventory[0]!.bloom = 1.5; }],
     ['invalid burst counter', (state: MatchState) => { firstPlayer(state).inventory[0]!.burstRemaining = 99; }],

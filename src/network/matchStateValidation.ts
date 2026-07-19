@@ -85,6 +85,14 @@ const isPlayerInput = (value: unknown): boolean => {
       .every((button) => typeof button === 'boolean');
 };
 
+const isPlayerMovementMemory = (value: unknown): boolean => {
+  if (!isRecord(value) || !isNonNegativeNumber(value.jumpPadReadyAt)) return false;
+  if (value.jumpPadMomentum === null) return true;
+  return isRecord(value.jumpPadMomentum)
+    && isVec3(value.jumpPadMomentum.direction)
+    && isNonNegativeNumber(value.jumpPadMomentum.minimumSpeed);
+};
+
 const isWeaponState = (value: unknown): boolean => {
   if (!isRecord(value)) return false;
   return isEnumValue(WEAPON_IDS, value.id)
@@ -198,7 +206,11 @@ const isPlayerState = (value: unknown, recordId: string): boolean => {
   if (!isSafeNonNegativeInteger(value.activeWeapon) || value.activeWeapon >= value.inventory.length) return false;
 
   const integerFields = [value.grenades, value.lastProcessedInput, value.kills, value.deaths, value.assists, value.score, value.streak];
-  if (!integerFields.every(isSafeNonNegativeInteger) || !isPlayerInput(value.input)) return false;
+  if (
+    !integerFields.every(isSafeNonNegativeInteger)
+    || !isPlayerInput(value.input)
+    || !isPlayerMovementMemory(value.movementMemory)
+  ) return false;
   if (!(value.carryingFlagTeam === null || isEnumValue(TEAMS, value.carryingFlagTeam))) return false;
   if (value.bot !== undefined && !isBotMemory(value.bot)) return false;
   return value.kind !== 'bot' || isBotMemory(value.bot);

@@ -166,6 +166,14 @@ describe('input validation', () => {
       expect(player(simulation, 'remote').input).toEqual(initialInput);
     }
   });
+
+  it('does not let an older network sequence restore stale controls', () => {
+    const simulation = createSimulation({}, ['remote']);
+    simulation.setInput('remote', { ...emptyInput(), sequence: 8, moveZ: 1, yaw: 0.7 });
+    simulation.setInput('remote', { ...emptyInput(), sequence: 7, moveZ: -1, yaw: -0.9 });
+
+    expect(player(simulation, 'remote').input).toMatchObject({ sequence: 8, moveZ: 1, yaw: 0.7 });
+  });
 });
 
 describe('combat rules', () => {

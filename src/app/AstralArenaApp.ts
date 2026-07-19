@@ -1,13 +1,12 @@
 import { GameAudio } from '../audio/GameAudio';
 import { hasLineOfSight, raycastWorld } from '../game/collision';
-import { MAPS, TOWER_TURRET_LAYOUT } from '../game/map';
+import { MAPS } from '../game/map';
 import {
   add,
   clamp,
   directionFromAngles,
   distance,
   dot,
-  moveAngleToward,
   normalize,
   subtract,
   vec3,
@@ -34,6 +33,7 @@ import { WEAPONS } from '../game/weapons';
 import { InputController } from '../input/InputController';
 import { isValidMatchState } from '../network/matchStateValidation';
 import { P2PNetwork, P2PNetworkError } from '../network/P2PNetwork';
+import { LocalPlayerPrediction } from '../network/LocalPlayerPrediction';
 import { RemoteInputBuffer } from '../network/RemoteInputBuffer';
 import type { ArenaRenderer } from '../render/ArenaRenderer';
 import type { ExternalWeaponLoadReport } from '../render/externalWeaponModels';
@@ -111,13 +111,16 @@ export class AstralArenaApp {
   private lastFrameAt = 0;
   private accumulator = 0;
   private snapshotTimer = 0;
-  private inputSendTimer = 0;
+  private guestSnapshotTimer = 0;
+  private guestSnapshotInterval = 0.05;
+  private lastGuestSnapshotAt = 0;
   private pingTimer = 0;
   private latency = 0;
   private networkStatus: 'connecting' | 'connected' | 'lost' = 'connecting';
   private inputSequence = 0;
   private lastInput: PlayerInput | null = null;
   private readonly remoteInputBuffer = new RemoteInputBuffer();
+  private readonly localPlayerPrediction = new LocalPlayerPrediction();
   private guestName = 'Astronauta';
   private gameViewActive = false;
   private lastDamageEvent = 0;
@@ -539,6 +542,15 @@ export class AstralArenaApp {
           return;
         }
         this.localPlayerId = message.playerId;
+        const state = this.currentState;
+        const player = state?.players[message.playerId];
+        if (state && player) {
+          // A reliable channel is ordered today, but accepting this ordering as
+          // a state-machine invariant makes a future realtime channel safe too.
+          this.localPlayerPrediction.reconcile(state, message.playerId, player.lastProcessedInput);
+          this.localPlayerPrediction.applyTo(state, message.playerId, 0);
+          if (!this.gameViewActive) void this.startGameView(state);
+        }
       } else if (message.kind === 'snapshot') {
         const receivedAt = performance.now();
         const snapshot = message.state as unknown;
@@ -554,7 +566,24 @@ export class AstralArenaApp {
           return;
         }
         if (this.currentState?.matchId === snapshot.matchId && snapshot.tick < this.currentState.tick) return;
+        if (this.lastGuestSnapshotAt > 0) {
+          const observedInterval = clamp((receivedAt - this.lastGuestSnapshotAt) / 1000, 0.025, 0.1);
+          this.guestSnapshotInterval += (observedInterval - this.guestSnapshotInterval) * 0.2;
+        }
+        this.lastGuestSnapshotAt = receivedAt;
+        this.guestSnapshotTimer = 0;
         this.currentState = snapshot;
+        if (localPlayerId) {
+          const authoritativeAck = snapshot.players[localPlayerId]?.lastProcessedInput ?? 0;
+          const envelopeAck = message.acknowledgedInputs[localPlayerId];
+          const acknowledgedInput = typeof envelopeAck === 'number'
+            && Number.isSafeInteger(envelopeAck)
+            && envelopeAck >= 0
+            ? Math.min(envelopeAck, authoritativeAck)
+            : authoritativeAck;
+          this.localPlayerPrediction.reconcile(snapshot, localPlayerId, acknowledgedInput);
+          this.localPlayerPrediction.applyTo(snapshot, localPlayerId, 0);
+        }
         if (!this.gameViewActive && localPlayerId) void this.startGameView(snapshot);
       } else if (message.kind === 'pong') {
         this.latency = Math.round(performance.now() - message.sentAt);
@@ -718,7 +747,7 @@ export class AstralArenaApp {
       this.accumulator += delta;
       while (this.accumulator >= fixed) {
         if (this.input && this.localPlayerId) {
-          this.lastInput = this.input.sample(++this.inputSequence);
+          this.lastInput = this.input.sample(++this.inputSequence, fixed);
           this.simulation.setInput(this.localPlayerId, this.lastInput);
         }
         if (this.role === 'host') this.applyRemoteInputsForTick();
@@ -730,29 +759,41 @@ export class AstralArenaApp {
         this.snapshotTimer += delta;
         if (this.snapshotTimer >= 0.05) {
           this.snapshotTimer %= 0.05;
-          this.network.broadcast(this.createSnapshot(), { maxBufferedAmount: 256 * 1024 });
+          // Keep at most roughly one full-state snapshot queued on the reliable
+          // channel. A skipped state is superseded by the next tick, leaving
+          // room for welcome, pong and error control messages on the same path.
+          this.network.broadcast(this.createSnapshot(), { maxBufferedAmount: 8 * 1024 });
         }
       }
     } else if (this.role === 'guest' && this.network && this.input && this.localPlayerId) {
-      this.inputSendTimer += delta;
-      this.lastInput = this.input.sample(++this.inputSequence);
-      const presentedPlayer = this.currentState?.players[this.localPlayerId];
-      if (presentedPlayer) {
-        const operatingTurret = this.currentState?.config.mode === 'towah-of-powah'
-          && this.currentState.tower.turretOwnerId === presentedPlayer.id;
-        presentedPlayer.yaw = operatingTurret
-          ? moveAngleToward(
-              presentedPlayer.yaw,
-              this.lastInput.yaw,
-              TOWER_TURRET_LAYOUT.turnRate * delta,
-            )
-          : this.lastInput.yaw;
-        presentedPlayer.pitch = this.lastInput.pitch;
+      // After a long guest frame the host has already continued with the last
+      // received control. Replaying a large burst of newly sampled commands
+      // would incorrectly predict that fresh input across the whole stall.
+      this.accumulator = Math.min(this.accumulator + delta, fixed * 3);
+      this.guestSnapshotTimer += delta;
+      const sampledInput = this.input.sample(this.inputSequence + 1, delta);
+      this.lastInput = sampledInput;
+      if (this.currentState) {
+        this.localPlayerPrediction.setLook(
+          this.currentState,
+          this.localPlayerId,
+          sampledInput,
+        );
       }
       const hostConnected = this.network.connectedPeerIds.includes('host');
-      if (hostConnected && this.inputSendTimer >= 1 / 60) {
-        this.inputSendTimer %= 1 / 60;
-        this.network.sendToHost({ kind: 'input', playerId: this.localPlayerId, input: this.lastInput });
+      while (this.accumulator >= fixed) {
+        const input = { ...sampledInput, sequence: ++this.inputSequence };
+        this.lastInput = input;
+        if (this.currentState) {
+          this.localPlayerPrediction.advance(this.currentState, this.localPlayerId, input, fixed);
+        }
+        if (hostConnected) {
+          this.network.sendToHost({ kind: 'input', playerId: this.localPlayerId, input });
+        }
+        this.accumulator -= fixed;
+      }
+      if (this.currentState) {
+        this.localPlayerPrediction.applyTo(this.currentState, this.localPlayerId, delta);
       }
       this.pingTimer += delta;
       if (hostConnected && this.pingTimer >= 2) {
@@ -767,7 +808,10 @@ export class AstralArenaApp {
       const activeWeapon = localPlayer?.inventory[localPlayer.activeWeapon];
       if (!opticalAimActive || activeWeapon?.id !== 'sniper') this.sniperZoomLevel = 0;
       this.renderer.setLocalViewAim(opticalAimActive, this.sniperZoomLevel);
-      this.renderer.render(this.currentState, this.accumulator / fixed, true);
+      const interpolation = this.role === 'guest'
+        ? clamp(this.guestSnapshotTimer / this.guestSnapshotInterval, 0, 1)
+        : this.accumulator / fixed;
+      this.renderer.render(this.currentState, interpolation, true, this.accumulator / fixed);
       this.updateHud(this.currentState, opticalAimActive);
       this.audio.consume(this.currentState.events, this.localPlayerId);
     }
@@ -1233,11 +1277,18 @@ export class AstralArenaApp {
     this.network = null;
     this.simulation = null;
     this.remoteInputBuffer.clear();
+    this.localPlayerPrediction.reset();
     this.currentState = null;
     this.role = null;
     this.localPlayerId = null;
     this.lastInput = null;
     this.inputSequence = 0;
+    this.accumulator = 0;
+    this.snapshotTimer = 0;
+    this.guestSnapshotTimer = 0;
+    this.guestSnapshotInterval = 0.05;
+    this.lastGuestSnapshotAt = 0;
+    this.pingTimer = 0;
     this.latency = 0;
     this.networkStatus = 'connecting';
     this.lastDamageEvent = 0;
@@ -1274,15 +1325,20 @@ export class AstralArenaApp {
    */
   private sendGuestInputEdge(): void {
     if (this.role !== 'guest' || !this.gameViewActive || !this.network || !this.input || !this.localPlayerId) return;
-    if (!this.network.connectedPeerIds.includes('host')) return;
-    const input = this.input.sample(++this.inputSequence);
+    // This is an event edge rather than a simulation tick. A zero look delta
+    // avoids integrating gamepad aim twice, and the command is not replayed as
+    // an extra movement step immediately. Prediction consumes one queued edge
+    // on its next fixed tick, matching the authoritative input buffer.
+    const input = this.input.sample(++this.inputSequence, 0);
     this.lastInput = input;
-    const presentedPlayer = this.currentState?.players[this.localPlayerId];
-    if (presentedPlayer) {
-      presentedPlayer.yaw = input.yaw;
-      presentedPlayer.pitch = input.pitch;
+    if (this.currentState) {
+      this.localPlayerPrediction.observeEdge(this.currentState, this.localPlayerId, input);
+      this.localPlayerPrediction.setLook(this.currentState, this.localPlayerId, input);
+      this.localPlayerPrediction.applyTo(this.currentState, this.localPlayerId, 0);
     }
-    this.network.sendToHost({ kind: 'input', playerId: this.localPlayerId, input });
+    if (this.network.connectedPeerIds.includes('host')) {
+      this.network.sendToHost({ kind: 'input', playerId: this.localPlayerId, input });
+    }
   }
 
   /**

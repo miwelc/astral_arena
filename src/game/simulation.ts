@@ -1,5 +1,5 @@
-import { canOccupyCapsule, hasLineOfSight, moveCapsule, raycastWorld } from './collision';
-import { isJumpPad, MAPS, TOWER_TURRET_LAYOUT } from './map';
+import { canOccupyCapsule, hasLineOfSight, raycastWorld } from './collision';
+import { MAPS, TOWER_TURRET_LAYOUT } from './map';
 import { canonicalFormatForMode, isTeamGameMode, rulesForMode } from './modeRules';
 import { damageScaleAtDistance, sampleDirectionInCone, shotSpread } from './gunplay';
 import {
@@ -37,20 +37,18 @@ import type {
 } from './types';
 import { createWeaponState, DEFAULT_LOADOUT, TOWER_LOADOUT, WEAPONS } from './weapons';
 import { createBotMemory, updateBotInputs } from './bots';
+import {
+  advancePlayerMovement,
+  createPlayerMovementMemory,
+  PLAYER_MOVEMENT_TUNING,
+  STANDING_PLAYER_HEIGHT,
+} from './playerMovement';
 
-const FIXED_PLAYER_HEIGHT = 1.8;
-const CROUCHED_PLAYER_HEIGHT = 1.22;
+export { PLAYER_MOVEMENT_TUNING } from './playerMovement';
+
+const FIXED_PLAYER_HEIGHT = STANDING_PLAYER_HEIGHT;
 const FIXED_PLAYER_RADIUS = 0.48;
 const PROJECTILE_GRAVITY = 18;
-export const PLAYER_MOVEMENT_TUNING = Object.freeze({
-  moveSpeed: 6.35,
-  groundAcceleration: 28,
-  groundDeceleration: 35,
-  airAcceleration: 4.8,
-  gravity: 15.5,
-  jumpVelocity: 6.85,
-  crouchSpeedScale: 0.56,
-});
 export const MAX_PLAYER_GRENADES = 2;
 export const DROPPED_PICKUP_LIFETIME_SECONDS = 20;
 const SHIELD_RECHARGE_DELAY = 5;
@@ -61,8 +59,6 @@ const HEALTH_RECHARGE_RATE = 14;
 const WEAPON_EQUIP_SECONDS = 0.42;
 const MELEE_DAMAGE = 100;
 const MELEE_LUNGE_RANGE = 2.55;
-const JUMP_PAD_APEX_CLEARANCE = 1.75;
-const JUMP_PAD_RETRIGGER_DELAY = 0.85;
 const GRENADE_FUSE_SECONDS = 1.7;
 const GRENADE_OWNER_GRACE_SECONDS = 0.22;
 const BOT_NAMES = ['Orion', 'Vega', 'Lyra', 'Atlas', 'Sol', 'Mira', 'Pulsar', 'Cosmo'];
@@ -83,11 +79,6 @@ interface ButtonState {
   melee: boolean;
   grenade: boolean;
   use: boolean;
-}
-
-interface JumpPadMomentum {
-  direction: Vec3;
-  minimumSpeed: number;
 }
 
 interface DamageOptions {
@@ -221,8 +212,6 @@ export class GameSimulation {
   public readonly map: MapDefinition;
   public state: MatchState;
   private readonly previousButtons = new Map<string, ButtonState>();
-  private readonly jumpPadReadyAt = new Map<string, number>();
-  private readonly jumpPadMomentum = new Map<string, JumpPadMomentum>();
   /** Tracks the transition, not every recharge tick, so audiovisual events never spam. */
   private readonly shieldRechargeActive = new Set<string>();
   /** Rising-edge context actions captured before button history advances. */
@@ -316,6 +305,7 @@ export class GameSimulation {
     const player = this.state.players[playerId];
     if (!player || player.kind === 'bot') return;
     if (!Number.isSafeInteger(input.sequence) || input.sequence < 0) return;
+    if (input.sequence < player.input.sequence) return;
     if (![input.moveX, input.moveZ, input.yaw, input.pitch].every(Number.isFinite)) return;
     player.input = {
       ...input,
@@ -348,8 +338,6 @@ export class GameSimulation {
         this.releaseTurret(replacement.id, false);
         delete this.state.players[replacement.id];
         this.previousButtons.delete(replacement.id);
-        this.jumpPadReadyAt.delete(replacement.id);
-        this.jumpPadMomentum.delete(replacement.id);
         this.damageContributors.delete(replacement.id);
         for (const contributors of this.damageContributors.values()) contributors.delete(replacement.id);
       }
@@ -369,8 +357,6 @@ export class GameSimulation {
     this.releaseTurret(id, false);
     delete this.state.players[id];
     this.previousButtons.delete(id);
-    this.jumpPadReadyAt.delete(id);
-    this.jumpPadMomentum.delete(id);
     this.shieldRechargeActive.delete(id);
     this.damageContributors.delete(id);
     for (const contributors of this.damageContributors.values()) contributors.delete(id);
@@ -450,6 +436,7 @@ export class GameSimulation {
       aimSuppressed: false,
       input: emptyInput(),
       lastProcessedInput: 0,
+      movementMemory: createPlayerMovementMemory(),
       kills: 0,
       deaths: 0,
       assists: 0,
@@ -596,80 +583,18 @@ export class GameSimulation {
   }
 
   private updateMovement(player: PlayerState, dt: number, jumpPressed: boolean): void {
-    this.updateCrouchStance(player);
-    const forward = { x: -Math.sin(player.yaw), y: 0, z: -Math.cos(player.yaw) };
-    const right = { x: Math.cos(player.yaw), y: 0, z: -Math.sin(player.yaw) };
-    let wish = add(scale(right, player.input.moveX), scale(forward, player.input.moveZ));
-    if (dot(wish, wish) > 1) wish = normalize(wish);
-    const speedModifier = (player.isJuggernaut ? 0.95 : 1)
-      * (player.carryingFlagTeam ? 0.95 : 1)
-      * (player.crouched ? PLAYER_MOVEMENT_TUNING.crouchSpeedScale : 1);
-    const hasMovementInput = dot(wish, wish) >= 0.01;
-    const desired = scale(wish, PLAYER_MOVEMENT_TUNING.moveSpeed * speedModifier);
-    // Ground movement stays responsive, but reaches its top speed progressively
-    // instead of snapping into the very fast arena-shooter cadence. In the air,
-    // releasing the stick preserves the jump's momentum while directional input
-    // only bends the trajectory moderately, like the classic console shooters.
-    if (player.grounded || hasMovementInput) {
-      const acceleration = player.grounded
-        ? (hasMovementInput ? PLAYER_MOVEMENT_TUNING.groundAcceleration : PLAYER_MOVEMENT_TUNING.groundDeceleration)
-        : PLAYER_MOVEMENT_TUNING.airAcceleration;
-      const change = {
-        x: desired.x - player.velocity.x,
-        y: 0,
-        z: desired.z - player.velocity.z,
-      };
-      const changeLength = Math.hypot(change.x, change.z);
-      const maxChange = acceleration * dt;
-      if (changeLength <= maxChange || changeLength < 0.0001) {
-        player.velocity.x = desired.x;
-        player.velocity.z = desired.z;
-      } else {
-        const changeScale = maxChange / changeLength;
-        player.velocity.x += change.x * changeScale;
-        player.velocity.z += change.z * changeScale;
-      }
-    }
-    const padMomentum = this.jumpPadMomentum.get(player.id);
-    if (padMomentum && !player.grounded) {
-      const inwardSpeed = dot(player.velocity, padMomentum.direction);
-      if (inwardSpeed < padMomentum.minimumSpeed) {
-        const correction = scale(padMomentum.direction, padMomentum.minimumSpeed - inwardSpeed);
-        player.velocity.x += correction.x;
-        player.velocity.z += correction.z;
-      }
-    }
-    const launchedFromPad = this.tryLaunchFromJumpPad(player);
-    if (!launchedFromPad && jumpPressed && player.grounded) {
-      player.velocity.y = PLAYER_MOVEMENT_TUNING.jumpVelocity;
-      player.grounded = false;
-    }
-    player.velocity.y -= PLAYER_MOVEMENT_TUNING.gravity * dt;
-    const movement = moveCapsule(player, this.map, dt);
-    player.position = movement.position;
-    player.velocity = movement.velocity;
-    player.grounded = movement.grounded;
-    if (movement.grounded) this.jumpPadMomentum.delete(player.id);
-  }
-
-  private updateCrouchStance(player: PlayerState): void {
-    if (player.input.crouch) {
-      player.crouched = true;
-      player.height = CROUCHED_PLAYER_HEIGHT;
-      return;
-    }
-    if (!player.crouched) {
-      player.height = FIXED_PLAYER_HEIGHT;
-      return;
-    }
-    if (canOccupyCapsule(player.position, player.radius, FIXED_PLAYER_HEIGHT, this.map)) {
-      player.crouched = false;
-      player.height = FIXED_PLAYER_HEIGHT;
-    } else {
-      // Keep the compact capsule until there is genuine headroom. Feet never
-      // move, so releasing crouch beneath a beam cannot clip into geometry.
-      player.height = CROUCHED_PLAYER_HEIGHT;
-    }
+    advancePlayerMovement(
+      player,
+      player.input,
+      {
+        map: this.map,
+        tower: this.state.tower,
+        elapsed: this.state.elapsed,
+      },
+      player.movementMemory,
+      dt,
+      jumpPressed,
+    );
   }
 
   private updateShieldRecharge(player: PlayerState, dt: number): void {
@@ -717,38 +642,6 @@ export class GameSimulation {
     if (dt <= 0 || player.health >= MAX_HEALTH) return;
     if (this.state.elapsed - player.lastDamageAt < HEALTH_RECHARGE_DELAY) return;
     player.health = Math.min(MAX_HEALTH, player.health + HEALTH_RECHARGE_RATE * dt);
-  }
-
-  private tryLaunchFromJumpPad(player: PlayerState): boolean {
-    const padReadyAt = this.jumpPadReadyAt.get(player.id) ?? 0;
-    if (!player.grounded || !isJumpPad(player.position, this.map) || this.state.elapsed < padReadyAt) return false;
-
-    const towerDelta = subtract(this.state.tower.center, player.position);
-    const towerDistance = Math.hypot(towerDelta.x, towerDelta.z);
-    const towardTower = towerDistance > 0.001
-      ? { x: towerDelta.x / towerDistance, y: 0, z: towerDelta.z / towerDistance }
-      : { x: 0, y: 0, z: 0 };
-    const landingRadius = Math.max(1.5, this.state.tower.radius - 1.2);
-    const landingDistance = Math.max(0, towerDistance - landingRadius);
-    const targetHeight = Math.max(this.state.tower.center.y, player.position.y + 3.5);
-    const heightDelta = targetHeight - player.position.y;
-    const launchVelocityY = Math.sqrt(2 * PLAYER_MOVEMENT_TUNING.gravity * (heightDelta + JUMP_PAD_APEX_CLEARANCE));
-    const descendingTime = (launchVelocityY + Math.sqrt(Math.max(0, launchVelocityY ** 2 - 2 * PLAYER_MOVEMENT_TUNING.gravity * heightDelta))) / PLAYER_MOVEMENT_TUNING.gravity;
-    const targetHorizontalSpeed = clamp(landingDistance / Math.max(0.1, descendingTime), 3.2, 9.5);
-    const currentHorizontal = { x: player.velocity.x, y: 0, z: player.velocity.z };
-    const targetHorizontal = scale(towardTower, targetHorizontalSpeed);
-    const blendedHorizontal = add(scale(targetHorizontal, 0.82), scale(currentHorizontal, 0.18));
-
-    player.velocity.x = blendedHorizontal.x;
-    player.velocity.z = blendedHorizontal.z;
-    player.velocity.y = Math.max(player.velocity.y, launchVelocityY);
-    player.grounded = false;
-    this.jumpPadReadyAt.set(player.id, this.state.elapsed + JUMP_PAD_RETRIGGER_DELAY);
-    this.jumpPadMomentum.set(player.id, {
-      direction: towardTower,
-      minimumSpeed: Math.max(0, dot(blendedHorizontal, towardTower)),
-    });
-    return true;
   }
 
   private startReload(player: PlayerState): void {
@@ -1926,6 +1819,7 @@ export class GameSimulation {
     player.velocity = vec3();
     player.height = FIXED_PLAYER_HEIGHT;
     player.crouched = false;
+    player.grounded = true;
     player.yaw = selection.yaw;
     player.pitch = 0;
     player.alive = true;
@@ -1945,8 +1839,7 @@ export class GameSimulation {
     player.activeWeapon = 0;
     player.input = { ...emptyInput(), yaw: player.yaw };
     this.previousButtons.set(player.id, noButtons());
-    this.jumpPadReadyAt.delete(player.id);
-    this.jumpPadMomentum.delete(player.id);
+    player.movementMemory = createPlayerMovementMemory();
     if (!initial) this.pushEvent({ type: 'respawn', actorId: player.id, position: cloneVec3(player.position) });
   }
 
