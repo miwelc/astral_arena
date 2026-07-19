@@ -4,6 +4,7 @@ import {
   emptyInput,
   hashString,
   horizontalDistance,
+  moveAngleToward,
   normalize,
   pitchTo,
   random01,
@@ -26,7 +27,7 @@ import type {
   WeaponId,
   WeaponState,
 } from './types';
-import { JUMP_PAD_ZONES } from './map';
+import { JUMP_PAD_ZONES, TOWER_TURRET_LAYOUT } from './map';
 import { WEAPONS } from './weapons';
 
 export type LineOfSightTest = (from: Vec3, to: Vec3) => boolean;
@@ -43,6 +44,12 @@ export interface DifficultyProfile {
   grenadeChance: number;
   jumpChance: number;
   combatMovementScale: number;
+  /** Null disables motion-tracker use; otherwise a human-like glance cadence. */
+  radarGlanceInterval: readonly [minimum: number, maximum: number] | null;
+  /** A sampled contact fades well before the next typical glance. */
+  radarMemorySeconds: number;
+  /** Horizontal uncertainty applied to a sampled radar contact. */
+  radarPositionError: number;
 }
 
 interface ObjectivePlan {
@@ -64,6 +71,9 @@ export const BOT_DIFFICULTY_PROFILES: Readonly<Record<Difficulty, Readonly<Diffi
     grenadeChance: 0.012,
     jumpChance: 0.015,
     combatMovementScale: 0.78,
+    radarGlanceInterval: null,
+    radarMemorySeconds: 0,
+    radarPositionError: 0,
   },
   veteran: {
     reaction: 0.46,
@@ -77,6 +87,9 @@ export const BOT_DIFFICULTY_PROFILES: Readonly<Record<Difficulty, Readonly<Diffi
     grenadeChance: 0.03,
     jumpChance: 0.025,
     combatMovementScale: 0.88,
+    radarGlanceInterval: [2.6, 3.8],
+    radarMemorySeconds: 1.25,
+    radarPositionError: 2.3,
   },
   legend: {
     reaction: 0.28,
@@ -90,6 +103,9 @@ export const BOT_DIFFICULTY_PROFILES: Readonly<Record<Difficulty, Readonly<Diffi
     grenadeChance: 0.05,
     jumpChance: 0.04,
     combatMovementScale: 0.95,
+    radarGlanceInterval: [1.45, 2.35],
+    radarMemorySeconds: 1.6,
+    radarPositionError: 1.25,
   },
 };
 
@@ -112,6 +128,7 @@ const MAX_PICKUP_BLACKLIST = 4;
 const MOTION_RADAR_RADIUS = 25;
 const MOTION_RADAR_THRESHOLD = 0.55;
 const MOTION_RADAR_SHOT_REVEAL_SECONDS = 0.8;
+const MOTION_RADAR_ELEVATION_THRESHOLD = 2.4;
 const TOWER_DECK_MIN_Y = 5.15;
 const TOWER_PATROL_RADIUS = 5.45;
 const TOWER_PATROL_STEP_SECONDS = 2.4;
@@ -253,6 +270,71 @@ const acquireMotionRadarContact = (state: MatchState, observer: PlayerState): Pl
     }
   }
   return selected;
+};
+
+/**
+ * Takes one deliberate, imperfect snapshot of the motion tracker. Unlike
+ * sight, this never updates `targetId` or `lastSeenPosition`: it is only a
+ * short-lived navigation clue and can therefore never become a firing
+ * solution through cover.
+ */
+const takeMotionRadarGlance = (
+  state: MatchState,
+  observer: PlayerState,
+  profile: DifficultyProfile,
+): void => {
+  const memory = observer.bot!;
+  const interval = profile.radarGlanceInterval;
+  if (!interval) {
+    memory.radarGlanceTimer = 0;
+    memory.radarContactId = null;
+    memory.radarContactPosition = null;
+    memory.radarContactAt = -1_000_000;
+    return;
+  }
+
+  memory.radarGlanceTimer = randomRange(state, interval[0], interval[1]);
+  const contact = acquireMotionRadarContact(state, observer);
+  if (!contact) {
+    memory.radarContactId = null;
+    memory.radarContactPosition = null;
+    memory.radarContactAt = state.elapsed;
+    return;
+  }
+
+  // Each glance produces a new coarse bearing. Holding this fixed between
+  // glances is important: moving enemies do not become radar wallhacks.
+  const errorAngle = randomRange(state, -Math.PI, Math.PI);
+  const errorRadius = randomRange(state, profile.radarPositionError * 0.35, profile.radarPositionError);
+  const verticalDelta = contact.position.y - observer.position.y;
+  // A human tracker reports only above / level / below, never an exact floor
+  // height. Preserve that same coarse cue in the bot's navigation memory.
+  const sampledElevation = verticalDelta > MOTION_RADAR_ELEVATION_THRESHOLD
+    ? MOTION_RADAR_ELEVATION_THRESHOLD
+    : verticalDelta < -MOTION_RADAR_ELEVATION_THRESHOLD
+      ? -MOTION_RADAR_ELEVATION_THRESHOLD
+      : 0;
+  memory.radarContactId = contact.id;
+  memory.radarContactPosition = {
+    x: contact.position.x + Math.cos(errorAngle) * errorRadius,
+    y: observer.position.y + sampledElevation,
+    z: contact.position.z + Math.sin(errorAngle) * errorRadius,
+  };
+  memory.radarContactAt = state.elapsed;
+};
+
+const expireMotionRadarContact = (
+  state: MatchState,
+  memory: BotMemory,
+  profile: DifficultyProfile,
+): void => {
+  if (
+    !profile.radarGlanceInterval ||
+    state.elapsed - memory.radarContactAt > profile.radarMemorySeconds
+  ) {
+    memory.radarContactId = null;
+    memory.radarContactPosition = null;
+  }
 };
 
 const ownTeam = (team: Team): Exclude<Team, 'neutral'> | null => (team === 'neutral' ? null : team);
@@ -611,9 +693,6 @@ const movementToLocalInput = (direction: Vec3, yaw: number): Pick<PlayerInput, '
   };
 };
 
-const moveAngleToward = (current: number, desired: number, maximumDelta: number): number =>
-  current + clamp(wrapAngle(desired - current), -maximumDelta, maximumDelta);
-
 const combatMovement = (
   state: MatchState,
   player: PlayerState,
@@ -757,6 +836,12 @@ export const createBotMemory = (difficulty: Difficulty): BotMemory => ({
   lastSeenPosition: null,
   // Keep the initial value JSON-safe because BotMemory travels in snapshots.
   lastSeenAt: -1_000_000,
+  // Do not grant instant knowledge on spawn. Better bots take their first
+  // glance sooner, but even Legend has a perceptible delay.
+  radarGlanceTimer: BOT_DIFFICULTY_PROFILES[difficulty].radarGlanceInterval?.[0] ?? 0,
+  radarContactId: null,
+  radarContactPosition: null,
+  radarContactAt: -1_000_000,
   waypointIndex: 0,
   reactionTimer: 0,
   aimError: vec3(0, 0, 1),
@@ -789,6 +874,12 @@ export const updateBotInputs = (
     memory.decisionTimer = Math.max(0, memory.decisionTimer - safeDt);
     memory.reactionTimer = Math.max(0, memory.reactionTimer - safeDt);
     memory.unstickTimer = Math.max(0, memory.unstickTimer - safeDt);
+    // Nullish fallback keeps older peer snapshots compatible with this build.
+    memory.radarGlanceTimer = Math.max(0, (memory.radarGlanceTimer ?? 0) - safeDt);
+    memory.radarContactId ??= null;
+    memory.radarContactPosition ??= null;
+    memory.radarContactAt ??= -1_000_000;
+    expireMotionRadarContact(state, memory, profile);
 
     if (!player.alive || state.phase !== 'playing') {
       input.yaw = player.yaw;
@@ -829,26 +920,25 @@ export const updateBotInputs = (
       ? { ...profile, visionRange: Math.max(70, profile.visionRange), fieldOfView: Math.PI * 2 }
       : profile;
     const visibleTarget = updatePerception(state, player, perceptionProfile, hasLineOfSight, decisionDue);
-    if (!visibleTarget && decisionDue) {
-      const motionContact = acquireMotionRadarContact(state, player);
-      if (motionContact) {
-        if (motionContact.id !== memory.targetId) {
-          memory.reactionTimer = randomRange(state, profile.reaction * 0.9, profile.reaction * 1.2);
-        }
-        memory.targetId = motionContact.id;
-        memory.lastSeenPosition = { ...motionContact.position };
-        memory.lastSeenAt = state.elapsed;
-      }
+    if (decisionDue && memory.radarGlanceTimer <= 0) {
+      takeMotionRadarGlance(state, player, profile);
     }
     let plan = objectivePlan(state, player, map);
     if (pickupPlanHasStalled(state, player, plan)) plan = objectivePlan(state, player, map);
     const rememberedGoal = memory.lastSeenPosition && state.elapsed - memory.lastSeenAt <= profile.memorySeconds
       ? memory.lastSeenPosition
       : null;
-    const trackingRadarContactOnDeck = state.config.mode === 'towah-of-powah' &&
-      isOnTowerDeck(state, player) &&
-      rememberedGoal !== null;
-    const strategicGoal = trackingRadarContactOnDeck ? rememberedGoal : plan.goal ?? rememberedGoal;
+    const radarGoal = memory.radarContactPosition &&
+      state.elapsed - memory.radarContactAt <= profile.radarMemorySeconds
+      ? memory.radarContactPosition
+      : null;
+    // Flag runs, juggernaut hunts and tower assaults remain authoritative.
+    // Outside an urgent objective, recent sight wins, followed by a briefly
+    // remembered radar bearing and then the ordinary plan.
+    const awarenessGoal = rememberedGoal ?? radarGoal;
+    const strategicGoal = plan.urgent && plan.goal
+      ? plan.goal
+      : awarenessGoal ?? plan.goal;
     const fallbackWaypoint = map.waypoints[memory.waypointIndex % Math.max(1, map.waypoints.length)] ?? player.position;
     const goal = strategicGoal ?? fallbackWaypoint;
     const navigationTarget = selectWaypoint(player, memory, goal, map, hasLineOfSight);
@@ -891,9 +981,13 @@ export const updateBotInputs = (
             (desiredWeapon?.id === 'sniper' || precisionFinisher ? 0.86 : 0.58),
           z: visibleTarget.position.z,
         }
-      : rememberedGoal ?? navigationTarget;
+      : awarenessGoal ?? navigationTarget;
     const aimOrigin = operatingTurret
-      ? { x: state.tower.center.x, y: state.tower.center.y + 2.7, z: state.tower.center.z }
+      ? {
+          x: state.tower.center.x,
+          y: state.tower.center.y + TOWER_TURRET_LAYOUT.firingOriginOffset,
+          z: state.tower.center.z,
+        }
       : eyePosition(player);
     const exactYaw = yawTo(aimOrigin, aimPoint);
     const exactPitch = pitchTo(aimOrigin, aimPoint);

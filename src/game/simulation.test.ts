@@ -1,7 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { emptyInput } from './math';
-import { createDefaultConfig, GameSimulation } from './simulation';
+import { distance, emptyInput } from './math';
+import { TOWER_TURRET_LAYOUT } from './map';
+import {
+  createDefaultConfig,
+  GameSimulation,
+  towerTurretFiringOrigin,
+  towerTurretOperatorPosition,
+} from './simulation';
 import { createWeaponState } from './weapons';
 import type {
   FlagState,
@@ -421,26 +427,39 @@ describe('objective modes', () => {
     target.health = 70;
     target.shield = 0;
     const personalMagazine = controller.inventory[controller.activeWeapon]?.magazine;
+    const turretOrigin = towerTurretFiringOrigin(simulation.state.tower.center);
+    const horizontalRange = Math.hypot(target.position.x - turretOrigin.x, target.position.z - turretOrigin.z);
+    const targetYaw = Math.atan2(
+      -(target.position.x - turretOrigin.x),
+      -(target.position.z - turretOrigin.z),
+    );
+    const targetPitch = Math.atan2(
+      target.position.y + target.height * 0.58 - turretOrigin.y,
+      horizontalRange,
+    );
 
-    simulation.setInput(controller.id, { ...emptyInput(), sequence: 1, use: true });
+    simulation.setInput(controller.id, {
+      ...emptyInput(),
+      sequence: 1,
+      yaw: targetYaw,
+      pitch: targetPitch,
+      use: true,
+    });
     simulation.step(0);
 
     expect(simulation.state.tower.controllingTeam).toBe(controller.team);
     expect(simulation.state.tower.turretOwnerId).toBe(controller.id);
     expect(simulation.state.tower.turretCooldown).toBe(0);
     expect(target.health).toBe(70);
+    expect(controller.position).toEqual(towerTurretOperatorPosition(simulation.state.tower.center, controller.yaw));
+    expect(controller.position.y).toBeGreaterThan(simulation.state.tower.center.y + 3);
+    expect(JSON.parse(JSON.stringify(simulation.snapshot())).players[controller.id].position).toEqual(controller.position);
 
-    const turretOrigin = {
-      x: simulation.state.tower.center.x,
-      y: simulation.state.tower.center.y + 2.7,
-      z: simulation.state.tower.center.z,
-    };
-    const horizontalRange = Math.hypot(target.position.x - turretOrigin.x, target.position.z - turretOrigin.z);
     simulation.setInput(controller.id, {
       ...emptyInput(),
       sequence: 2,
-      yaw: Math.atan2(-(target.position.x - turretOrigin.x), -(target.position.z - turretOrigin.z)),
-      pitch: Math.atan2(target.position.y + target.height * 0.58 - turretOrigin.y, horizontalRange),
+      yaw: targetYaw,
+      pitch: targetPitch,
       fire: true,
     });
     simulation.step(0);
@@ -460,6 +479,61 @@ describe('objective modes', () => {
     simulation.step(0);
 
     expect(simulation.state.tower.turretOwnerId).toBeNull();
+    expect(controller.position.y).toBeCloseTo(simulation.state.tower.center.y, 8);
+    expect(Math.hypot(
+      controller.position.x - simulation.state.tower.center.x,
+      controller.position.z - simulation.state.tower.center.z,
+    )).toBeGreaterThanOrEqual(3.1);
+  });
+
+  it('moves the physical operator smoothly beside the turret and releases it on death or disconnect', () => {
+    const simulation = createSimulation({ mode: 'towah-of-powah', format: 'duel' });
+    const controller = player(simulation, 'alpha');
+    const attacker = player(simulation, 'bravo');
+    startMatch(simulation);
+    place(controller, { x: 5, y: 6, z: 0 });
+    place(attacker, { x: 10, y: 6, z: 0 });
+    controller.spawnProtection = 0;
+    attacker.spawnProtection = 0;
+
+    simulation.setInput(controller.id, { ...emptyInput(), sequence: 1, yaw: 0, use: true });
+    simulation.step(0);
+    expect(controller.position).toEqual(towerTurretOperatorPosition(simulation.state.tower.center, 0));
+
+    const mountedPosition = { ...controller.position };
+    simulation.setInput(controller.id, { ...emptyInput(), sequence: 2, yaw: Math.PI / 2 });
+    simulation.step(0);
+    expect(controller.position).toEqual(mountedPosition);
+    simulation.step(FIXED_STEP);
+    const expectedYaw = TOWER_TURRET_LAYOUT.turnRate * FIXED_STEP;
+    expect(controller.yaw).toBeCloseTo(expectedYaw, 8);
+    expect(controller.position).toEqual(
+      towerTurretOperatorPosition(simulation.state.tower.center, expectedYaw),
+    );
+    const maximumOrbitStep = 2 * TOWER_TURRET_LAYOUT.operatorDistance
+      * Math.sin(TOWER_TURRET_LAYOUT.turnRate * FIXED_STEP * 0.5);
+    expect(distance(mountedPosition, controller.position)).toBeLessThanOrEqual(maximumOrbitStep + 0.000_001);
+    expect(simulation.state.tower.turretOwnerId).toBe(controller.id);
+
+    simulation.state.projectiles.push(explosiveAt(attacker, controller, 300));
+    simulation.step(0);
+    expect(controller.alive).toBe(false);
+    expect(simulation.state.tower.turretOwnerId).toBeNull();
+
+    const disconnectSimulation = createSimulation({ mode: 'towah-of-powah', format: 'duel' });
+    const disconnectingOperator = player(disconnectSimulation, 'alpha');
+    startMatch(disconnectSimulation);
+    place(disconnectingOperator, { x: 5, y: 6, z: 0 });
+    disconnectSimulation.setInput(
+      disconnectingOperator.id,
+      { ...emptyInput(), sequence: 1, use: true },
+    );
+    disconnectSimulation.step(0);
+    expect(disconnectSimulation.state.tower.turretOwnerId).toBe(disconnectingOperator.id);
+
+    disconnectSimulation.removeRemotePlayer(disconnectingOperator.id);
+    expect(disconnectSimulation.state.tower.turretOwnerId).toBeNull();
+    expect(disconnectSimulation.state.players[disconnectingOperator.id]).toBeUndefined();
   });
 
   it('does not acquire or shoot targets automatically and rejects distant operators', () => {

@@ -37,12 +37,21 @@ const weaponIdFromUrl = (url: string): WeaponId => {
 
 const syntheticScene = (id: WeaponId): THREE.Group => {
   const scene = new THREE.Group();
+  const paintedAlbedo = new THREE.DataTexture(
+    new Uint8Array([42, 176, 71, 255]),
+    1,
+    1,
+    THREE.RGBAFormat,
+  );
+  paintedAlbedo.colorSpace = THREE.SRGBColorSpace;
+  paintedAlbedo.needsUpdate = true;
   const body = new THREE.Mesh(
     new THREE.BoxGeometry(2, 0.75, 0.34),
     new THREE.MeshStandardMaterial({
       name: 'Main',
       color: 0xc6ccca,
       roughness: 0.55,
+      map: paintedAlbedo,
     }),
   );
   body.name = `${id}-body`;
@@ -50,7 +59,10 @@ const syntheticScene = (id: WeaponId): THREE.Group => {
   scene.add(body);
 
   for (const name of SOURCE_PART_NAMES[id]) {
-    const part = new THREE.Group();
+    const part = new THREE.Mesh(
+      new THREE.BoxGeometry(0.18, 0.12, 0.09),
+      new THREE.MeshStandardMaterial({ name: 'Main', color: 0x38484a }),
+    );
     part.name = name;
     scene.add(part);
   }
@@ -149,6 +161,30 @@ describe('ExternalWeaponModelLibrary', () => {
         expect(hasVisibleMesh, `${id} ${role} proxy should remain visibly animated`).toBe(true);
       }
     }
+  });
+
+  it('remaps imported paint to pale ceramic while keeping dark functional parts', async () => {
+    const library = new ExternalWeaponModelLibrary(new SyntheticLoader());
+    await library.load('sidearm');
+    const model = library.create('sidearm');
+    const surfaces: THREE.MeshPhysicalMaterial[] = [];
+    model.traverse((object) => {
+      if (!(object instanceof THREE.Mesh)) return;
+      const materials = Array.isArray(object.material) ? object.material : [object.material];
+      for (const material of materials) {
+        if (material instanceof THREE.MeshPhysicalMaterial && material.userData.externalWeaponSurface) {
+          surfaces.push(material);
+        }
+      }
+    });
+
+    expect(surfaces.some((material) => material.userData.externalWeaponSurface === 'ceramic')).toBe(true);
+    expect(surfaces.some((material) => material.userData.externalWeaponSurface === 'functional-dark')).toBe(true);
+    const ceramic = surfaces.find((material) => material.userData.externalWeaponSurface === 'ceramic');
+    expect(ceramic?.color.getHex()).toBe(0xf5f1e8);
+    expect(ceramic?.map).toBeInstanceOf(THREE.DataTexture);
+    expect(ceramic?.userData.ceramicAlbedoRemap).toBe(true);
+    expect(ceramic?.customProgramCacheKey()).toContain('ceramic-albedo-ceramic');
   });
 
   it('gives each renderer an independently disposable GPU-resource clone', async () => {

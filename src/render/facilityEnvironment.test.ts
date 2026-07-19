@@ -133,6 +133,13 @@ describe('facility environment geometry', () => {
     expect(materialsUsed(ceramic).has(materials.panelLight)).toBe(true);
     expect(materialsUsed(sage).has(materials.panelSage)).toBe(true);
     expect(materialsUsed(blue).has(materials.panelBlue)).toBe(true);
+    for (const block of [ceramic, sage, blue]) {
+      const lowerFacade = block.getObjectByName('facade-front-lower-0') as THREE.Mesh;
+      expect(lowerFacade.material).toBe(materials.panelLight);
+    }
+    expect(materials.panelLight.color.getHSL({ h: 0, s: 0, l: 0 }).l).toBeGreaterThan(0.85);
+    expect(materials.panelSage.color.getHSL({ h: 0, s: 0, l: 0 }).l).toBeGreaterThan(0.55);
+    expect(materials.panelBlue.color.getHSL({ h: 0, s: 0, l: 0 }).l).toBeGreaterThan(0.55);
     expect(materials.panelLight.map).toBeInstanceOf(THREE.DataTexture);
     expect(materials.panelSage.normalMap).toBe(materials.panelLight.normalMap);
     expect(materials.panelBlue.roughnessMap).toBe(materials.panelLight.roughnessMap);

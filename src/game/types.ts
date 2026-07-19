@@ -108,6 +108,13 @@ export interface BotMemory {
   targetId: string | null;
   lastSeenPosition: Vec3 | null;
   lastSeenAt: number;
+  /** Countdown until the next deliberate motion-tracker glance. */
+  radarGlanceTimer: number;
+  /** Radar is sampled, not tracked continuously; this identifies the sampled contact. */
+  radarContactId: string | null;
+  /** Noisy position captured at the last glance and never updated between glances. */
+  radarContactPosition: Vec3 | null;
+  radarContactAt: number;
   waypointIndex: number;
   reactionTimer: number;
   aimError: Vec3;

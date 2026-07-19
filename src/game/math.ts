@@ -31,6 +31,8 @@ export const wrapAngle = (angle: number): number => {
   return result;
 };
 export const lerpAngle = (from: number, to: number, amount: number): number => from + wrapAngle(to - from) * amount;
+export const moveAngleToward = (current: number, desired: number, maximumDelta: number): number =>
+  wrapAngle(current + clamp(wrapAngle(desired - current), -maximumDelta, maximumDelta));
 export const horizontalDistance = (a: Vec3, b: Vec3): number => Math.hypot(a.x - b.x, a.z - b.z);
 export const directionFromAngles = (yaw: number, pitch: number): Vec3 => ({
   x: -Math.sin(yaw) * Math.cos(pitch),

@@ -1,9 +1,25 @@
 import { GameAudio } from '../audio/GameAudio';
 import { hasLineOfSight, raycastWorld } from '../game/collision';
-import { MAPS } from '../game/map';
-import { add, clamp, directionFromAngles, distance, dot, normalize, subtract, vec3 } from '../game/math';
+import { MAPS, TOWER_TURRET_LAYOUT } from '../game/map';
+import {
+  add,
+  clamp,
+  directionFromAngles,
+  distance,
+  dot,
+  moveAngleToward,
+  normalize,
+  subtract,
+  vec3,
+} from '../game/math';
 import { canonicalFormatForMode, isTeamGameMode, rulesForMode } from '../game/modeRules';
-import { createDefaultConfig, GameSimulation, recommendedScoreLimit, recommendedTimeLimit } from '../game/simulation';
+import {
+  createDefaultConfig,
+  GameSimulation,
+  recommendedScoreLimit,
+  recommendedTimeLimit,
+  towerTurretFiringOrigin,
+} from '../game/simulation';
 import type { ClientMessage, GameMode, HostMessage, MatchConfig, MatchState, PlayerInput, Team } from '../game/types';
 import { WEAPONS } from '../game/weapons';
 import { InputController } from '../input/InputController';
@@ -11,6 +27,7 @@ import { isValidMatchState } from '../network/matchStateValidation';
 import { P2PNetwork, P2PNetworkError } from '../network/P2PNetwork';
 import { RemoteInputBuffer } from '../network/RemoteInputBuffer';
 import type { ArenaRenderer } from '../render/ArenaRenderer';
+import type { ExternalWeaponLoadReport } from '../render/externalWeaponModels';
 import { directionalDamagePresentation, selectCombatWarning } from './combatHud';
 import { presentGameEvents, selectAnnouncementCandidate, type EventPresentation } from './eventPresentation';
 import { interactionPromptFor } from './interactionPrompt';
@@ -95,11 +112,35 @@ export class AstralArenaApp {
   private lastInvalidSnapshotAt = Number.NEGATIVE_INFINITY;
   private damageHudTimer = 0;
   private toastTimer = 0;
+  private externalWeaponPreload: Promise<ExternalWeaponLoadReport> | null = null;
+  private sessionGeneration = 0;
 
   public constructor(private readonly root: HTMLElement) {
     window.addEventListener('keydown', this.handleGlobalKeyDown);
     window.addEventListener('keyup', this.handleGlobalKeyUp);
     this.renderMenu();
+    // Start decoding local GLBs while the player is reading the menu. Entering
+    // a match awaits the same promise, so normal play never flashes the
+    // procedural resilience model before swapping to the authored weapon.
+    void this.prepareExternalWeaponModels().catch((error: unknown) => {
+      // Entering a match retries a failed chunk request and reports any second
+      // failure in the visible UI. Menu prefetch itself must never create an
+      // unhandled promise rejection.
+      console.warn('No se pudo precargar el equipo desde el menú:', error);
+    });
+  }
+
+  private prepareExternalWeaponModels(): Promise<ExternalWeaponLoadReport> {
+    if (!this.externalWeaponPreload) {
+      const request = import('../render/externalWeaponModels')
+        .then(({ preloadExternalWeaponModels }) => preloadExternalWeaponModels());
+      this.externalWeaponPreload = request.catch((error: unknown) => {
+        // A transient chunk/network failure may succeed when Play is pressed.
+        this.externalWeaponPreload = null;
+        throw error;
+      });
+    }
+    return this.externalWeaponPreload;
   }
 
   private renderMenu(): void {
@@ -467,6 +508,7 @@ export class AstralArenaApp {
 
   private async startGameView(state: MatchState): Promise<void> {
     if (this.gameViewActive) return;
+    const viewGeneration = this.sessionGeneration;
     this.gameViewActive = true;
     this.currentState = state;
     // Countdown events describe the match being entered (not stale history),
@@ -482,8 +524,29 @@ export class AstralArenaApp {
     this.lastFrameErrorAt = 0;
     this.lastLocalGrounded = null;
     this.lastLocalVerticalVelocity = 0;
-    const { ArenaRenderer } = await import('../render/ArenaRenderer');
-    if (!this.gameViewActive) return;
+    const loadingIndicator = this.root.querySelector<HTMLElement>('.status-light');
+    if (loadingIndicator) loadingIndicator.textContent = 'PREPARANDO EQUIPO';
+    let prepared: [typeof import('../render/ArenaRenderer'), ExternalWeaponLoadReport];
+    try {
+      prepared = await Promise.all([
+        import('../render/ArenaRenderer'),
+        this.prepareExternalWeaponModels(),
+      ]);
+    } catch (error) {
+      if (viewGeneration !== this.sessionGeneration) return;
+      console.error('No se pudo preparar la vista de juego:', error);
+      this.renderMenu();
+      this.showToast('No se pudo preparar el equipo gráfico. Vuelve a intentarlo.');
+      return;
+    }
+    if (!this.gameViewActive || viewGeneration !== this.sessionGeneration) return;
+    const [{ ArenaRenderer }, weaponAssets] = prepared;
+    if (weaponAssets.failed.length > 0) {
+      // Local files should succeed in normal operation. A procedural model is
+      // retained only for corrupt assets, interrupted requests or GPU decode
+      // failures so a single weapon cannot make the whole match unplayable.
+      console.warn('Modelos GLB no disponibles; se usará el modelo de resiliencia:', weaponAssets.failed);
+    }
     this.root.innerHTML = `
       <main class="game-shell">
         <div id="scene-host" class="scene-host"></div>
@@ -609,7 +672,15 @@ export class AstralArenaApp {
       this.lastInput = this.input.sample(++this.inputSequence);
       const presentedPlayer = this.currentState?.players[this.localPlayerId];
       if (presentedPlayer) {
-        presentedPlayer.yaw = this.lastInput.yaw;
+        const operatingTurret = this.currentState?.config.mode === 'towah-of-powah'
+          && this.currentState.tower.turretOwnerId === presentedPlayer.id;
+        presentedPlayer.yaw = operatingTurret
+          ? moveAngleToward(
+              presentedPlayer.yaw,
+              this.lastInput.yaw,
+              TOWER_TURRET_LAYOUT.turnRate * delta,
+            )
+          : this.lastInput.yaw;
         presentedPlayer.pitch = this.lastInput.pitch;
       }
       const hostConnected = this.network.connectedPeerIds.includes('host');
@@ -823,7 +894,7 @@ export class AstralArenaApp {
     const operatingTurret = state.config.mode === 'towah-of-powah'
       && state.tower.turretOwnerId === player.id;
     const origin = operatingTurret
-      ? add(state.tower.center, vec3(0, 2.7, 0))
+      ? towerTurretFiringOrigin(state.tower.center)
       : add(player.position, vec3(0, 1.5, 0));
     const aimDirection = directionFromAngles(player.yaw, player.pitch);
     const map = MAPS[state.config.mapId];
@@ -1070,6 +1141,7 @@ export class AstralArenaApp {
   }
 
   private destroySession(): void {
+    this.sessionGeneration += 1;
     this.gameViewActive = false;
     this.audio.stopAnnouncements();
     cancelAnimationFrame(this.animationFrame);

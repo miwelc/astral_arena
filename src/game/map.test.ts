@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
-import { pointInsideObstacle } from './collision';
-import { CRATER_RIDGE, isJumpPad, JUMP_PAD_ZONES, jumpPadAt } from './map';
+import { pointInsideObstacle, raycastWorld } from './collision';
+import { directionFromAngles } from './math';
+import { CRATER_RIDGE, isJumpPad, JUMP_PAD_ZONES, jumpPadAt, TOWER_TURRET_LAYOUT } from './map';
 import type { AabbObstacle, Vec3 } from './types';
 
 const reflectedGeometry = (obstacle: AabbObstacle): string => [
@@ -54,6 +55,30 @@ describe('Crater Ridge competitive layout', () => {
       'west-base-back',
       'east-base-back',
     ]));
+  });
+
+  it('provides a genuinely raised, narrow Towah emplacement with a safe operator ring', () => {
+    const cap = CRATER_RIDGE.obstacles.find((obstacle) => obstacle.id === 'tower-cap');
+    expect(cap).toBeDefined();
+    expect(cap?.max.y).toBeCloseTo(CRATER_RIDGE.towerCenter.y + TOWER_TURRET_LAYOUT.platformTopOffset, 8);
+    expect((cap?.max.x ?? 0) - (cap?.min.x ?? 0)).toBeLessThan(4);
+    expect(TOWER_TURRET_LAYOUT.operatorFeetOffset).toBeGreaterThan(TOWER_TURRET_LAYOUT.platformTopOffset);
+    expect(TOWER_TURRET_LAYOUT.firingOriginOffset).toBeGreaterThan(TOWER_TURRET_LAYOUT.operatorFeetOffset + 1);
+
+    // The square cap is furthest away on its diagonal. Even at the full
+    // downward stop the authoritative ray must leave the emplacement cleanly.
+    const diagonalDown = raycastWorld(
+      {
+        x: CRATER_RIDGE.towerCenter.x,
+        y: CRATER_RIDGE.towerCenter.y + TOWER_TURRET_LAYOUT.firingOriginOffset,
+        z: CRATER_RIDGE.towerCenter.z,
+      },
+      directionFromAngles(Math.PI / 4, TOWER_TURRET_LAYOUT.minPitch),
+      70,
+      CRATER_RIDGE,
+      [],
+    );
+    expect(diagonalDown?.obstacleId).not.toBe('tower-cap');
   });
 
   it('uses coherent roofed buildings with playable interiors and open doors', () => {

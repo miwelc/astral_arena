@@ -7,7 +7,7 @@ import { SMAAPass } from 'three/addons/postprocessing/SMAAPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 
-import { isJumpPad, JUMP_PAD_ZONES } from '../game/map';
+import { isJumpPad, JUMP_PAD_ZONES, TOWER_TURRET_LAYOUT } from '../game/map';
 import { isTeamGameMode } from '../game/modeRules';
 import type {
   FlagState,
@@ -73,6 +73,7 @@ import {
   HIP_FIRE_FOV,
   hitVisualProfile,
   opticalZoomFov,
+  presentedTowerAim,
   visualRecoilImpulse,
 } from './combatPresentation';
 import {
@@ -85,6 +86,7 @@ import {
   onExternalWeaponModelReady,
   preloadExternalWeaponModels,
 } from './externalWeaponModels';
+import { applyFallbackWeaponNormalDetail } from './weaponSurfaceDetail';
 
 const UP = new THREE.Vector3(0, 1, 0);
 const DOWN = new THREE.Vector3(0, -1, 0);
@@ -157,6 +159,7 @@ interface PlayerRig {
   previousYaw: number;
   targetYaw: number;
   lastTick: number;
+  operatingTowerTurret: boolean;
   locomotionPhase: number;
   moveBlend: number;
   crouchBlend: number;
@@ -637,9 +640,9 @@ export class ArenaRenderer {
     this.unsubscribeExternalWeapons = onExternalWeaponModelReady((id) => {
       this.refreshExternalWeaponPresentation(id);
     });
-    // Decoding happens off the critical startup path. Procedural hard-surface
-    // models remain an immediate fallback and are swapped atomically as each
-    // local CC0 GLB becomes ready.
+    // AstralArenaApp normally awaits all six local GLBs before constructing a
+    // renderer. This idempotent preload is a safety net for direct renderer
+    // consumers; the procedural model is used only if a real asset load fails.
     void preloadExternalWeaponModels();
 
     this.resize();
@@ -1536,7 +1539,7 @@ export class ArenaRenderer {
     this.scene.add(puddles);
 
     const facilitySurfaceTemplate = new THREE.MeshPhysicalMaterial({
-      color: 0xe0e5e1,
+      color: 0xf1f0e9,
       map: this.facilityPanelTexture,
       roughness: 0.38,
       metalness: 0.16,
@@ -1724,16 +1727,16 @@ export class ArenaRenderer {
     });
     const planterShellMaterial = new THREE.MeshPhysicalMaterial({
       name: 'hydroponics-weathered-alloy',
-      color: 0x526c70,
+      color: 0xbccbc8,
       map: this.facilityPanelTexture,
       normalMap: this.technicalNormalTexture,
       normalScale: new THREE.Vector2(0.32, 0.32),
       roughnessMap: this.technicalRoughnessTexture,
-      roughness: 0.48,
-      metalness: 0.32,
-      clearcoat: 0.16,
-      clearcoatRoughness: 0.42,
-      envMapIntensity: 0.82,
+      roughness: 0.38,
+      metalness: 0.14,
+      clearcoat: 0.32,
+      clearcoatRoughness: 0.3,
+      envMapIntensity: 1.02,
     });
     const planterFrameMaterial = new THREE.MeshStandardMaterial({
       name: 'hydroponics-graphite-frame',
@@ -2187,6 +2190,8 @@ export class ArenaRenderer {
       roughness: 0.24,
       metalness: 0.35,
     });
+    const pivotHeight = TOWER_TURRET_LAYOUT.firingOriginOffset
+      - TOWER_TURRET_LAYOUT.renderedTurretRootOffset;
     const base = new THREE.Mesh(new THREE.CylinderGeometry(0.58, 0.84, 0.62, 12), turretBaseMaterial);
     base.position.y = 0.32;
     base.castShadow = true;
@@ -2195,12 +2200,40 @@ export class ArenaRenderer {
     collar.rotation.x = Math.PI / 2;
     collar.position.y = 0.63;
     this.towerTurret.add(collar);
+    // The firing pivot needs enough clearance to shoot down past the cap's
+    // worst (diagonal) edge. A visible powered pedestal connects that pivot to
+    // the platform, so the gun reads as engineered structure rather than a
+    // floating prop.
+    const pedestalHeight = Math.max(0.4, pivotHeight - 0.94);
+    const pedestal = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.31, 0.46, pedestalHeight, 12),
+      turretBaseMaterial,
+    );
+    pedestal.position.y = 0.63 + pedestalHeight * 0.5;
+    pedestal.castShadow = true;
+    this.towerTurret.add(pedestal);
+    const upperCollar = new THREE.Mesh(
+      new THREE.TorusGeometry(0.4, 0.065, 8, 24),
+      turretGlowMaterial,
+    );
+    upperCollar.rotation.x = Math.PI / 2;
+    upperCollar.position.y = pivotHeight - 0.34;
+    this.towerTurret.add(upperCollar);
+    for (const x of [-0.34, 0.34]) {
+      const actuator = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.055, 0.075, Math.max(0.42, pivotHeight - 0.96), 8),
+        turretMetalMaterial,
+      );
+      actuator.position.set(x, 0.72 + Math.max(0.42, pivotHeight - 0.96) * 0.5, 0.08);
+      actuator.castShadow = true;
+      this.towerTurret.add(actuator);
+    }
     const gimbal = new THREE.Mesh(new THREE.SphereGeometry(0.42, 16, 10), turretMetalMaterial);
     gimbal.scale.set(1.25, 0.78, 1);
-    gimbal.position.y = 0.84;
+    gimbal.position.y = pivotHeight;
     gimbal.castShadow = true;
     this.towerTurret.add(gimbal);
-    this.towerTurretPitch.position.y = 0.87;
+    this.towerTurretPitch.position.y = pivotHeight;
     this.towerTurret.add(this.towerTurretPitch);
     const cradle = new THREE.Mesh(new RoundedBoxGeometry(1.06, 0.45, 0.78, 3, 0.12), turretBaseMaterial);
     cradle.position.set(0, 0, -0.23);
@@ -2224,15 +2257,15 @@ export class ArenaRenderer {
     const sensor = new THREE.Mesh(new THREE.SphereGeometry(0.14, 14, 9), turretGlowMaterial);
     sensor.position.set(0, 0.31, -0.32);
     this.towerTurretPitch.add(sensor);
-    // A sight just behind and above the cradle gives the operator a readable
-    // view of both barrels without putting the camera inside turret geometry.
-    this.towerTurretCameraMount.position.set(0, 0.52, 0.16);
-    this.towerTurretPitch.add(this.towerTurretCameraMount);
-    // The control volume lives on the main deck; the physical turret sits on
-    // the raised cap (the simulation fires from towerCenter.y + 2.7).
+    // This is the optical sight, not the astronaut's free-standing eye. It is
+    // exactly collinear with the authoritative hitscan origin so the centre of
+    // the turret HUD remains truthful even at the full downward pitch.
+    this.towerTurretCameraMount.position.set(0, pivotHeight, 0);
+    this.towerTurret.add(this.towerTurretCameraMount);
+    // Simulation, camera and presentation share one authoritative layout.
     this.towerTurret.position.set(
       this.map.towerCenter.x,
-      this.map.towerCenter.y + 1.7,
+      this.map.towerCenter.y + TOWER_TURRET_LAYOUT.renderedTurretRootOffset,
       this.map.towerCenter.z,
     );
     this.scene.add(this.towerTurret);
@@ -2375,9 +2408,12 @@ export class ArenaRenderer {
       }
 
       if (rig.team !== player.team) this.updateRigTeam(rig, player.team);
+      const operatingTowerTurret = state.config.mode === 'towah-of-powah'
+        && state.tower.turretOwnerId === player.id;
       if (rig.lastTick !== state.tick) {
         const nextPosition = vectorFrom(player.position);
-        if (rig.targetPosition.distanceToSquared(nextPosition) > 36) {
+        const turretMountChanged = rig.operatingTowerTurret !== operatingTowerTurret;
+        if (turretMountChanged || rig.targetPosition.distanceToSquared(nextPosition) > 36) {
           rig.previousPosition.copy(nextPosition);
           rig.targetPosition.copy(nextPosition);
           rig.root.position.copy(nextPosition);
@@ -2389,6 +2425,7 @@ export class ArenaRenderer {
           rig.previousYaw = rig.targetYaw;
           rig.targetYaw = player.yaw;
         }
+        rig.operatingTowerTurret = operatingTowerTurret;
         rig.lastTick = state.tick;
       }
       const desiredPosition = new THREE.Vector3().lerpVectors(
@@ -2405,6 +2442,9 @@ export class ArenaRenderer {
       const weaponId = activeWeapon?.id ?? null;
       if (weaponId !== rig.weaponId) this.setRigWeapon(rig, weaponId);
       this.updateRigAnimation(rig, player, activeWeapon, worldTime, delta);
+      // The mounted astronaut remains a real, targetable third-person body,
+      // but their carried gun is stowed while both hands operate the emplacement.
+      rig.weaponMount.visible = !operatingTowerTurret;
 
       const recentlyDamaged = state.elapsed - player.lastDamageAt < 0.22;
       rig.shield.visible = player.alive && player.shield > 0 && (recentlyDamaged || player.spawnProtection > 0);
@@ -3220,6 +3260,7 @@ export class ArenaRenderer {
       previousYaw: player.yaw,
       targetYaw: player.yaw,
       lastTick: -1,
+      operatingTowerTurret: false,
       locomotionPhase: (hashString(player.id) % 628) * 0.01,
       moveBlend: 0,
       crouchBlend: player.crouched ? 1 : 0,
@@ -3387,17 +3428,10 @@ export class ArenaRenderer {
     const group = createPreferredWeaponModel(id);
     group.traverse((object) => {
       object.userData.sharedVisualTemplate = true;
-      if (!(object instanceof THREE.Mesh)) return;
-      const materials = Array.isArray(object.material) ? object.material : [object.material];
-      for (const material of materials) {
-        if (!(material instanceof THREE.MeshStandardMaterial) || material.transparent) continue;
-        if (!material.normalMap && this.technicalNormalTexture) {
-          material.normalMap = this.technicalNormalTexture;
-          material.normalScale.set(0.11, 0.11);
-          material.needsUpdate = true;
-        }
-      }
     });
+    if (this.technicalNormalTexture) {
+      applyFallbackWeaponNormalDetail(group, this.technicalNormalTexture);
+    }
     this.weaponTemplates.set(id, group);
     return group;
   }
@@ -3755,8 +3789,9 @@ export class ArenaRenderer {
     this.towerRingMaterial.opacity = state.tower.controllingTeam === 'neutral'
       ? 0.32 + Math.sin(worldTime * 2) * 0.06
       : 0.58 + Math.sin(worldTime * 4) * 0.1;
-    this.towerTurret.rotation.y = state.tower.turretYaw;
-    this.towerTurretPitch.rotation.x = state.tower.turretPitch;
+    const aim = presentedTowerAim(state, this.localPlayerId);
+    this.towerTurret.rotation.y = aim.yaw;
+    this.towerTurretPitch.rotation.x = aim.pitch;
   }
 
   private consumeEvents(state: MatchState): void {
@@ -4721,9 +4756,10 @@ export class ArenaRenderer {
     if (firstPerson && operatingTurret) {
       this.towerTurret.updateWorldMatrix(true, true);
       this.towerTurretCameraMount.getWorldPosition(this.camera.position);
+      const aim = presentedTowerAim(state, this.localPlayerId);
       this.camera.rotation.set(
-        state.tower.turretPitch,
-        state.tower.turretYaw,
+        aim.pitch,
+        aim.yaw,
         Math.sin(worldTime * 69) * this.damagePulse * 0.0015,
         'YXZ',
       );

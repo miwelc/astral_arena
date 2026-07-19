@@ -169,27 +169,90 @@ const copyProceduralContract = (
   };
 };
 
-const tuneExternalMaterials = (root: THREE.Object3D, id: WeaponId): void => {
-  const replacements = new Map<THREE.Material, THREE.Material>();
-  const tint = new THREE.Color(WEAPONS[id].tint);
+type ExternalWeaponSurface = 'ceramic' | 'functional-dark';
 
-  const tuneMaterial = (source: THREE.Material): THREE.Material => {
-    const cached = replacements.get(source);
+const externalSurfaceFor = (
+  object: THREE.Object3D,
+  source: THREE.Material,
+): ExternalWeaponSurface => {
+  const semanticName = `${object.name} ${source.name}`;
+  // Keep moving/mechanical parts legible against the pale ceramic body. The
+  // imported packs use Spanish, English and abbreviated Blender node names.
+  return /black|grey|magazine|trigger|scope|tendon|pump|pomp|bolt|charging|cassette|devant|derierre|barrel|grip/i
+    .test(semanticName)
+    ? 'functional-dark'
+    : 'ceramic';
+};
+
+/**
+ * Preserve the source texture's wear/value information while discarding its
+ * hue. This lets normal maps and authored scratches survive, but turns green
+ * paint and wood into the game's white ceramic composite language.
+ */
+const installCeramicAlbedoRemap = (
+  material: THREE.MeshPhysicalMaterial,
+  surface: ExternalWeaponSurface,
+): void => {
+  if (!material.map) return;
+  const dark = surface === 'functional-dark';
+  material.onBeforeCompile = (shader) => {
+    shader.fragmentShader = shader.fragmentShader.replace(
+      '#include <map_fragment>',
+      /* glsl */ `
+        #ifdef USE_MAP
+          vec4 sampledDiffuseColor = texture2D(map, vMapUv);
+          #ifdef DECODE_VIDEO_TEXTURE
+            sampledDiffuseColor = sRGBTransferEOTF(sampledDiffuseColor);
+          #endif
+          float ceramicValue = dot(sampledDiffuseColor.rgb, vec3(0.2126, 0.7152, 0.0722));
+          ceramicValue = ${dark ? 'mix(0.34, 0.92, smoothstep(0.02, 0.96, ceramicValue))' : 'mix(0.72, 1.04, smoothstep(0.02, 0.96, ceramicValue))'};
+          diffuseColor *= vec4(vec3(ceramicValue), sampledDiffuseColor.a);
+        #endif
+      `,
+    );
+  };
+  material.customProgramCacheKey = () => `astral-ceramic-albedo-${surface}-v1`;
+};
+
+const tuneExternalMaterials = (root: THREE.Object3D, id: WeaponId): void => {
+  const replacements = new Map<string, THREE.Material>();
+
+  const tuneMaterial = (object: THREE.Object3D, source: THREE.Material): THREE.Material => {
+    if (!(source instanceof THREE.MeshStandardMaterial)) {
+      return source.clone();
+    }
+    const surface = externalSurfaceFor(object, source);
+    const cacheKey = `${source.uuid}:${surface}`;
+    const cached = replacements.get(cacheKey);
     if (cached) return cached;
 
-    const material = source.clone();
-    material.name = `${id}-external-${source.name || 'surface'}`;
-    if (material instanceof THREE.MeshStandardMaterial) {
-      material.envMapIntensity = Math.max(material.envMapIntensity, 1.15);
-      material.roughness = THREE.MathUtils.clamp(material.roughness * 0.94, 0.2, 0.8);
-      if (/^(main|accent)$/i.test(source.name)) {
-        material.color.lerp(tint, material.map ? 0.08 : 0.28);
-        material.emissive.copy(tint);
-        material.emissiveIntensity = 0.16;
-      }
-      if (material.normalMap) material.normalScale.multiplyScalar(1.08);
-    }
-    replacements.set(source, material);
+    const material = new THREE.MeshPhysicalMaterial({
+      name: `${id}-external-${surface}-${source.name || 'surface'}`,
+      color: surface === 'ceramic' ? 0xf5f1e8 : 0x26333a,
+      map: source.map,
+      normalMap: source.normalMap,
+      normalScale: source.normalScale.clone().multiplyScalar(1.08),
+      roughnessMap: source.roughnessMap,
+      metalnessMap: source.metalnessMap,
+      aoMap: source.aoMap,
+      aoMapIntensity: source.aoMapIntensity,
+      alphaMap: source.alphaMap,
+      transparent: source.transparent,
+      opacity: source.opacity,
+      alphaTest: source.alphaTest,
+      side: source.side,
+      depthWrite: source.depthWrite,
+      depthTest: source.depthTest,
+      roughness: surface === 'ceramic' ? 0.3 : 0.46,
+      metalness: surface === 'ceramic' ? 0.08 : 0.38,
+      clearcoat: surface === 'ceramic' ? 0.42 : 0.16,
+      clearcoatRoughness: surface === 'ceramic' ? 0.24 : 0.38,
+      envMapIntensity: surface === 'ceramic' ? 1.24 : 1.08,
+    });
+    material.userData.externalWeaponSurface = surface;
+    material.userData.ceramicAlbedoRemap = Boolean(material.map);
+    installCeramicAlbedoRemap(material, surface);
+    replacements.set(cacheKey, material);
     return material;
   };
 
@@ -198,8 +261,8 @@ const tuneExternalMaterials = (root: THREE.Object3D, id: WeaponId): void => {
     object.castShadow = true;
     object.receiveShadow = false;
     object.material = Array.isArray(object.material)
-      ? object.material.map(tuneMaterial)
-      : tuneMaterial(object.material);
+      ? object.material.map((material) => tuneMaterial(object, material))
+      : tuneMaterial(object, object.material);
   });
 };
 
@@ -350,6 +413,11 @@ const cloneTemplateForRenderer = (template: THREE.Group): THREE.Group => {
     const existing = materials.get(material);
     if (existing) return existing;
     const owned = material.clone();
+    // Three.js intentionally does not copy shader callbacks in Material.copy.
+    // Preserve our achromatic ceramic remap on independently disposable
+    // renderer clones or the imported green/wood albedo would reappear.
+    owned.onBeforeCompile = material.onBeforeCompile;
+    owned.customProgramCacheKey = material.customProgramCacheKey;
     materials.set(material, owned);
     return owned;
   };
@@ -368,9 +436,10 @@ const cloneTemplateForRenderer = (template: THREE.Group): THREE.Group => {
 };
 
 /**
- * Owns asynchronously loaded immutable templates. `create()` is deliberately
- * synchronous: gameplay can render the procedural model immediately, then a
- * renderer may invalidate its own cache when a ready listener fires.
+ * Owns asynchronously loaded immutable templates. The application preloads
+ * and awaits all local GLBs before constructing a match renderer. `create()`
+ * still has a synchronous procedural resilience path so one corrupt file or a
+ * platform-specific GLTF decode failure cannot prevent the match from opening.
  */
 export class ExternalWeaponModelLibrary {
   private readonly templates = new Map<WeaponId, THREE.Group>();

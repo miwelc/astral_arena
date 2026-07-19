@@ -1,5 +1,5 @@
 import { canOccupyCapsule, hasLineOfSight, moveCapsule, raycastWorld } from './collision';
-import { isJumpPad, MAPS } from './map';
+import { isJumpPad, MAPS, TOWER_TURRET_LAYOUT } from './map';
 import { canonicalFormatForMode, isTeamGameMode, rulesForMode } from './modeRules';
 import { damageScaleAtDistance, sampleDirectionInCone, shotSpread } from './gunplay';
 import {
@@ -12,6 +12,7 @@ import {
   dot,
   emptyInput,
   hashString,
+  moveAngleToward,
   normalize,
   randomRange,
   scale,
@@ -129,6 +130,8 @@ const noButtons = (): ButtonState => ({
 export const WEAPON_PICKUP_INTERACTION_RADIUS = Math.sqrt(2.2);
 export const TURRET_INTERACTION_RADIUS = 6.4;
 export const TURRET_INTERACTION_VERTICAL_RANGE = 2.2;
+const TURRET_MOUNT_POSITION_TOLERANCE = 0.35;
+const TURRET_EXIT_CLEARANCE = 0.18;
 
 const horizontalDistanceSquared = (from: Vec3, to: Vec3): number => {
   const x = from.x - to.x;
@@ -142,11 +145,36 @@ const normalizedPlayerCount = (mode: MatchConfig['mode'], requested: number | un
   return clamp(finiteRequested, 2, rulesForMode(mode).maxPlayers);
 };
 
+/**
+ * Physical, authoritative capsule position for an operator. The position is
+ * part of PlayerState, so remote clients, radar, hit detection and replays all
+ * see the astronaut on the raised emplacement rather than on the lower deck.
+ */
+export const towerTurretOperatorPosition = (towerCenter: Vec3, yaw: number): Vec3 => {
+  const forward = directionFromAngles(yaw, 0);
+  return {
+    x: towerCenter.x - forward.x * TOWER_TURRET_LAYOUT.operatorDistance,
+    y: towerCenter.y + TOWER_TURRET_LAYOUT.operatorFeetOffset,
+    z: towerCenter.z - forward.z * TOWER_TURRET_LAYOUT.operatorDistance,
+  };
+};
+
+/** Shared muzzle/sight origin used by authoritative firing and presentation. */
+export const towerTurretFiringOrigin = (towerCenter: Vec3): Vec3 =>
+  add(towerCenter, vec3(0, TOWER_TURRET_LAYOUT.firingOriginOffset, 0));
+
 /** Shared by simulation and HUD prompts so the usable control deck is unambiguous. */
-export const canUseTowerTurret = (player: PlayerState, tower: MatchState['tower']): boolean =>
-  player.alive
-  && horizontalDistanceSquared(player.position, tower.center) <= TURRET_INTERACTION_RADIUS ** 2
-  && Math.abs(player.position.y - tower.center.y) <= TURRET_INTERACTION_VERTICAL_RANGE;
+export const canUseTowerTurret = (player: PlayerState, tower: MatchState['tower']): boolean => {
+  if (!player.alive) return false;
+  const horizontalDistance = Math.sqrt(horizontalDistanceSquared(player.position, tower.center));
+  if (tower.turretOwnerId === player.id) {
+    return Math.abs(horizontalDistance - TOWER_TURRET_LAYOUT.operatorDistance) <= TURRET_MOUNT_POSITION_TOLERANCE
+      && Math.abs(player.position.y - (tower.center.y + TOWER_TURRET_LAYOUT.operatorFeetOffset))
+        <= TURRET_MOUNT_POSITION_TOLERANCE;
+  }
+  return horizontalDistance <= TURRET_INTERACTION_RADIUS
+    && Math.abs(player.position.y - tower.center.y) <= TURRET_INTERACTION_VERTICAL_RANGE;
+};
 
 /** Exact predicate used by presentation code to offer an E-key weapon prompt. */
 export const canUseWeaponPickup = (player: PlayerState, pickup: PickupState): boolean =>
@@ -317,13 +345,13 @@ export class GameSimulation {
         inheritedJuggernaut = replacement.isJuggernaut;
         this.dropCarriedFlag(replacement);
         if (inheritedJuggernaut) this.state.juggernautId = null;
+        this.releaseTurret(replacement.id, false);
         delete this.state.players[replacement.id];
         this.previousButtons.delete(replacement.id);
         this.jumpPadReadyAt.delete(replacement.id);
         this.jumpPadMomentum.delete(replacement.id);
         this.damageContributors.delete(replacement.id);
         for (const contributors of this.damageContributors.values()) contributors.delete(replacement.id);
-        this.releaseTurret(replacement.id);
       }
       slot = Object.keys(this.state.players).length;
     }
@@ -338,6 +366,7 @@ export class GameSimulation {
     const wasJuggernaut = player.isJuggernaut;
     this.dropCarriedFlag(player);
     if (wasJuggernaut) this.state.juggernautId = null;
+    this.releaseTurret(id, false);
     delete this.state.players[id];
     this.previousButtons.delete(id);
     this.jumpPadReadyAt.delete(id);
@@ -345,7 +374,6 @@ export class GameSimulation {
     this.shieldRechargeActive.delete(id);
     this.damageContributors.delete(id);
     for (const contributors of this.damageContributors.values()) contributors.delete(id);
-    this.releaseTurret(id);
     if (this.state.config.botFill && this.state.phase !== 'finished') this.fillWithBots();
     if (wasJuggernaut && this.state.config.mode === 'juggernaut') {
       const successor = Object.values(this.state.players).find((candidate) => candidate.alive);
@@ -494,7 +522,15 @@ export class GameSimulation {
     this.updateShieldRecharge(player, dt);
     this.updateHealthRecharge(player, dt);
 
-    player.yaw = player.input.yaw;
+    const operatingTurret = this.state.config.mode === 'towah-of-powah'
+      && this.state.tower.turretOwnerId === player.id;
+    player.yaw = operatingTurret
+      ? moveAngleToward(
+          player.yaw,
+          player.input.yaw,
+          TOWER_TURRET_LAYOUT.turnRate * dt,
+        )
+      : player.input.yaw;
     player.pitch = clamp(player.input.pitch, -1.48, 1.48);
     player.lastProcessedInput = Math.max(player.lastProcessedInput, player.input.sequence);
 
@@ -502,14 +538,12 @@ export class GameSimulation {
     const canAct = this.state.phase === 'playing';
     const usePressed = canAct && !previous.use && player.input.use;
     if (usePressed) this.usePressedThisTick.add(player.id);
-    const operatingTurret = this.state.config.mode === 'towah-of-powah'
-      && this.state.tower.turretOwnerId === player.id;
     const enteringTurret = usePressed
       && this.state.config.mode === 'towah-of-powah'
       && this.state.tower.turretOwnerId === null
       && canUseTowerTurret(player, this.state.tower);
     if (canAct) {
-      if (operatingTurret) this.holdTurretOperator(player, dt);
+      if (operatingTurret) this.holdTurretOperator(player);
       else this.updateMovement(player, dt, !previous.jump && player.input.jump);
     }
 
@@ -553,14 +587,12 @@ export class GameSimulation {
     });
   }
 
-  private holdTurretOperator(player: PlayerState, dt: number): void {
-    player.velocity.x = 0;
-    player.velocity.z = 0;
-    player.velocity.y -= PLAYER_MOVEMENT_TUNING.gravity * dt;
-    const movement = moveCapsule(player, this.map, dt);
-    player.position = movement.position;
-    player.velocity = movement.velocity;
-    player.grounded = movement.grounded;
+  private holdTurretOperator(player: PlayerState): void {
+    player.position = towerTurretOperatorPosition(this.state.tower.center, player.yaw);
+    player.velocity = vec3();
+    player.height = FIXED_PLAYER_HEIGHT;
+    player.crouched = false;
+    player.grounded = true;
   }
 
   private updateMovement(player: PlayerState, dt: number, jumpPressed: boolean): void {
@@ -1731,7 +1763,8 @@ export class GameSimulation {
       ? this.state.players[this.state.tower.turretOwnerId]
       : null;
     if (!previousOperator || !canUseTowerTurret(previousOperator, this.state.tower)) {
-      this.state.tower.turretOwnerId = null;
+      if (this.state.tower.turretOwnerId) this.releaseTurret(this.state.tower.turretOwnerId);
+      else this.state.tower.turretOwnerId = null;
     }
 
     const currentOperator = this.state.tower.turretOwnerId
@@ -1750,9 +1783,7 @@ export class GameSimulation {
         })[0];
       if (candidate) {
         this.consumeUse(candidate.id);
-        this.state.tower.turretOwnerId = candidate.id;
-        this.state.tower.turretYaw = candidate.yaw;
-        this.state.tower.turretPitch = clamp(candidate.pitch, -0.6, 0.85);
+        this.mountTurret(candidate);
       }
     }
 
@@ -1760,10 +1791,14 @@ export class GameSimulation {
     const controller = this.state.tower.turretOwnerId ? this.state.players[this.state.tower.turretOwnerId] : null;
     if (!controller) return;
     this.state.tower.turretYaw = controller.yaw;
-    this.state.tower.turretPitch = clamp(controller.pitch, -0.6, 0.85);
+    this.state.tower.turretPitch = clamp(
+      controller.pitch,
+      TOWER_TURRET_LAYOUT.minPitch,
+      TOWER_TURRET_LAYOUT.maxPitch,
+    );
     if (!controller.input.fire || this.state.tower.turretCooldown > 0) return;
 
-    const turretOrigin = add(this.state.tower.center, vec3(0, 2.7, 0));
+    const turretOrigin = towerTurretFiringOrigin(this.state.tower.center);
     const direction = directionFromAngles(this.state.tower.turretYaw, this.state.tower.turretPitch);
     const hit = raycastWorld(
       turretOrigin,
@@ -1798,8 +1833,63 @@ export class GameSimulation {
     }
   }
 
-  private releaseTurret(playerId: string): void {
-    if (this.state.tower.turretOwnerId === playerId) this.state.tower.turretOwnerId = null;
+  private mountTurret(player: PlayerState): void {
+    this.state.tower.turretOwnerId = player.id;
+    this.state.tower.turretYaw = player.yaw;
+    this.state.tower.turretPitch = clamp(
+      player.pitch,
+      TOWER_TURRET_LAYOUT.minPitch,
+      TOWER_TURRET_LAYOUT.maxPitch,
+    );
+    const weapon = player.inventory[player.activeWeapon];
+    if (weapon) this.cancelWeaponAction(weapon);
+    this.holdTurretOperator(player);
+  }
+
+  private safeTurretExitPosition(player: PlayerState): Vec3 {
+    const angularOffsets = [0, Math.PI / 2, -Math.PI / 2, Math.PI, Math.PI / 4, -Math.PI / 4];
+    const radii = [TOWER_TURRET_LAYOUT.exitRadius, TOWER_TURRET_LAYOUT.exitRadius + 0.9, TOWER_TURRET_LAYOUT.exitRadius + 1.8];
+    const otherPlayers = Object.values(this.state.players).filter(
+      (candidate) => candidate.id !== player.id && candidate.alive,
+    );
+    let mapSafeFallback: Vec3 | null = null;
+
+    for (const radius of radii) {
+      for (const angularOffset of angularOffsets) {
+        const yaw = wrapAngle(player.yaw + angularOffset);
+        const forward = directionFromAngles(yaw, 0);
+        const candidate = {
+          x: this.state.tower.center.x - forward.x * radius,
+          y: this.state.tower.center.y,
+          z: this.state.tower.center.z - forward.z * radius,
+        };
+        if (!canOccupyCapsule(candidate, player.radius, FIXED_PLAYER_HEIGHT, this.map)) continue;
+        mapSafeFallback ??= candidate;
+        const occupied = otherPlayers.some((other) =>
+          Math.abs(other.position.y - candidate.y) < Math.max(other.height, FIXED_PLAYER_HEIGHT)
+          && horizontalDistanceSquared(other.position, candidate)
+            < (other.radius + player.radius + TURRET_EXIT_CLEARANCE) ** 2,
+        );
+        if (!occupied) return candidate;
+      }
+    }
+    return mapSafeFallback ?? {
+      x: this.state.tower.center.x,
+      y: this.state.tower.center.y,
+      z: this.state.tower.center.z + TOWER_TURRET_LAYOUT.exitRadius,
+    };
+  }
+
+  private releaseTurret(playerId: string, reposition = true): void {
+    if (this.state.tower.turretOwnerId !== playerId) return;
+    this.state.tower.turretOwnerId = null;
+    const player = this.state.players[playerId];
+    if (!reposition || !player?.alive) return;
+    player.position = this.safeTurretExitPosition(player);
+    player.velocity = vec3();
+    player.height = FIXED_PLAYER_HEIGHT;
+    player.crouched = false;
+    player.grounded = true;
   }
 
   private spawnPlayer(player: PlayerState, initial: boolean): void {

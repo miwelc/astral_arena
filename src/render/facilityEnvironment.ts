@@ -45,9 +45,9 @@ export interface FacilityPalette {
  * before changing individual colors.
  */
 export const DEFAULT_FACILITY_PALETTE: Readonly<FacilityPalette> = Object.freeze({
-  panelLight: 0xdce4df,
-  panelSage: 0x718984,
-  panelBlue: 0x526d7a,
+  panelLight: 0xf4f3ec,
+  panelSage: 0xc5d2cd,
+  panelBlue: 0xb9cdd5,
   panelDark: 0x091218,
   structural: 0x15242a,
   accent: 0xa4e83f,
@@ -170,10 +170,11 @@ export const createFacilityMaterialKit = (
       name: 'facility-panel-light',
       color: palette.panelLight,
       ...texturedSurface,
-      metalness: 0.34,
-      roughness: 0.3,
-      clearcoat: 0.2,
-      clearcoatRoughness: 0.36,
+      metalness: 0.1,
+      roughness: 0.28,
+      clearcoat: 0.38,
+      clearcoatRoughness: 0.26,
+      envMapIntensity: 1.08,
     }),
     panelSage: new THREE.MeshPhysicalMaterial({
       name: 'facility-panel-sage-alloy',
@@ -1095,8 +1096,13 @@ export const createFacilityBlock = (options: FacilityBlockOptions): THREE.Group 
     options.materials.panelBlue,
   ] as const;
   const styleIndex = Math.abs(Math.trunc(options.seed)) % panelPalette.length;
-  const primaryPanel = panelPalette[styleIndex]!;
-  const secondaryPanel = panelPalette[(styleIndex + 1) % panelPalette.length]!;
+  // The facility's architectural identity is pale ceramic. Sage and blue are
+  // retained as secondary service coatings instead of darkening whole facade
+  // bays, so different blocks remain varied without losing the bright base.
+  const primaryPanel = options.materials.panelLight;
+  const secondaryPanel = styleIndex === 0
+    ? options.materials.panelLight
+    : panelPalette[styleIndex]!;
   const signalAccent = styleIndex === 0
     ? options.materials.accent
     : styleIndex === 1

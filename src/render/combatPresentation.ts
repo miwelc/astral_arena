@@ -1,4 +1,30 @@
+import { TOWER_TURRET_LAYOUT } from '../game/map';
+import type { MatchState } from '../game/types';
+
 export const HIP_FIRE_FOV = 74;
+
+/**
+ * Uses locally predicted look angles for the player currently manning the
+ * turret, while every observer still presents the authoritative tower state.
+ */
+export const presentedTowerAim = (
+  state: MatchState,
+  localPlayerId: string | null,
+): { yaw: number; pitch: number } => {
+  const localOperator = localPlayerId && state.tower.turretOwnerId === localPlayerId
+    ? state.players[localPlayerId]
+    : null;
+  if (localOperator?.alive) {
+    return {
+      yaw: localOperator.yaw,
+      pitch: Math.min(
+        TOWER_TURRET_LAYOUT.maxPitch,
+        Math.max(TOWER_TURRET_LAYOUT.minPitch, localOperator.pitch),
+      ),
+    };
+  }
+  return { yaw: state.tower.turretYaw, pitch: state.tower.turretPitch };
+};
 
 /**
  * Converts the simulation's intentionally small recoil angle into a restrained

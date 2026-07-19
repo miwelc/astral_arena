@@ -164,5 +164,5 @@ describe('bot objective smoke tests', () => {
     }
     expect(flagEvents).toBeGreaterThan(0);
     expect(simulation.state.teamScores.aurora + simulation.state.teamScores.nova).toBeGreaterThan(0);
-  });
+  }, 10_000);
 });

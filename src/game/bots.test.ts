@@ -10,7 +10,7 @@ import {
   updateBotInputs,
 } from './bots';
 import { createDefaultConfig, GameSimulation } from './simulation';
-import type { GameMode, PickupState, PlayerState, Vec3 } from './types';
+import type { Difficulty, GameMode, PickupState, PlayerState, Vec3 } from './types';
 import { WEAPONS } from './weapons';
 
 const startBotSimulation = (
@@ -18,9 +18,10 @@ const startBotSimulation = (
   players: Array<{ id: string; name: string; kind: 'bot' | 'human' }> = [
     { id: 'bot', name: 'Bot', kind: 'bot' },
   ],
+  difficulty: Difficulty = 'veteran',
 ): GameSimulation => {
   const simulation = new GameSimulation(
-    createDefaultConfig({ mode, format: 'squads', difficulty: 'veteran', botFill: false }),
+    createDefaultConfig({ mode, format: 'squads', difficulty, botFill: false }),
     players,
   );
   simulation.state.phase = 'playing';
@@ -69,6 +70,11 @@ describe('bot difficulty profiles', () => {
 
     expect(recruit.visionRange).toBeLessThan(veteran.visionRange);
     expect(veteran.visionRange).toBeLessThan(legend.visionRange);
+
+    expect(recruit.radarGlanceInterval).toBeNull();
+    expect(veteran.radarGlanceInterval).not.toBeNull();
+    expect(legend.radarGlanceInterval?.[0]).toBeLessThan(veteran.radarGlanceInterval?.[0] ?? 0);
+    expect(legend.radarGlanceInterval?.[1]).toBeLessThan(veteran.radarGlanceInterval?.[1] ?? 0);
   });
 
   it('reduces combat movement and special-action pressure on every tier', () => {
@@ -266,7 +272,7 @@ describe('bot situational awareness and safety', () => {
     expect(fired).toBe(true);
   });
 
-  it('uses motion-tracker contacts to investigate through cover without firing through walls', () => {
+  it('samples a noisy motion-tracker contact through cover without treating it as sight', () => {
     const simulation = startBotSimulation('towah-of-powah', [
       { id: 'bot', name: 'Bot', kind: 'bot' },
       { id: 'enemy', name: 'Enemy', kind: 'human' },
@@ -278,13 +284,128 @@ describe('bot situational awareness and safety', () => {
     enemy.velocity = { x: 1.2, y: 0, z: 0 };
     enemy.crouched = false;
     bot.bot!.decisionTimer = 0;
+    bot.bot!.radarGlanceTimer = 0;
 
     updateBotInputs(simulation.state, simulation.map, 0.05, () => false);
 
     expect(isPlayerRevealedToBotRadar(simulation.state, bot, enemy)).toBe(true);
-    expect(bot.bot?.targetId).toBe(enemy.id);
-    expect(bot.bot?.lastSeenPosition).toEqual(enemy.position);
+    expect(bot.bot?.targetId).toBeNull();
+    expect(bot.bot?.lastSeenPosition).toBeNull();
+    expect(bot.bot?.radarContactId).toBe(enemy.id);
+    expect(bot.bot?.radarContactPosition).not.toEqual(enemy.position);
+    const sampledError = Math.hypot(
+      (bot.bot?.radarContactPosition?.x ?? 0) - enemy.position.x,
+      (bot.bot?.radarContactPosition?.z ?? 0) - enemy.position.z,
+    );
+    expect(sampledError).toBeGreaterThanOrEqual(BOT_DIFFICULTY_PROFILES.veteran.radarPositionError * 0.35);
+    expect(sampledError).toBeLessThanOrEqual(BOT_DIFFICULTY_PROFILES.veteran.radarPositionError);
     expect(bot.input.fire).toBe(false);
+  });
+
+  it('samples only the same above, level or below elevation cue shown to a human', () => {
+    const simulation = startBotSimulation('deathmatch', [
+      { id: 'bot', name: 'Bot', kind: 'bot' },
+      { id: 'enemy', name: 'Enemy', kind: 'human' },
+    ]);
+    const bot = botPlayer(simulation);
+    const enemy = simulation.state.players.enemy!;
+    bot.position = { x: 0, y: 5, z: 0 };
+    enemy.position = { x: 0, y: 18, z: 12 };
+    enemy.velocity = { x: 1.2, y: 0, z: 0 };
+
+    const sampledY = (targetY: number): number => {
+      enemy.position.y = targetY;
+      bot.bot!.decisionTimer = 0;
+      bot.bot!.radarGlanceTimer = 0;
+      simulation.state.elapsed += 0.1;
+      updateBotInputs(simulation.state, simulation.map, 0.05, () => false);
+      return bot.bot!.radarContactPosition!.y;
+    };
+
+    expect(sampledY(18)).toBeCloseTo(7.4, 8);
+    expect(sampledY(5.8)).toBeCloseTo(5, 8);
+    expect(sampledY(-8)).toBeCloseTo(2.6, 8);
+  });
+
+  it.each<GameMode>([
+    'deathmatch',
+    'team-deathmatch',
+    'capture-the-flag',
+    'juggernaut',
+    'towah-of-powah',
+  ])('lets Veteran consult radar intermittently in %s', (mode) => {
+    const simulation = startBotSimulation(mode, [
+      { id: 'bot', name: 'Bot', kind: 'bot' },
+      { id: 'enemy', name: 'Enemy', kind: 'human' },
+    ]);
+    const bot = botPlayer(simulation);
+    const enemy = simulation.state.players.enemy!;
+    bot.position = { x: 0, y: 0, z: 0 };
+    enemy.position = { x: 0, y: 0, z: 14 };
+    enemy.velocity = { x: 1.4, y: 0, z: 0 };
+    bot.bot!.decisionTimer = 0;
+    bot.bot!.radarGlanceTimer = 0;
+
+    updateBotInputs(simulation.state, simulation.map, 0.05, () => false);
+
+    expect(bot.bot?.radarContactId).toBe(enemy.id);
+    expect(bot.bot?.radarGlanceTimer).toBeGreaterThanOrEqual(
+      BOT_DIFFICULTY_PROFILES.veteran.radarGlanceInterval?.[0] ?? 0,
+    );
+    expect(bot.input.fire).toBe(false);
+  });
+
+  it('never gives Recruit motion-tracker knowledge', () => {
+    const simulation = startBotSimulation('deathmatch', [
+      { id: 'bot', name: 'Bot', kind: 'bot' },
+      { id: 'enemy', name: 'Enemy', kind: 'human' },
+    ], 'recruit');
+    const bot = botPlayer(simulation);
+    const enemy = simulation.state.players.enemy!;
+    bot.position = { x: 0, y: 0, z: 0 };
+    enemy.position = { x: 0, y: 0, z: 12 };
+    enemy.velocity = { x: 2, y: 0, z: 0 };
+    bot.bot!.decisionTimer = 0;
+    bot.bot!.radarGlanceTimer = 0;
+
+    updateBotInputs(simulation.state, simulation.map, 0.05, () => false);
+
+    expect(isPlayerRevealedToBotRadar(simulation.state, bot, enemy)).toBe(true);
+    expect(bot.bot?.radarContactId).toBeNull();
+    expect(bot.bot?.radarContactPosition).toBeNull();
+    expect(bot.input.fire).toBe(false);
+  });
+
+  it('holds a sampled bearing still between glances, then forgets it quickly', () => {
+    const simulation = startBotSimulation('deathmatch', [
+      { id: 'bot', name: 'Bot', kind: 'bot' },
+      { id: 'enemy', name: 'Enemy', kind: 'human' },
+    ]);
+    const bot = botPlayer(simulation);
+    const enemy = simulation.state.players.enemy!;
+    bot.position = { x: 0, y: 0, z: 0 };
+    enemy.position = { x: 0, y: 0, z: 12 };
+    enemy.velocity = { x: 1.3, y: 0, z: 0 };
+    bot.bot!.decisionTimer = 0;
+    bot.bot!.radarGlanceTimer = 0;
+    updateBotInputs(simulation.state, simulation.map, 0.05, () => false);
+    const sampled = { ...bot.bot!.radarContactPosition! };
+    const sampledAt = bot.bot!.radarContactAt;
+
+    enemy.position = { x: 8, y: 0, z: 12 };
+    simulation.state.elapsed += 0.4;
+    bot.bot!.decisionTimer = 0;
+    updateBotInputs(simulation.state, simulation.map, 0.05, () => false);
+
+    expect(bot.bot?.radarContactPosition).toEqual(sampled);
+    expect(bot.bot?.radarContactAt).toBe(sampledAt);
+    expect(bot.bot?.radarContactPosition).not.toEqual(enemy.position);
+
+    simulation.state.elapsed += BOT_DIFFICULTY_PROFILES.veteran.radarMemorySeconds + 0.01;
+    bot.bot!.decisionTimer = 0;
+    updateBotInputs(simulation.state, simulation.map, 0.05, () => false);
+    expect(bot.bot?.radarContactId).toBeNull();
+    expect(bot.bot?.radarContactPosition).toBeNull();
   });
 
   it('does not detect crouch-walking on radar, but a shot briefly reveals it', () => {

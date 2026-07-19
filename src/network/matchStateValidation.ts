@@ -111,11 +111,24 @@ const isPickupBlacklist = (value: unknown): boolean => {
 
 const isBotMemory = (value: unknown): boolean => {
   if (!isRecord(value)) return false;
+  // Radar memory was added after the original P2P snapshot shape. Missing
+  // fields remain valid for an older peer, but present fields must never let
+  // NaN, oversized coordinates or malformed player ids enter bot steering.
+  const validOptionalRadarMemory =
+    (value.radarGlanceTimer === undefined || isNonNegativeNumber(value.radarGlanceTimer))
+    && (value.radarContactId === undefined || isNullableIdentifier(value.radarContactId))
+    && (
+      value.radarContactPosition === undefined
+      || value.radarContactPosition === null
+      || isVec3(value.radarContactPosition)
+    )
+    && (value.radarContactAt === undefined || isFiniteNumber(value.radarContactAt));
   return isEnumValue(DIFFICULTIES, value.difficulty)
     && isNonNegativeNumber(value.decisionTimer)
     && isNullableIdentifier(value.targetId)
     && (value.lastSeenPosition === null || isVec3(value.lastSeenPosition))
     && isFiniteNumber(value.lastSeenAt)
+    && validOptionalRadarMemory
     && isSafeNonNegativeInteger(value.waypointIndex)
     && isNonNegativeNumber(value.reactionTimer)
     && isVec3(value.aimError)

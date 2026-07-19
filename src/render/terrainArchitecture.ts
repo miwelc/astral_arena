@@ -5,13 +5,15 @@ import type { AabbObstacle } from '../game/types';
 export type ObstacleVisualClass = 'earth' | 'rock' | 'planter' | 'authored' | 'facility';
 
 const FACILITY_ZONE_PALETTES = {
-  tower: [0x172327, 0x24343a],
-  base: [0x526875, 0x6c7370, 0x737b86],
-  relay: [0x667b79, 0x374b50],
-  greenhouse: [0x788477, 0x5c706b],
-  logistics: [0x38515b, 0x59666a],
-  cargo: [0x3e5662, 0x615f58, 0x596b63, 0x3f4a58],
-  neutral: [0x89938f, 0x697b80, 0x596b6c],
+  // The emplacement and service hardware stay in graphite/blue-grey so the
+  // restored ceramic buildings do not collapse into one all-white mass.
+  tower: [0x2d4148, 0x4f666b],
+  base: [0xf1f0e9, 0xd8e1dc, 0xc9d7dd],
+  relay: [0xe8ebe5, 0xc3d4d0],
+  greenhouse: [0xe5e9df, 0xc5d5cd],
+  logistics: [0x72878a, 0x91a4a5],
+  cargo: [0x536f78, 0x79776f, 0x70847c, 0x515c69],
+  neutral: [0xe7e9e3, 0xcbd8d8, 0xb9cecf],
 } as const;
 
 const AUTHORED_COLLISION_VOLUMES = new Set([

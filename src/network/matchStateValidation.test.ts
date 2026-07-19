@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
+import { emptyInput } from '../game/math';
 import { createDefaultConfig, GameSimulation } from '../game/simulation';
-import type { GameMode, MatchState, PlayerState, WeaponId } from '../game/types';
+import type { BotMemory, GameMode, MatchState, PlayerState, WeaponId } from '../game/types';
 import { isValidMatchState } from './matchStateValidation';
 
 const modes: GameMode[] = [
@@ -31,6 +32,12 @@ const firstPlayer = (state: MatchState): PlayerState => {
   return player;
 };
 
+const firstBotMemory = (state: MatchState): BotMemory => {
+  const bot = Object.values(state.players).find((player) => player.kind === 'bot');
+  if (!bot?.bot) throw new Error('Missing bot fixture');
+  return bot.bot;
+};
+
 describe('P2P MatchState validation', () => {
   it.each(modes)('accepts a JSON-round-tripped GameSimulation snapshot for %s', (mode) => {
     const state = makeState(mode);
@@ -38,6 +45,17 @@ describe('P2P MatchState validation', () => {
 
     expect(isValidMatchState(state)).toBe(true);
     expect(isValidMatchState(overTheWire)).toBe(true);
+  });
+
+  it('keeps accepting legacy bot snapshots without motion-tracker memory', () => {
+    const state = copy(makeState());
+    const memory = firstBotMemory(state) as Partial<BotMemory>;
+    delete memory.radarGlanceTimer;
+    delete memory.radarContactId;
+    delete memory.radarContactPosition;
+    delete memory.radarContactAt;
+
+    expect(isValidMatchState(state)).toBe(true);
   });
 
   it.each(modes)('keeps accepting authoritative %s snapshots during sustained play', (mode) => {
@@ -65,6 +83,28 @@ describe('P2P MatchState validation', () => {
         ).toBe(true);
       }
     }
+  });
+
+  it('accepts a Towah snapshot with its operator physically mounted on the raised emplacement', () => {
+    const simulation = new GameSimulation(
+      createDefaultConfig({ mode: 'towah-of-powah', botFill: false }),
+      [{ id: 'operator', name: 'Operator' }, { id: 'rival', name: 'Rival' }],
+    );
+    simulation.state.phase = 'playing';
+    simulation.state.countdown = 0;
+    const operator = simulation.state.players.operator;
+    if (!operator) throw new Error('Missing operator fixture');
+    operator.position = { x: 5, y: simulation.state.tower.center.y, z: 0 };
+    operator.velocity = { x: 0, y: 0, z: 0 };
+    operator.grounded = true;
+    simulation.setInput(operator.id, { ...emptyInput(), sequence: 1, use: true });
+
+    simulation.step(0);
+
+    const overTheWire = JSON.parse(JSON.stringify(simulation.snapshot())) as unknown;
+    expect(simulation.state.tower.turretOwnerId).toBe(operator.id);
+    expect(operator.position.y).toBeGreaterThan(simulation.state.tower.center.y + 3);
+    expect(isValidMatchState(overTheWire)).toBe(true);
   });
 
   it('accepts legitimate projectile and current audiovisual event shapes', () => {
@@ -215,14 +255,22 @@ describe('P2P MatchState validation', () => {
     }],
     ['invalid active weapon', (state: MatchState) => { firstPlayer(state).activeWeapon = 99; }],
     ['invalid bot memory', (state: MatchState) => {
-      const bot = Object.values(state.players).find((player) => player.kind === 'bot');
-      if (!bot?.bot) throw new Error('Missing bot fixture');
-      bot.bot.lastSeenAt = Number.NEGATIVE_INFINITY;
+      firstBotMemory(state).lastSeenAt = Number.NEGATIVE_INFINITY;
+    }],
+    ['invalid bot radar timer', (state: MatchState) => {
+      firstBotMemory(state).radarGlanceTimer = Number.NaN;
+    }],
+    ['invalid bot radar contact id', (state: MatchState) => {
+      firstBotMemory(state).radarContactId = ' bad-id ';
+    }],
+    ['invalid bot radar contact position', (state: MatchState) => {
+      firstBotMemory(state).radarContactPosition = { x: Number.POSITIVE_INFINITY, y: 0, z: 0 };
+    }],
+    ['invalid bot radar contact time', (state: MatchState) => {
+      firstBotMemory(state).radarContactAt = Number.NEGATIVE_INFINITY;
     }],
     ['duplicate bot pickup blacklist', (state: MatchState) => {
-      const bot = Object.values(state.players).find((player) => player.kind === 'bot');
-      if (!bot?.bot) throw new Error('Missing bot fixture');
-      bot.bot.pickupBlacklist = [
+      firstBotMemory(state).pickupBlacklist = [
         { pickupId: 'pickup-grenade-west', retryAt: 12 },
         { pickupId: 'pickup-grenade-west', retryAt: 15 },
       ];

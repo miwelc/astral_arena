@@ -16,6 +16,35 @@ const box = (
 
 const point = (x: number, y: number, z: number): Vec3 => ({ x, y, z });
 
+const TOWER_CENTER_Y = 6.05;
+
+/**
+ * Authoritative dimensions for the manually operated Towah emplacement.
+ *
+ * Presentation imports this contract too: keeping the physical platform,
+ * operator capsule, muzzle ray and rendered turret on the same offsets avoids
+ * the old situation where the camera used a turret while the astronaut stayed
+ * behind on the lower control deck.
+ */
+export const TOWER_TURRET_LAYOUT = Object.freeze({
+  /** Top of the narrow raised emplacement, measured from `towerCenter.y`. */
+  platformTopOffset: 3.2,
+  /** Feet of the mounted astronaut sit just clear of the platform collider. */
+  operatorFeetOffset: 3.24,
+  /** The astronaut follows this ring immediately behind the gun's yaw. */
+  operatorDistance: 1.45,
+  /** Ray/sight pivot; 1.9 m deck clearance keeps diagonal shots above the cap. */
+  firingOriginOffset: 5.1,
+  /** Group root sits almost flush; presentation adds a tall central pedestal. */
+  renderedTurretRootOffset: 3.16,
+  /** Safe lower-deck radius used after leaving the emplacement. */
+  exitRadius: 3.15,
+  /** Prevents the mounted hitbox from teleporting around the pedestal on flick turns. */
+  turnRate: 5.4,
+  minPitch: -0.6,
+  maxPitch: 0.85,
+} as const);
+
 const COLORS = {
   boundary: 0x294b55,
   boundaryDark: 0x203b48,
@@ -72,7 +101,13 @@ export const CRATER_RIDGE: MapDefinition = {
     // blocks the cross-map sightline without choking movement around mid.
     box('tower-core', [-4.8, 0, -4.8], [4.8, 5.4, 4.8], 'tower', COLORS.graphite),
     box('tower-deck', [-9, 5.4, -9], [9, 5.95, 9], 'platform', COLORS.ceramicDark),
-    box('tower-cap', [-2.35, 5.95, -2.35], [2.35, 8.1, 2.35], 'cover', COLORS.graphite),
+    box(
+      'tower-cap',
+      [-1.9, 5.95, -1.9],
+      [1.9, TOWER_CENTER_Y + TOWER_TURRET_LAYOUT.platformTopOffset, 1.9],
+      'cover',
+      COLORS.graphite,
+    ),
     box('tower-rail-n', [-9, 5.95, -9], [9, 6.72, -8.52], 'cover', COLORS.ceramic),
     box('tower-rail-s', [-9, 5.95, 8.52], [9, 6.72, 9], 'cover', COLORS.ceramic),
     box('tower-rail-w', [-9, 5.95, -8.52], [-8.52, 6.72, 8.52], 'cover', COLORS.ceramic),
@@ -330,7 +365,7 @@ export const CRATER_RIDGE: MapDefinition = {
     aurora: point(-42.5, 0.72, 0),
     nova: point(42.5, 0.72, 0),
   },
-  towerCenter: point(0, 6.05, 0),
+  towerCenter: point(0, TOWER_CENTER_Y, 0),
 };
 
 export const MAPS: Record<MapDefinition['id'], MapDefinition> = {

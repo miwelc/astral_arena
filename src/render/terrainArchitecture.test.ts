@@ -107,5 +107,9 @@ describe('terrain and architecture visual vocabulary', () => {
     expect(colors.size).toBeGreaterThanOrEqual(8);
     expect(artificialSurfaceColor(obstacle('west-mid-console-n')))
       .toBe(artificialSurfaceColor(obstacle('east-mid-console-n')));
+    for (const buildingId of ['west-base-front-n', 'north-relay-front-west', 'south-greenhouse-front-east']) {
+      const finish = new THREE.Color(artificialSurfaceColor(obstacle(buildingId)));
+      expect(finish.getHSL({ h: 0, s: 0, l: 0 }).l, buildingId).toBeGreaterThan(0.58);
+    }
   });
 });

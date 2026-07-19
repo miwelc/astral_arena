@@ -88,7 +88,7 @@ const createArchitectureTextures = (seed: number): ArchitectureTextures => {
       );
       const scratch = ((x * 7 + y * 13 + seed) % 97) < 2 && gridX > 3 && gridY > 2;
       const noise = (wear[y * size + x] ?? 0.5) - 0.5;
-      const base = seam ? 44 : seamShoulder ? 164 : fastener ? 66 : 210 + noise * 17;
+      const base = seam ? 72 : seamShoulder ? 184 : fastener ? 82 : 228 + noise * 14;
       const warmWear = scratch ? 18 : 0;
 
       albedoPixels[pixel] = clampByte(base + warmWear);
@@ -142,13 +142,13 @@ const createArchitectureMaterials = (textures: ArchitectureTextures): Architectu
   return {
     panel: new THREE.MeshPhysicalMaterial({
       name: 'architecture-white-panel',
-      color: 0xdde5e3,
+      color: 0xf7f4ec,
       ...sharedSurface,
-      roughness: 0.46,
-      metalness: 0.24,
-      clearcoat: 0.22,
-      clearcoatRoughness: 0.36,
-      envMapIntensity: 0.9,
+      roughness: 0.34,
+      metalness: 0.1,
+      clearcoat: 0.38,
+      clearcoatRoughness: 0.27,
+      envMapIntensity: 1.08,
     }),
     darkPanel: new THREE.MeshPhysicalMaterial({
       name: 'architecture-dark-panel',
