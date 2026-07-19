@@ -62,6 +62,23 @@ describe('facility environment geometry', () => {
     expect(field.userData.grassCount).toBe(0);
   });
 
+  it('keeps dense grass at lawn height instead of producing repeated metre-high spikes', () => {
+    const field = createUnderstoryField({
+      seed: 77,
+      bounds: { minX: -4, maxX: 4, minZ: -4, maxZ: 4 },
+      materials: makeKit(),
+      fernCount: 0,
+      grassCount: 24,
+    });
+    const grass = field.getObjectByName('grass-tufts') as THREE.InstancedMesh | undefined;
+
+    expect(grass).toBeInstanceOf(THREE.InstancedMesh);
+    grass!.geometry.computeBoundingBox();
+    expect(grass!.geometry.boundingBox?.max.y).toBeLessThan(0.65);
+    expect(new Set(instanceMatrices(field, 'grass-tufts').map((value) => value.toFixed(3))).size)
+      .toBeGreaterThan(8);
+  });
+
   it('creates layered facility facades without requiring browser canvas', () => {
     const block = createFacilityBlock({
       seed: 82,

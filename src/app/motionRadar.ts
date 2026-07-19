@@ -1,4 +1,5 @@
 import type { MatchState, PlayerState, Team } from '../game/types';
+import { isTeamGameMode } from '../game/modeRules';
 
 export type MotionRadarRelation = 'ally' | 'enemy';
 export type MotionRadarElevation = 'above' | 'level' | 'below';
@@ -49,7 +50,7 @@ const finiteOr = (value: number | undefined, fallback: number): number =>
   value !== undefined && Number.isFinite(value) ? value : fallback;
 
 const isTeamMode = (state: MatchState): boolean =>
-  state.config.mode !== 'deathmatch' && !(state.config.mode === 'juggernaut' && state.config.format === 'duel');
+  isTeamGameMode(state.config.mode);
 
 const relationToLocal = (
   state: MatchState,

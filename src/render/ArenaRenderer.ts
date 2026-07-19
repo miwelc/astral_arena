@@ -8,6 +8,7 @@ import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 
 import { isJumpPad, JUMP_PAD_ZONES } from '../game/map';
+import { isTeamGameMode } from '../game/modeRules';
 import type {
   FlagState,
   GameEvent,
@@ -53,8 +54,14 @@ import {
   createForestGroundTextures,
   createRadialTexture,
   createTechnicalSurfaceTextures,
-  VISUAL_SUN_DIRECTION,
 } from './visualTextures';
+import {
+  computeGroundTextureRepeat,
+  computeSurfaceUvTransform,
+  evaluateExplosionVisual,
+  evaluateSurfaceTint,
+  type SurfaceUvTransform,
+} from './visualPresentation';
 import {
   createWeaponModel,
   getWeaponAnchor,
@@ -66,6 +73,8 @@ const UP = new THREE.Vector3(0, 1, 0);
 const DOWN = new THREE.Vector3(0, -1, 0);
 const FORWARD = new THREE.Vector3(0, 0, -1);
 const ASTRONAUT_WAIST_HEIGHT = 1.05;
+const GROUND_TEXTURE_TILE_SIZE = 16;
+const FACILITY_PANEL_REPEAT = { x: 4, y: 1 } as const;
 
 const TEAM_COLORS: Record<Team, { armor: number; accent: number; glow: number }> = {
   // Team modes use a readable full-suit tint, reinforced by bright IFF trim.
@@ -230,6 +239,43 @@ const seededRandom = (seed: number): (() => number) => {
   };
 };
 
+const applyGeometryUvTransform = (
+  geometry: THREE.BufferGeometry,
+  transform: SurfaceUvTransform,
+): void => {
+  const uv = geometry.getAttribute('uv');
+  if (!(uv instanceof THREE.BufferAttribute)) return;
+  for (let index = 0; index < uv.count; index += 1) {
+    uv.setXY(
+      index,
+      uv.getX(index) * transform.scaleU + transform.offsetU,
+      uv.getY(index) * transform.scaleV + transform.offsetV,
+    );
+  }
+  uv.needsUpdate = true;
+};
+
+const applyGeometrySurfaceTint = (
+  geometry: THREE.BufferGeometry,
+  seed: number,
+  offsetX = 0,
+  offsetZ = 0,
+  planeAxes = false,
+): void => {
+  const positions = geometry.getAttribute('position');
+  if (!(positions instanceof THREE.BufferAttribute)) return;
+  const colors = new Float32Array(positions.count * 3);
+  for (let index = 0; index < positions.count; index += 1) {
+    const x = offsetX + positions.getX(index);
+    const z = offsetZ + (planeAxes ? -positions.getY(index) : positions.getZ(index));
+    const tint = evaluateSurfaceTint(x, z, seed);
+    colors[index * 3] = tint.r;
+    colors[index * 3 + 1] = tint.g;
+    colors[index * 3 + 2] = tint.b;
+  }
+  geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+};
+
 const createEarthworkGeometry = (
   size: THREE.Vector3,
   seed: number,
@@ -333,6 +379,9 @@ export class ArenaRenderer {
   private readonly shotFlashGeometry = new THREE.IcosahedronGeometry(1, 1);
   private readonly muzzleConeGeometry = new THREE.ConeGeometry(1, 1, 7, 1, true);
   private readonly shotSmokeGeometry = new THREE.SphereGeometry(1, 8, 6);
+  private readonly explosionShellGeometry = new THREE.IcosahedronGeometry(1, 2);
+  private readonly explosionShockGeometry = new THREE.TorusGeometry(1, 0.032, 7, 40);
+  private readonly explosionGroundFlashGeometry = new THREE.CircleGeometry(1, 32);
   private readonly weaponTemplates = new Map<WeaponId, THREE.Group>();
   private readonly worldDecorations: THREE.Object3D[] = [];
   private readonly ownedTextures = new Set<THREE.Texture>();
@@ -369,6 +418,9 @@ export class ArenaRenderer {
     depthWrite: false,
   });
   private readonly towerTurret = new THREE.Group();
+  private readonly towerTurretPitch = new THREE.Group();
+  private readonly towerTurretMuzzles: THREE.Object3D[] = [];
+  private readonly towerTurretCameraMount = new THREE.Object3D();
   private skyDome: THREE.Mesh<THREE.SphereGeometry, THREE.ShaderMaterial> | null = null;
   private readonly skyMaterial: THREE.ShaderMaterial;
   private readonly damageUniform = { value: 0 };
@@ -685,6 +737,9 @@ export class ArenaRenderer {
     geometries.add(this.shotFlashGeometry);
     geometries.add(this.muzzleConeGeometry);
     geometries.add(this.shotSmokeGeometry);
+    geometries.add(this.explosionShellGeometry);
+    geometries.add(this.explosionShockGeometry);
+    geometries.add(this.explosionGroundFlashGeometry);
     for (const geometry of geometries) geometry.dispose();
     for (const material of materials) material.dispose();
     for (const texture of this.ownedTextures) texture.dispose();
@@ -859,10 +914,11 @@ export class ArenaRenderer {
     const technicalSurface = createTechnicalSurfaceTextures(256);
     this.technicalNormalTexture = technicalSurface.normal;
     this.technicalRoughnessTexture = technicalSurface.roughness;
-    this.groundTexture.repeat.set(Math.max(7, width / 10), Math.max(7, depth / 10));
+    const groundRepeat = computeGroundTextureRepeat(width, depth, GROUND_TEXTURE_TILE_SIZE);
+    this.groundTexture.repeat.set(groundRepeat.x, groundRepeat.y);
     this.groundNormalTexture.repeat.copy(this.groundTexture.repeat);
     this.groundRoughnessTexture.repeat.copy(this.groundTexture.repeat);
-    this.facilityPanelTexture.repeat.set(4, 1);
+    this.facilityPanelTexture.repeat.set(FACILITY_PANEL_REPEAT.x, FACILITY_PANEL_REPEAT.y);
     this.technicalNormalTexture.repeat.set(3, 3);
     this.technicalRoughnessTexture.repeat.copy(this.technicalNormalTexture.repeat);
     this.groundTexture.anisotropy = Math.min(8, this.renderer.capabilities.getMaxAnisotropy());
@@ -876,8 +932,10 @@ export class ArenaRenderer {
     this.viewArmMaterial.normalMap = this.technicalNormalTexture;
     this.viewArmMaterial.normalScale.set(0.16, 0.16);
 
+    const outerGroundGeometry = new THREE.CircleGeometry(Math.max(146, arenaRadius + 78), 96);
+    applyGeometrySurfaceTint(outerGroundGeometry, 0x51f1e, centerX, centerZ, true);
     const outerGround = new THREE.Mesh(
-      new THREE.CircleGeometry(Math.max(146, arenaRadius + 78), 96),
+      outerGroundGeometry,
       new THREE.MeshPhysicalMaterial({
         color: 0xaab69a,
         map: this.groundTexture,
@@ -889,6 +947,7 @@ export class ArenaRenderer {
         clearcoat: 0.08,
         clearcoatRoughness: 0.66,
         envMapIntensity: 0.32,
+        vertexColors: true,
       }),
     );
     outerGround.rotation.x = -Math.PI / 2;
@@ -1279,39 +1338,6 @@ export class ArenaRenderer {
     this.worldDecorations.push(hazeGroup);
     this.scene.add(hazeGroup);
 
-    // Cheap static shafts give the warm sun real presence between the trunks,
-    // while preserving the crisp aiming image expected from a competitive FPS.
-    const shaftMaterial = new THREE.MeshBasicMaterial({
-      color: 0xffedc5,
-      transparent: true,
-      opacity: 0.027,
-      side: THREE.DoubleSide,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-      fog: true,
-    });
-    const shaftDirection = VISUAL_SUN_DIRECTION.clone();
-    const shaftQuaternion = new THREE.Quaternion().setFromUnitVectors(UP, shaftDirection);
-    const shaftGroup = new THREE.Group();
-    shaftGroup.name = 'sunlight-shafts';
-    const shaftCount = Math.max(7, Math.round((width * depth) / 1100));
-    for (let index = 0; index < shaftCount; index += 1) {
-      const length = 29 + random() * 12;
-      const groundPoint = new THREE.Vector3(
-        centerX + (random() - 0.5) * width * 0.84,
-        this.map.bounds.floorY + 0.05,
-        centerZ + (random() - 0.5) * depth * 0.84,
-      );
-      const shaft = new THREE.Mesh(
-        new THREE.CylinderGeometry(1.4 + random() * 1.6, 0.16 + random() * 0.22, length, 8, 1, true),
-        shaftMaterial,
-      );
-      shaft.position.copy(groundPoint).addScaledVector(shaftDirection, length * 0.5);
-      shaft.quaternion.copy(shaftQuaternion);
-      shaftGroup.add(shaft);
-    }
-    this.scene.add(shaftGroup);
-
     const moteCount = Math.min(560, Math.max(320, Math.round((width * depth) * 0.052)));
     const positions = new Float32Array(moteCount * 3);
     for (let index = 0; index < moteCount; index += 1) {
@@ -1362,6 +1388,7 @@ export class ArenaRenderer {
       const worldZ = centerZ - y;
       position.setZ(vertex, sampleGroundRelief(this.map, worldX, worldZ));
     }
+    applyGeometrySurfaceTint(floorGeometry, 0x7347a, centerX, centerZ, true);
     floorGeometry.computeVertexNormals();
     const floor = new THREE.Mesh(
       floorGeometry,
@@ -1376,6 +1403,7 @@ export class ArenaRenderer {
         clearcoat: 0.07,
         clearcoatRoughness: 0.7,
         envMapIntensity: 0.38,
+        vertexColors: true,
       }),
     );
     floor.rotation.x = -Math.PI / 2;
@@ -1558,6 +1586,7 @@ export class ArenaRenderer {
       clearcoat: 0.34,
       clearcoatRoughness: 0.32,
       envMapIntensity: 0.9,
+      vertexColors: true,
     });
     const structureMaterial = new THREE.MeshStandardMaterial({
       color: 0x081114,
@@ -1611,6 +1640,7 @@ export class ArenaRenderer {
       clearcoat: 0.055,
       clearcoatRoughness: 0.72,
       envMapIntensity: 0.34,
+      vertexColors: true,
     });
     const outcropMaterial = new THREE.MeshPhysicalMaterial({
       name: 'playable-weathered-rock',
@@ -1624,6 +1654,7 @@ export class ArenaRenderer {
       clearcoat: 0.24,
       clearcoatRoughness: 0.52,
       envMapIntensity: 0.48,
+      vertexColors: true,
     });
 
     for (const obstacle of this.map.obstacles) {
@@ -1643,8 +1674,22 @@ export class ArenaRenderer {
       const isRockyOutcrop = obstacle.id.includes('outcrop') || /^(north|south)-mid-cover/.test(obstacle.id);
       const isEarthwork = isRockyOutcrop || obstacle.id.includes('earth-') || obstacle.id.includes('ridge') || obstacle.id.includes('planter');
       if (isEarthwork) {
+        const geometry = createEarthworkGeometry(size, hashString(obstacle.id), isRockyOutcrop);
+        applyGeometryUvTransform(
+          geometry,
+          computeSurfaceUvTransform(
+            size.x,
+            size.z,
+            {
+              x: this.groundTexture?.repeat.x ?? 1,
+              y: this.groundTexture?.repeat.y ?? 1,
+            },
+            hashString(`${obstacle.id}-uv`),
+          ),
+        );
+        applyGeometrySurfaceTint(geometry, hashString(`${obstacle.id}-tint`));
         const terrain = new THREE.Mesh(
-          createEarthworkGeometry(size, hashString(obstacle.id), isRockyOutcrop),
+          geometry,
           isRockyOutcrop ? outcropMaterial : earthworkMaterial,
         );
         terrain.name = `${obstacle.id}-organic-visual`;
@@ -1675,6 +1720,17 @@ export class ArenaRenderer {
       const minimum = Math.min(size.x, size.y, size.z);
       const bevel = Math.min(0.16, Math.max(0.035, minimum * 0.12));
       const geometry = new RoundedBoxGeometry(size.x, size.y, size.z, 3, bevel);
+      applyGeometryUvTransform(
+        geometry,
+        computeSurfaceUvTransform(
+          size.x,
+          size.z,
+          FACILITY_PANEL_REPEAT,
+          hashString(`${obstacle.id}-panel-uv`),
+          6.5,
+        ),
+      );
+      applyGeometrySurfaceTint(geometry, hashString(`${obstacle.id}-panel-tint`));
       const mesh = new THREE.Mesh(geometry, material);
       mesh.position.copy(center);
       if (obstacle.kind === 'wall') {
@@ -2034,27 +2090,34 @@ export class ArenaRenderer {
     gimbal.position.y = 0.84;
     gimbal.castShadow = true;
     this.towerTurret.add(gimbal);
+    this.towerTurretPitch.position.y = 0.87;
+    this.towerTurret.add(this.towerTurretPitch);
     const cradle = new THREE.Mesh(new RoundedBoxGeometry(1.06, 0.45, 0.78, 3, 0.12), turretBaseMaterial);
-    cradle.position.set(0, 0.87, -0.23);
+    cradle.position.set(0, 0, -0.23);
     cradle.castShadow = true;
-    this.towerTurret.add(cradle);
+    this.towerTurretPitch.add(cradle);
     for (const x of [-0.25, 0.25]) {
       const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.072, 0.09, 1.82, 12), turretMetalMaterial);
       barrel.rotation.x = Math.PI / 2;
-      barrel.position.set(x, 0.92, -1.05);
+      barrel.position.set(x, 0.05, -1.05);
       barrel.castShadow = true;
-      this.towerTurret.add(barrel);
+      this.towerTurretPitch.add(barrel);
       const sleeve = new THREE.Mesh(new THREE.CylinderGeometry(0.11, 0.11, 0.42, 12), turretGlowMaterial);
       sleeve.rotation.x = Math.PI / 2;
-      sleeve.position.set(x, 0.92, -0.61);
-      this.towerTurret.add(sleeve);
+      sleeve.position.set(x, 0.05, -0.61);
+      this.towerTurretPitch.add(sleeve);
       const muzzle = new THREE.Mesh(new THREE.TorusGeometry(0.105, 0.028, 7, 16), turretMetalMaterial);
-      muzzle.position.set(x, 0.92, -1.97);
-      this.towerTurret.add(muzzle);
+      muzzle.position.set(x, 0.05, -1.97);
+      this.towerTurretPitch.add(muzzle);
+      this.towerTurretMuzzles.push(muzzle);
     }
     const sensor = new THREE.Mesh(new THREE.SphereGeometry(0.14, 14, 9), turretGlowMaterial);
-    sensor.position.set(0, 1.18, -0.32);
-    this.towerTurret.add(sensor);
+    sensor.position.set(0, 0.31, -0.32);
+    this.towerTurretPitch.add(sensor);
+    // A sight just behind and above the cradle gives the operator a readable
+    // view of both barrels without putting the camera inside turret geometry.
+    this.towerTurretCameraMount.position.set(0, 0.52, 0.16);
+    this.towerTurretPitch.add(this.towerTurretCameraMount);
     // The control volume lives on the main deck; the physical turret sits on
     // the raised cap (the simulation fires from towerCenter.y + 2.7).
     this.towerTurret.position.set(
@@ -2191,8 +2254,7 @@ export class ArenaRenderer {
   ): void {
     const present = new Set<string>();
     const localPlayer = this.localPlayerId ? state.players[this.localPlayerId] : undefined;
-    const teamMode = state.config.mode !== 'deathmatch'
-      && !(state.config.mode === 'juggernaut' && state.config.format === 'duel');
+    const teamMode = isTeamGameMode(state.config.mode);
     for (const player of Object.values(state.players)) {
       present.add(player.id);
       let rig = this.playerRigs.get(player.id);
@@ -3473,6 +3535,8 @@ export class ArenaRenderer {
     this.towerRingMaterial.opacity = state.tower.controllingTeam === 'neutral'
       ? 0.32 + Math.sin(worldTime * 2) * 0.06
       : 0.58 + Math.sin(worldTime * 4) * 0.1;
+    this.towerTurret.rotation.y = state.tower.turretYaw;
+    this.towerTurretPitch.rotation.x = state.tower.turretPitch;
   }
 
   private consumeEvents(state: MatchState): void {
@@ -3527,13 +3591,9 @@ export class ArenaRenderer {
         ? getWeaponAnchor(actorRig.weaponModel, 'muzzle')
         : null;
       if (turretShot) {
-        if (event.position) {
-          const deltaX = event.position.x - this.towerTurret.position.x;
-          const deltaZ = event.position.z - this.towerTurret.position.z;
-          this.towerTurret.rotation.y = Math.atan2(-deltaX, -deltaZ);
-        }
         this.towerTurret.updateWorldMatrix(true, false);
-        origin.copy(this.towerTurret.localToWorld(new THREE.Vector3(0, 0.92, -1.97)));
+        const muzzle = this.towerTurretMuzzles[event.id % this.towerTurretMuzzles.length];
+        if (muzzle) muzzle.getWorldPosition(origin);
       } else if (actorRig?.weaponModel && modelMuzzle) {
         actorRig.weaponModel.updateWorldMatrix(true, false);
         origin.copy(actorRig.weaponModel.localToWorld(modelMuzzle));
@@ -3543,14 +3603,17 @@ export class ArenaRenderer {
         Math.sin(actor.pitch),
         -Math.cos(actor.yaw) * Math.cos(actor.pitch),
       );
-      const candidateEnd = event.position ? vectorFrom(event.position) : origin.clone().addScaledVector(actorDirection, 18);
-      const end = candidateEnd.distanceToSquared(origin) < 0.8
+      const candidateEnds = event.traces?.map((trace) => vectorFrom(trace))
+        ?? [event.position ? vectorFrom(event.position) : origin.clone().addScaledVector(actorDirection, 18)];
+      const ends = candidateEnds.map((candidate) => candidate.distanceToSquared(origin) < 0.8
         ? origin.clone().addScaledVector(actorDirection, 18)
-        : candidateEnd;
+        : candidate);
+      const end = ends[0] ?? origin.clone().addScaledVector(actorDirection, 18);
       const direction = turretShot
         ? end.clone().sub(origin).normalize()
         : actorDirection;
-      const geometry = new THREE.BufferGeometry().setFromPoints([origin, end]);
+      const tracePoints = ends.flatMap((endpoint) => [origin, endpoint]);
+      const geometry = new THREE.BufferGeometry().setFromPoints(tracePoints);
       const tint = event.weaponId ? WEAPONS[event.weaponId].tint : TEAM_COLORS[actor.team].glow;
       const material = new THREE.LineBasicMaterial({
         color: tint,
@@ -3559,7 +3622,7 @@ export class ArenaRenderer {
         blending: THREE.AdditiveBlending,
         depthWrite: false,
       });
-      const line = new THREE.Line(geometry, material);
+      const line = new THREE.LineSegments(geometry, material);
       const effect = new THREE.Group();
       effect.add(line);
       const coreMaterial = new THREE.LineBasicMaterial({
@@ -3569,7 +3632,7 @@ export class ArenaRenderer {
         blending: THREE.AdditiveBlending,
         depthWrite: false,
       });
-      const coreLine = new THREE.Line(geometry.clone(), coreMaterial);
+      const coreLine = new THREE.LineSegments(geometry.clone(), coreMaterial);
       coreLine.scale.set(1, 1, 1);
       effect.add(coreLine);
       const flashMaterial = new THREE.MeshBasicMaterial({
@@ -3815,51 +3878,187 @@ export class ArenaRenderer {
       const position = event.position ?? (event.targetId ? state.players[event.targetId]?.position : undefined);
       if (!position) return;
       const blast = new THREE.Group();
+      blast.name = `explosion-${event.id}`;
       blast.position.set(position.x, position.y, position.z);
+      const random = seededRandom(event.id * 0x85ebca6b);
       const coreMaterial = new THREE.MeshBasicMaterial({
-        color: 0xffd6b2,
+        color: 0xfff5d4,
         transparent: true,
         opacity: 1,
         blending: THREE.AdditiveBlending,
         depthWrite: false,
+        toneMapped: false,
       });
-      const core = new THREE.Mesh(new THREE.IcosahedronGeometry(0.42, 2), coreMaterial);
+      const core = new THREE.Mesh(this.shotFlashGeometry, coreMaterial);
+      core.userData.sharedEffectGeometry = true;
       blast.add(core);
-      const shellMaterial = new THREE.MeshBasicMaterial({
-        color: 0xff856e,
+      const fireballMaterial = new THREE.MeshBasicMaterial({
+        color: 0xff7538,
         transparent: true,
-        opacity: 0.44,
-        side: THREE.BackSide,
+        opacity: 0.68,
+        side: THREE.DoubleSide,
         blending: THREE.AdditiveBlending,
         depthWrite: false,
       });
-      const shell = new THREE.Mesh(new THREE.SphereGeometry(0.72, 20, 12), shellMaterial);
-      blast.add(shell);
+      const fireball = new THREE.Mesh(this.explosionShellGeometry, fireballMaterial);
+      fireball.userData.sharedEffectGeometry = true;
+      fireball.scale.set(1.08, 0.86, 0.94);
+      blast.add(fireball);
       const shockMaterial = new THREE.MeshBasicMaterial({
-        color: 0xff9e80,
+        color: 0xffbd87,
         transparent: true,
         opacity: 0.72,
         blending: THREE.AdditiveBlending,
         depthWrite: false,
       });
-      const shock = new THREE.Mesh(new THREE.TorusGeometry(0.55, 0.035, 7, 32), shockMaterial);
+      const shock = new THREE.Mesh(this.explosionShockGeometry, shockMaterial);
+      shock.userData.sharedEffectGeometry = true;
       shock.rotation.x = Math.PI / 2;
+      shock.position.y = 0.045;
       blast.add(shock);
-      const light = new THREE.PointLight(0xff896f, 28, 9, 2);
-      blast.add(light);
+
+      const groundFlashMaterial = new THREE.MeshBasicMaterial({
+        color: 0xff9b5d,
+        transparent: true,
+        opacity: 0.62,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+      });
+      const groundFlash = new THREE.Mesh(this.explosionGroundFlashGeometry, groundFlashMaterial);
+      groundFlash.userData.sharedEffectGeometry = true;
+      groundFlash.rotation.x = -Math.PI / 2;
+      groundFlash.position.y = 0.025;
+      blast.add(groundFlash);
+
+      const smokeMaterial = new THREE.MeshStandardMaterial({
+        color: 0x30383a,
+        emissive: 0x7a3721,
+        emissiveIntensity: 0.18,
+        roughness: 1,
+        metalness: 0,
+        transparent: true,
+        opacity: 0,
+        depthWrite: false,
+      });
+      const smokeCount = 7;
+      const smoke = new THREE.InstancedMesh(this.shotSmokeGeometry, smokeMaterial, smokeCount);
+      smoke.name = 'explosion-smoke';
+      smoke.userData.sharedEffectGeometry = true;
+      smoke.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      const smokePuffs = Array.from({ length: smokeCount }, (_, index) => ({
+        x: (random() - 0.5) * 0.78,
+        y: 0.08 + random() * 0.65,
+        z: (random() - 0.5) * 0.78,
+        size: 0.72 + random() * 0.62,
+        rise: 0.72 + random() * 1.18,
+        phase: random() * Math.PI * 2 + index,
+      }));
+      const smokeTransform = new THREE.Object3D();
+      blast.add(smoke);
+
+      const sparkCount = 34;
+      const sparkValues = new Float32Array(sparkCount * 3);
+      const sparkVelocities = Array.from({ length: sparkCount }, () => {
+        const azimuth = random() * Math.PI * 2;
+        const elevation = 0.18 + random() * 0.76;
+        const speed = 5.2 + random() * 8.5;
+        return new THREE.Vector3(
+          Math.cos(azimuth) * Math.cos(elevation) * speed,
+          Math.sin(elevation) * speed,
+          Math.sin(azimuth) * Math.cos(elevation) * speed,
+        );
+      });
+      const sparkGeometry = new THREE.BufferGeometry();
+      const sparkPositions = new THREE.BufferAttribute(sparkValues, 3);
+      sparkGeometry.setAttribute('position', sparkPositions);
+      const sparkMaterial = new THREE.PointsMaterial({
+        color: 0xffc36b,
+        size: 0.095,
+        sizeAttenuation: true,
+        transparent: true,
+        opacity: 0.96,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        toneMapped: false,
+      });
+      blast.add(new THREE.Points(sparkGeometry, sparkMaterial));
+
+      // Dynamic point lights are deliberately budgeted: simultaneous grenade
+      // spam still produces fireballs and particles without multiplying the
+      // forward-rendering cost on integrated GPUs.
+      const activeExplosionLights = this.effects.reduce(
+        (count, effect) => count + (effect.object.userData.explosionLight ? 1 : 0),
+        0,
+      );
+      const light = activeExplosionLights < 3
+        ? new THREE.PointLight(0xffa05f, 0, 15, 2)
+        : null;
+      if (light) {
+        light.position.y = 0.45;
+        blast.add(light);
+        blast.userData.explosionLight = true;
+      }
+
+      const localPlayer = this.localPlayerId ? state.players[this.localPlayerId] : undefined;
+      if (localPlayer) {
+        const distance = Math.hypot(
+          localPlayer.position.x - position.x,
+          localPlayer.position.y - position.y,
+          localPlayer.position.z - position.z,
+        );
+        this.weaponKick = Math.max(this.weaponKick, clamp01(1 - distance / 15) * 0.9);
+      }
       this.scene.add(blast);
       this.effects.push({
         object: blast,
         age: 0,
-        duration: 0.48,
+        duration: 1.08,
         update: (progress) => {
-          core.scale.setScalar(0.55 + progress * 4.2);
-          shell.scale.setScalar(0.45 + progress * 6.3);
-          shock.scale.setScalar(0.5 + progress * 7.4);
-          coreMaterial.opacity = Math.max(0, 1 - progress * 1.8);
-          shellMaterial.opacity = (1 - progress) * 0.44;
-          shockMaterial.opacity = (1 - progress) * 0.72;
-          light.intensity = (1 - progress) * (1 - progress) * 28;
+          const profile = evaluateExplosionVisual(progress);
+          core.scale.setScalar(profile.coreScale);
+          coreMaterial.opacity = profile.coreOpacity;
+          fireball.scale.set(
+            profile.fireballScale * 1.08,
+            profile.fireballScale * 0.86,
+            profile.fireballScale * 0.94,
+          );
+          fireball.rotation.set(progress * 0.72, progress * 1.18, progress * -0.48);
+          fireballMaterial.opacity = profile.fireballOpacity;
+          shock.scale.setScalar(profile.shockScale);
+          shockMaterial.opacity = profile.shockOpacity;
+          groundFlash.scale.setScalar(profile.shockScale * 0.78);
+          groundFlashMaterial.opacity = profile.shockOpacity * 0.64;
+          smokeMaterial.opacity = profile.smokeOpacity;
+          smokeMaterial.emissiveIntensity = Math.max(0, 0.22 - progress * 0.32);
+          smokePuffs.forEach((puff, index) => {
+            const spread = 1 + progress * 2.15;
+            const size = profile.smokeScale * puff.size * (0.62 + index * 0.035);
+            smokeTransform.position.set(
+              puff.x * spread + Math.sin(puff.phase + progress * 2.4) * progress * 0.16,
+              puff.y + progress * puff.rise,
+              puff.z * spread + Math.cos(puff.phase + progress * 2.1) * progress * 0.16,
+            );
+            smokeTransform.rotation.set(progress * 0.7 + puff.phase, puff.phase, -progress * 0.46);
+            smokeTransform.scale.set(size * 1.08, size * 0.84, size);
+            smokeTransform.updateMatrix();
+            smoke.setMatrixAt(index, smokeTransform.matrix);
+          });
+          smoke.instanceMatrix.needsUpdate = true;
+
+          const elapsed = progress * 1.08;
+          for (let index = 0; index < sparkVelocities.length; index += 1) {
+            const velocity = sparkVelocities[index]!;
+            sparkPositions.setXYZ(
+              index,
+              velocity.x * elapsed,
+              velocity.y * elapsed - 4.9 * elapsed * elapsed,
+              velocity.z * elapsed,
+            );
+          }
+          sparkPositions.needsUpdate = true;
+          sparkMaterial.opacity = profile.sparkOpacity;
+          if (light) light.intensity = profile.lightIntensity;
         },
       });
       return;
@@ -3976,6 +4175,34 @@ export class ArenaRenderer {
     const localPlayer = this.localPlayerId ? state.players[this.localPlayerId] : undefined;
     const localRig = localPlayer ? this.playerRigs.get(localPlayer.id) : undefined;
     const alive = Boolean(localPlayer?.alive && localRig);
+    const operatingTurret = Boolean(
+      alive
+      && localPlayer
+      && state.config.mode === 'towah-of-powah'
+      && state.tower.turretOwnerId === localPlayer.id,
+    );
+
+    if (firstPerson && operatingTurret) {
+      this.towerTurret.updateWorldMatrix(true, true);
+      this.towerTurretCameraMount.getWorldPosition(this.camera.position);
+      const damageShake = this.damagePulse * 0.012;
+      this.camera.rotation.set(
+        state.tower.turretPitch + Math.sin(worldTime * 58) * damageShake,
+        state.tower.turretYaw + Math.cos(worldTime * 47) * damageShake,
+        Math.sin(worldTime * 69) * damageShake * 0.24,
+        'YXZ',
+      );
+      const turretFov = 68;
+      if (Math.abs(this.camera.fov - turretFov) > 0.01) {
+        this.camera.fov = damp(this.camera.fov, turretFov, 18, delta);
+        this.camera.updateProjectionMatrix();
+      }
+      this.viewModel.visible = false;
+      this.viewAimBlend = damp(this.viewAimBlend, 0, 20, delta);
+      this.previousViewYaw = null;
+      this.previousViewPitch = null;
+      return;
+    }
 
     if (firstPerson && localPlayer && localRig && alive) {
       const speed = Math.hypot(localPlayer.velocity.x, localPlayer.velocity.z);

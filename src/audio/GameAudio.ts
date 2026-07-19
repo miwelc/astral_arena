@@ -40,6 +40,11 @@ export const SHIELD_RECHARGE_SOUND_PROFILE = Object.freeze({
   complete: Object.freeze({ duration: 0.2, from: 620, to: 1320, volume: 0.44 }),
 });
 
+export const MOVEMENT_SOUND_PROFILE = Object.freeze({
+  jump: Object.freeze({ duration: 0.19, from: 185, to: 510, volume: 0.22 }),
+  land: Object.freeze({ duration: 0.16, from: 116, to: 42, volume: 0.38 }),
+});
+
 export const shieldRechargeCueWasInterrupted = (
   rechargeEvent: GameEvent,
   events: readonly GameEvent[],
@@ -192,6 +197,31 @@ export class GameAudio {
     });
   }
 
+  /** Local suit servos and boot impacts; safely no-op until audio is unlocked. */
+  public movement(kind: 'jump' | 'land', strength = 1): void {
+    const weight = Math.min(1, Math.max(0.18, strength));
+    if (kind === 'jump') {
+      const profile = MOVEMENT_SOUND_PROFILE.jump;
+      this.tone(profile.from, profile.to, profile.duration, 'triangle', profile.volume * weight);
+      this.noise(
+        { duration: 0.12, volume: 0.3, filter: 'bandpass', from: 480, to: 1320, q: 1.4, delay: 0.015 },
+        0.18 * weight,
+      );
+      return;
+    }
+
+    const profile = MOVEMENT_SOUND_PROFILE.land;
+    this.tone(profile.from, profile.to, profile.duration, 'sine', profile.volume * weight);
+    this.noise(
+      { duration: 0.11, volume: 0.7, filter: 'lowpass', from: 760, to: 115, q: 0.8 },
+      0.36 * weight,
+    );
+    this.noise(
+      { duration: 0.055, volume: 0.25, filter: 'highpass', from: 2400, to: 680, q: 1.1, delay: 0.012 },
+      0.16 * weight,
+    );
+  }
+
   /**
    * Browser-native announcer voice. The no-op fallback makes it safe on browsers
    * without speech synthesis and in the headless test/runtime environment.
@@ -308,7 +338,12 @@ export class GameAudio {
       { duration: 0.095, volume: 0.55, filter: 'highpass', from: 3200, to: 720, q: 0.7 },
       volume,
     );
+    this.noise(
+      { duration: 0.62, volume: 0.46, filter: 'lowpass', from: 740, to: 48, q: 0.72, delay: 0.055 },
+      volume,
+    );
     this.tone(108, 31, 0.39, 'sawtooth', volume * 0.78);
+    this.tone(56, 28, 0.58, 'sine', volume * 0.46, 0.045);
   }
 
   private melee(volume: number): void {

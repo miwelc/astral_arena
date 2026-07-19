@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { emptyInput } from './math';
 import { createDefaultConfig, GameSimulation } from './simulation';
+import { createWeaponState } from './weapons';
 import type {
   FlagState,
   MatchConfig,
@@ -85,19 +86,20 @@ afterEach(() => {
 });
 
 describe('bot fill and team assignment', () => {
-  it('fills a duel to 1v1 and keeps one player on each team', () => {
+  it('normalizes Team Deathmatch to 4v4 even if a stale caller requests a duel', () => {
     const simulation = createSimulation(
       { mode: 'team-deathmatch', format: 'duel', botFill: true },
       ['local'],
     );
     const roster = Object.values(simulation.state.players);
 
-    expect(simulation.maxPlayers).toBe(2);
-    expect(roster).toHaveLength(2);
+    expect(simulation.state.config.format).toBe('squads');
+    expect(simulation.maxPlayers).toBe(8);
+    expect(roster).toHaveLength(8);
     expect(roster.filter((member) => member.kind === 'human')).toHaveLength(1);
-    expect(roster.filter((member) => member.kind === 'bot')).toHaveLength(1);
-    expect(roster.filter((member) => member.team === 'aurora')).toHaveLength(1);
-    expect(roster.filter((member) => member.team === 'nova')).toHaveLength(1);
+    expect(roster.filter((member) => member.kind === 'bot')).toHaveLength(7);
+    expect(roster.filter((member) => member.team === 'aurora')).toHaveLength(4);
+    expect(roster.filter((member) => member.team === 'nova')).toHaveLength(4);
   });
 
   it('fills squads to 4v4 and preserves balance when a remote replaces a bot', () => {
@@ -140,6 +142,34 @@ describe('input validation', () => {
 });
 
 describe('combat rules', () => {
+  it('requires an explicit context action before replacing a weapon', () => {
+    const simulation = createSimulation({ mode: 'deathmatch' });
+    const alpha = player(simulation, 'alpha');
+    const weaponPickup = simulation.state.pickups.find(
+      (pickup) => pickup.kind === 'weapon' && !alpha.inventory.some((weapon) => weapon.id === pickup.weaponId),
+    );
+    if (!weaponPickup?.weaponId) throw new Error('Missing weapon pickup fixture');
+    startMatch(simulation);
+    place(alpha, weaponPickup.position);
+    const activeWeaponBefore = alpha.inventory[alpha.activeWeapon]?.id;
+
+    simulation.step(0);
+
+    expect(weaponPickup.available).toBe(true);
+    expect(alpha.inventory[alpha.activeWeapon]?.id).toBe(activeWeaponBefore);
+
+    simulation.setInput(alpha.id, { ...emptyInput(), sequence: 1, use: true });
+    simulation.step(0);
+
+    expect(weaponPickup.available).toBe(false);
+    expect(alpha.inventory[alpha.activeWeapon]?.id).toBe(weaponPickup.weaponId);
+    expect(simulation.state.events.at(-1)).toMatchObject({
+      type: 'pickup',
+      actorId: alpha.id,
+      weaponId: weaponPickup.weaponId,
+    });
+  });
+
   it('waits four seconds before recharging shields at 25 points per second', () => {
     const simulation = createSimulation({ mode: 'deathmatch' }, ['alpha']);
     const alpha = player(simulation, 'alpha');
@@ -220,11 +250,30 @@ describe('combat rules', () => {
     expect(target.health).toBe(70);
     const shot = simulation.state.events.find((event) => event.type === 'shot' && event.actorId === shooter.id);
     expect(shot).toBeDefined();
-    expect(shot?.position?.x).toBeCloseTo(target.position.x, 5);
+    expect(Math.abs((shot?.position?.x ?? 99) - target.position.x)).toBeLessThan(target.radius + 0.01);
     expect(shot?.position?.z).toBeGreaterThan(target.position.z);
     expect(shot?.position?.z).toBeLessThan(target.position.z + 1);
     expect(shot?.impact).toBe(true);
     expect(simulation.state.events.some((event) => event.type === 'hit' && event.targetId === target.id)).toBe(true);
+  });
+
+  it('publishes the same twelve-pellet cone used by shotgun hit resolution', () => {
+    const simulation = createSimulation({ mode: 'deathmatch' }, ['alpha']);
+    const shooter = player(simulation, 'alpha');
+    startMatch(simulation);
+    place(shooter, { x: 0, y: 0, z: 20 });
+    shooter.inventory = [createWeaponState('shotgun')];
+    shooter.activeWeapon = 0;
+    simulation.state.randomState = 0x87654321;
+
+    simulation.setInput(shooter.id, { ...emptyInput(), sequence: 1, fire: true });
+    simulation.step(0);
+
+    const shot = simulation.state.events.find((event) => event.type === 'shot');
+    expect(shot?.weaponId).toBe('shotgun');
+    expect(shot?.traces).toHaveLength(12);
+    expect(shot?.position).toEqual(shot?.traces?.[0]);
+    expect(new Set(shot?.traces?.map((trace) => `${trace.x.toFixed(3)}:${trace.y.toFixed(3)}`)).size).toBeGreaterThan(8);
   });
 });
 
@@ -339,7 +388,7 @@ describe('objective modes', () => {
     expect(simulation.state.juggernautId).toBe(successor.id);
   });
 
-  it('gives Towah control to a sole team occupant, fires the turret, and neutralizes when contested', () => {
+  it('requires a nearby operator to enter, aim, fire, and explicitly leave the Towah turret', () => {
     const simulation = createSimulation({ mode: 'towah-of-powah', format: 'duel' });
     const controller = player(simulation, 'alpha');
     const target = player(simulation, 'bravo');
@@ -350,27 +399,74 @@ describe('objective modes', () => {
     target.spawnProtection = 0;
     target.health = 70;
     target.shield = 0;
+    const personalMagazine = controller.inventory[controller.activeWeapon]?.magazine;
 
+    simulation.setInput(controller.id, { ...emptyInput(), sequence: 1, use: true });
     simulation.step(0);
 
     expect(simulation.state.tower.controllingTeam).toBe(controller.team);
     expect(simulation.state.tower.turretOwnerId).toBe(controller.id);
+    expect(simulation.state.tower.turretCooldown).toBe(0);
+    expect(target.health).toBe(70);
+
+    const turretOrigin = {
+      x: simulation.state.tower.center.x,
+      y: simulation.state.tower.center.y + 2.7,
+      z: simulation.state.tower.center.z,
+    };
+    const horizontalRange = Math.hypot(target.position.x - turretOrigin.x, target.position.z - turretOrigin.z);
+    simulation.setInput(controller.id, {
+      ...emptyInput(),
+      sequence: 2,
+      yaw: Math.atan2(-(target.position.x - turretOrigin.x), -(target.position.z - turretOrigin.z)),
+      pitch: Math.atan2(target.position.y + target.height * 0.58 - turretOrigin.y, horizontalRange),
+      fire: true,
+    });
+    simulation.step(0);
+
     expect(simulation.state.tower.turretCooldown).toBeCloseTo(0.14, 8);
+    expect(simulation.state.tower.turretYaw).toBeCloseTo(controller.yaw, 8);
+    expect(simulation.state.tower.turretPitch).toBeCloseTo(controller.pitch, 8);
     expect(target.health).toBe(57);
+    expect(controller.inventory[controller.activeWeapon]?.magazine).toBe(personalMagazine);
     expect(
       simulation.state.events.some(
         (event) => event.type === 'shot' && event.actorId === controller.id && event.message === 'Torreta',
       ),
     ).toBe(true);
 
-    target.health = 70;
-    simulation.state.tower.turretCooldown = 0;
-    place(target, { x: 4, y: 6, z: 0 });
+    simulation.setInput(controller.id, { ...emptyInput(), sequence: 3, use: true });
     simulation.step(0);
 
-    expect(simulation.state.tower.controllingTeam).toBe('neutral');
+    expect(simulation.state.tower.turretOwnerId).toBeNull();
+  });
+
+  it('does not acquire or shoot targets automatically and rejects distant operators', () => {
+    const simulation = createSimulation({ mode: 'towah-of-powah', format: 'duel' });
+    const controller = player(simulation, 'alpha');
+    const target = player(simulation, 'bravo');
+    startMatch(simulation);
+    place(controller, { x: 20, y: 6, z: 0 });
+    place(target, { x: 0, y: 6, z: 10 });
+    controller.spawnProtection = 0;
+    target.spawnProtection = 0;
+    target.shield = 0;
+
+    simulation.setInput(controller.id, { ...emptyInput(), sequence: 1, use: true });
+    simulation.step(0);
+
     expect(simulation.state.tower.turretOwnerId).toBeNull();
     expect(target.health).toBe(70);
+
+    simulation.setInput(controller.id, { ...emptyInput(), sequence: 2 });
+    simulation.step(0);
+    place(controller, { x: 5, y: 6, z: 0 });
+    simulation.setInput(controller.id, { ...emptyInput(), sequence: 3, use: true });
+    simulation.step(0);
+
+    expect(simulation.state.tower.turretOwnerId).toBe(controller.id);
+    expect(target.health).toBe(70);
+    expect(simulation.state.events.some((event) => event.type === 'shot' && event.message === 'Torreta')).toBe(false);
   });
 });
 

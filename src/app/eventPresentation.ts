@@ -1,4 +1,5 @@
 import type { GameEvent, MatchState, PlayerState, Team } from '../game/types';
+import { isTeamGameMode } from '../game/modeRules';
 
 export type EventPresentationTone = 'success' | 'danger' | 'team' | 'objective' | 'neutral';
 export type EventPresentationPlacement = 'center' | 'feed' | 'both';
@@ -28,8 +29,7 @@ export interface EventPresentation {
 }
 
 const isTeamMode = (state: MatchState): boolean =>
-  state.config.mode !== 'deathmatch'
-  && !(state.config.mode === 'juggernaut' && state.config.format === 'duel');
+  isTeamGameMode(state.config.mode);
 
 const normalized = (value: string): string =>
   value

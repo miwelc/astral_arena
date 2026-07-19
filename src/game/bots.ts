@@ -47,6 +47,7 @@ export interface DifficultyProfile {
 interface ObjectivePlan {
   goal: Vec3 | null;
   urgent: boolean;
+  pickupId?: string;
 }
 
 export const BOT_DIFFICULTY_PROFILES: Readonly<Record<Difficulty, Readonly<DifficultyProfile>>> = {
@@ -100,8 +101,22 @@ const WEAPON_RANGE: Record<WeaponId, { ideal: number; minimum: number; maximum: 
   'rocket-launcher': { ideal: 22, minimum: 7, maximum: 78 },
 };
 
-const POWER_WEAPONS = new Set<WeaponId>(['sniper', 'shotgun', 'rocket-launcher', 'battle-rifle']);
-const TEAM_MODES = new Set(['team-deathmatch', 'capture-the-flag', 'juggernaut', 'towah-of-powah']);
+const TEAM_MODES = new Set(['team-deathmatch', 'capture-the-flag', 'towah-of-powah']);
+const MAX_GRENADES = 2;
+const PICKUP_PROGRESS_EPSILON = 0.55;
+const PICKUP_PROGRESS_TIMEOUT = 4.5;
+const PICKUP_INTERACTION_TIMEOUT = 1.4;
+const PICKUP_RETRY_DELAY = 9;
+const MAX_PICKUP_BLACKLIST = 4;
+
+const WEAPON_PICKUP_RATING: Readonly<Record<WeaponId, number>> = {
+  'pulse-rifle': 2.5,
+  sidearm: 2.4,
+  'battle-rifle': 3.5,
+  sniper: 4.6,
+  shotgun: 4,
+  'rocket-launcher': 5,
+};
 
 const orderedPlayers = (state: MatchState): PlayerState[] =>
   Object.values(state.players).sort((left, right) => (left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
@@ -157,6 +172,27 @@ const acquireVisibleTarget = (
 ): PlayerState | null => {
   let best: PlayerState | null = null;
   let bestScore = Number.POSITIVE_INFINITY;
+
+  // Being hit is an awareness cue even when the attacker started just outside
+  // the normal field of view. The bot still needs range and line of sight, so
+  // this does not become wall vision.
+  for (let index = state.events.length - 1; index >= 0; index -= 1) {
+    const event = state.events[index];
+    if (!event || state.elapsed - event.time > 1.25) break;
+    if (event.type !== 'hit' || event.targetId !== observer.id || !event.actorId) continue;
+    const attacker = state.players[event.actorId];
+    if (
+      attacker?.alive &&
+      isEnemy(state, observer, attacker) &&
+      distance(observer.position, attacker.position) <= profile.visionRange &&
+      hasLineOfSight(eyePosition(observer), eyePosition(attacker))
+    ) {
+      best = attacker;
+      bestScore = targetPriority(state, observer, attacker, observer.bot?.targetId ?? null) - 14;
+      break;
+    }
+  }
+
   for (const candidate of orderedPlayers(state)) {
     if (!isEnemy(state, observer, candidate) || !canSeePlayer(observer, candidate, profile, hasLineOfSight)) continue;
     const score = targetPriority(state, observer, candidate, observer.bot?.targetId ?? null);
@@ -173,25 +209,75 @@ const ownTeam = (team: Team): Exclude<Team, 'neutral'> | null => (team === 'neut
 const opposingTeam = (team: Exclude<Team, 'neutral'>): Exclude<Team, 'neutral'> =>
   team === 'aurora' ? 'nova' : 'aurora';
 
+const weaponReplacementIndex = (player: PlayerState, weaponId: WeaponId): number => {
+  if (player.inventory.length < 2) return player.inventory.length;
+  let weakestIndex = 0;
+  for (let index = 1; index < player.inventory.length; index += 1) {
+    const candidate = player.inventory[index];
+    const weakest = player.inventory[weakestIndex];
+    if (candidate && weakest && WEAPON_PICKUP_RATING[candidate.id] < WEAPON_PICKUP_RATING[weakest.id]) {
+      weakestIndex = index;
+    }
+  }
+  return WEAPON_PICKUP_RATING[weaponId] > WEAPON_PICKUP_RATING[player.inventory[weakestIndex]?.id ?? weaponId] + 0.45
+    ? weakestIndex
+    : -1;
+};
+
+/** Returns zero when pursuing the pickup cannot improve this bot's current state. */
+export const botPickupUtility = (player: PlayerState, pickup: PickupState): number => {
+  if (!pickup.available) return 0;
+  if (pickup.kind === 'grenade') {
+    return player.grenades < MAX_GRENADES ? 11 + (MAX_GRENADES - player.grenades) * 5 : 0;
+  }
+  if (pickup.kind === 'overshield') {
+    if (player.isJuggernaut || player.maxShield <= 0 || player.shield > 150) return 0;
+    return 13 + Math.min(75, 175 - player.shield) * 0.14;
+  }
+  if (pickup.kind === 'ammo') {
+    let missingMagazines = 0;
+    for (const weapon of player.inventory) {
+      const definition = WEAPONS[weapon.id];
+      missingMagazines += (definition.maxReserve - weapon.reserve) / Math.max(1, definition.magazineSize);
+    }
+    return missingMagazines > 0 ? 7 + Math.min(13, missingMagazines * 2.3) : 0;
+  }
+  if (pickup.kind !== 'weapon' || !pickup.weaponId) return 0;
+
+  const existing = player.inventory.find((weapon) => weapon.id === pickup.weaponId);
+  if (existing) {
+    const definition = WEAPONS[existing.id];
+    const missing = definition.maxReserve - existing.reserve;
+    return missing > 0 ? 8 + Math.min(10, missing / Math.max(1, definition.magazineSize) * 3) : 0;
+  }
+
+  const replacementIndex = weaponReplacementIndex(player, pickup.weaponId);
+  if (replacementIndex < 0) return 0;
+  const replaced = player.inventory[replacementIndex];
+  const upgrade = replaced ? WEAPON_PICKUP_RATING[pickup.weaponId] - WEAPON_PICKUP_RATING[replaced.id] : 1;
+  return 16 + WEAPON_PICKUP_RATING[pickup.weaponId] * 2 + upgrade * 5;
+};
+
+const blacklistPickup = (memory: BotMemory, pickupId: string, elapsed: number): void => {
+  memory.pickupBlacklist = memory.pickupBlacklist
+    .filter((entry) => entry.pickupId !== pickupId && entry.retryAt > elapsed)
+    .slice(-(MAX_PICKUP_BLACKLIST - 1));
+  memory.pickupBlacklist.push({ pickupId, retryAt: elapsed + PICKUP_RETRY_DELAY });
+  if (memory.pickupTargetId === pickupId) memory.pickupTargetId = null;
+};
+
 const nearestAvailablePickup = (state: MatchState, player: PlayerState): PickupState | null => {
-  const inventoryIds = new Set(player.inventory.map((weapon) => weapon.id));
+  const memory = player.bot!;
+  memory.pickupBlacklist = memory.pickupBlacklist.filter((entry) => entry.retryAt > state.elapsed);
+  const ignoredIds = new Set(memory.pickupBlacklist.map((entry) => entry.pickupId));
   let selected: PickupState | null = null;
   let bestScore = Number.POSITIVE_INFINITY;
 
   for (const pickup of state.pickups) {
-    if (!pickup.available) continue;
+    if (!pickup.available || ignoredIds.has(pickup.id)) continue;
     const pickupDistance = horizontalDistance(player.position, pickup.position);
-    let value = 0;
-    if (pickup.kind === 'weapon' && pickup.weaponId) {
-      value = POWER_WEAPONS.has(pickup.weaponId) && !inventoryIds.has(pickup.weaponId) ? 22 : 8;
-    } else if (pickup.kind === 'overshield') {
-      value = player.shield < player.maxShield * 0.7 ? 24 : 10;
-    } else if (pickup.kind === 'ammo') {
-      const active = player.inventory[player.activeWeapon];
-      value = active && active.reserve < WEAPONS[active.id].magazineSize ? 14 : 4;
-    } else if (pickup.kind === 'grenade') {
-      value = player.grenades === 0 ? 12 : 3;
-    }
+    const value = botPickupUtility(player, pickup);
+    if (value <= 0) continue;
     const score = pickupDistance - value;
     if (score < bestScore) {
       selected = pickup;
@@ -250,12 +336,7 @@ const juggernautPlan = (state: MatchState, player: PlayerState): ObjectivePlan =
   if (juggernaut.id === player.id) {
     const pickup = nearestAvailablePickup(state, player);
     player.bot!.objective = pickup ? 'pickup' : 'attack';
-    return { goal: pickup?.position ?? null, urgent: false };
-  }
-
-  if (juggernaut.team === player.team && player.team !== 'neutral') {
-    player.bot!.objective = 'defend';
-    return { goal: juggernaut.position, urgent: true };
+    return { goal: pickup?.position ?? null, urgent: false, pickupId: pickup?.id };
   }
 
   player.bot!.objective = 'attack';
@@ -281,10 +362,45 @@ const objectivePlan = (state: MatchState, player: PlayerState, map: MapDefinitio
   const pickup = nearestAvailablePickup(state, player);
   if (pickup && horizontalDistance(player.position, pickup.position) <= 30) {
     player.bot!.objective = 'pickup';
-    return { goal: pickup.position, urgent: false };
+    return { goal: pickup.position, urgent: false, pickupId: pickup.id };
   }
   player.bot!.objective = 'attack';
   return { goal: null, urgent: false };
+};
+
+const pickupPlanHasStalled = (
+  state: MatchState,
+  player: PlayerState,
+  plan: ObjectivePlan,
+): boolean => {
+  const memory = player.bot!;
+  if (!plan.pickupId || !plan.goal) {
+    memory.pickupTargetId = null;
+    memory.pickupBestDistance = 1_000_000;
+    memory.pickupProgressAt = state.elapsed;
+    return false;
+  }
+
+  const currentDistance = distance(player.position, plan.goal);
+  if (memory.pickupTargetId !== plan.pickupId) {
+    memory.pickupTargetId = plan.pickupId;
+    memory.pickupBestDistance = currentDistance;
+    memory.pickupProgressAt = state.elapsed;
+    return false;
+  }
+
+  if (currentDistance <= memory.pickupBestDistance - PICKUP_PROGRESS_EPSILON) {
+    memory.pickupBestDistance = currentDistance;
+    memory.pickupProgressAt = state.elapsed;
+    return false;
+  }
+
+  const timeout = currentDistance <= 1.8 ? PICKUP_INTERACTION_TIMEOUT : PICKUP_PROGRESS_TIMEOUT;
+  if (state.elapsed - memory.pickupProgressAt <= timeout) return false;
+  blacklistPickup(memory, plan.pickupId, state.elapsed);
+  memory.pickupBestDistance = 1_000_000;
+  memory.pickupProgressAt = state.elapsed;
+  return true;
 };
 
 const selectWaypoint = (
@@ -294,7 +410,7 @@ const selectWaypoint = (
   map: MapDefinition,
   hasLineOfSight: LineOfSightTest,
 ): Vec3 => {
-  if (horizontalDistance(player.position, goal) <= 2.2) return goal;
+  if (horizontalDistance(player.position, goal) <= 2.2 && Math.abs(player.position.y - goal.y) <= 1.2) return goal;
   const from = eyePosition(player);
   const directVerticalDifference = Math.abs(goal.y - player.position.y);
   if (directVerticalDifference < 1.8 && hasLineOfSight(from, raisedPoint(goal))) return goal;
@@ -344,10 +460,15 @@ const selectWeaponIndex = (player: PlayerState, targetRange: number): number => 
   }
 
   let bestIndex = player.activeWeapon;
-  let bestScore = Number.NEGATIVE_INFINITY;
+  // A modest active-weapon bonus prevents oscillation when a target crosses an
+  // arbitrary ideal-range boundary, without trapping the bot on an empty gun.
+  let bestScore = player.inventory[player.activeWeapon]
+    ? weaponScore(player.inventory[player.activeWeapon]!, targetRange) + 7
+    : Number.NEGATIVE_INFINITY;
   for (let index = 0; index < player.inventory.length; index += 1) {
     const weapon = player.inventory[index];
     if (!weapon) continue;
+    if (index === player.activeWeapon) continue;
     const score = weaponScore(weapon, targetRange);
     if (score > bestScore) {
       bestScore = score;
@@ -401,7 +522,7 @@ const avoidNearbyExplosives = (state: MatchState, player: PlayerState, intended:
   let dangerX = 0;
   let dangerZ = 0;
   for (const projectile of state.projectiles) {
-    if (!projectile.alive || projectile.ownerId === player.id) continue;
+    if (!projectile.alive || (projectile.ownerId === player.id && projectile.kind !== 'grenade')) continue;
     const range = horizontalDistance(player.position, projectile.position);
     if (range > projectile.blastRadius + 3 || range < 0.01) continue;
     const away = normalize(subtract(player.position, projectile.position));
@@ -411,6 +532,49 @@ const avoidNearbyExplosives = (state: MatchState, player: PlayerState, intended:
   }
   return normalize({ x: intended.x + dangerX * 1.8, y: 0, z: intended.z + dangerZ * 1.8 });
 };
+
+const avoidFriendlyCrowding = (state: MatchState, player: PlayerState, intended: Vec3): Vec3 => {
+  if (!TEAM_MODES.has(state.config.mode) || player.team === 'neutral') return intended;
+  let separationX = 0;
+  let separationZ = 0;
+  for (const ally of orderedPlayers(state)) {
+    if (ally.id === player.id || !ally.alive || ally.team !== player.team) continue;
+    const range = horizontalDistance(player.position, ally.position);
+    if (range >= 1.8) continue;
+    const away = range <= 0.01
+      ? {
+          x: Math.cos((hashString(`${player.id}:${ally.id}`) % 628) / 100),
+          y: 0,
+          z: Math.sin((hashString(`${player.id}:${ally.id}`) % 628) / 100),
+        }
+      : normalize(subtract(player.position, ally.position));
+    const weight = 1 - range / 1.8;
+    separationX += away.x * weight;
+    separationZ += away.z * weight;
+  }
+  return normalize({
+    x: intended.x + separationX * 1.15,
+    y: 0,
+    z: intended.z + separationZ * 1.15,
+  });
+};
+
+export const isBotGrenadeSafe = (state: MatchState, player: PlayerState, target: PlayerState): boolean => {
+  const targetRange = horizontalDistance(player.position, target.position);
+  if (targetRange < 8.5 || targetRange > 25 || player.carryingFlagTeam) return false;
+  if (!TEAM_MODES.has(state.config.mode) || player.team === 'neutral') return true;
+  return orderedPlayers(state).every((ally) =>
+    ally.id === player.id ||
+    !ally.alive ||
+    ally.team !== player.team ||
+    horizontalDistance(ally.position, target.position) > 6.2,
+  );
+};
+
+const canBotUseTowerTurret = (state: MatchState, player: PlayerState): boolean =>
+  state.config.mode === 'towah-of-powah' &&
+  horizontalDistance(player.position, state.tower.center) <= 6.4 &&
+  Math.abs(player.position.y - state.tower.center.y) <= 2.2;
 
 const updatePerception = (
   state: MatchState,
@@ -461,6 +625,10 @@ export const createBotMemory = (difficulty: Difficulty): BotMemory => ({
   lastPosition: null,
   stuckTimer: 0,
   unstickTimer: 0,
+  pickupTargetId: null,
+  pickupBestDistance: 1_000_000,
+  pickupProgressAt: 0,
+  pickupBlacklist: [],
 });
 
 export const updateBotInputs = (
@@ -493,13 +661,18 @@ export const updateBotInputs = (
     if (decisionDue) {
       if (memory.lastPosition) {
         const wasTryingToMove = Math.hypot(player.input.moveX, player.input.moveZ) > 0.35;
-        const moved = horizontalDistance(player.position, memory.lastPosition);
+        const moved = distance(player.position, memory.lastPosition);
         memory.stuckTimer = wasTryingToMove && moved < 0.12
           ? memory.stuckTimer + profile.decisionInterval
           : Math.max(0, memory.stuckTimer - profile.decisionInterval * 1.5);
       }
       memory.lastPosition = { ...player.position };
       if (memory.stuckTimer >= 0.6) {
+        if (memory.objective === 'pickup' && memory.pickupTargetId) {
+          blacklistPickup(memory, memory.pickupTargetId, state.elapsed);
+          memory.pickupBestDistance = 1_000_000;
+          memory.pickupProgressAt = state.elapsed;
+        }
         memory.stuckTimer = 0;
         memory.unstickTimer = 1.1;
         memory.aimError.z *= -1;
@@ -511,8 +684,13 @@ export const updateBotInputs = (
       if (random01(state) < 0.22) memory.aimError.z *= -1;
     }
 
-    const visibleTarget = updatePerception(state, player, profile, hasLineOfSight, decisionDue);
-    const plan = objectivePlan(state, player, map);
+    const operatingTurret = state.config.mode === 'towah-of-powah' && state.tower.turretOwnerId === player.id;
+    const perceptionProfile = operatingTurret
+      ? { ...profile, visionRange: Math.max(70, profile.visionRange), fieldOfView: Math.PI * 2 }
+      : profile;
+    const visibleTarget = updatePerception(state, player, perceptionProfile, hasLineOfSight, decisionDue);
+    let plan = objectivePlan(state, player, map);
+    if (pickupPlanHasStalled(state, player, plan)) plan = objectivePlan(state, player, map);
     const rememberedGoal = memory.lastSeenPosition && state.elapsed - memory.lastSeenAt <= profile.memorySeconds
       ? memory.lastSeenPosition
       : null;
@@ -553,6 +731,7 @@ export const updateBotInputs = (
       });
     }
     navigationDirection = avoidNearbyExplosives(state, player, navigationDirection);
+    navigationDirection = avoidFriendlyCrowding(state, player, navigationDirection);
 
     const precisionFinisher = visibleTarget !== null &&
       visibleTarget.shield <= 0 &&
@@ -565,8 +744,11 @@ export const updateBotInputs = (
           z: visibleTarget.position.z,
         }
       : rememberedGoal ?? navigationTarget;
-    const exactYaw = yawTo(eyePosition(player), aimPoint);
-    const exactPitch = pitchTo(eyePosition(player), aimPoint);
+    const aimOrigin = operatingTurret
+      ? { x: state.tower.center.x, y: state.tower.center.y + 2.7, z: state.tower.center.z }
+      : eyePosition(player);
+    const exactYaw = yawTo(aimOrigin, aimPoint);
+    const exactPitch = pitchTo(aimOrigin, aimPoint);
     const desiredYaw = exactYaw + (visibleTarget ? memory.aimError.x : 0);
     const desiredPitch = exactPitch + (visibleTarget ? memory.aimError.y : 0);
     input.yaw = wrapAngle(moveAngleToward(player.yaw, desiredYaw, profile.turnRate * safeDt));
@@ -622,12 +804,53 @@ export const updateBotInputs = (
         memory.reactionTimer <= 0 &&
         player.grenades > 0 &&
         player.grenadeCooldown <= 0 &&
-        targetRange >= 8 &&
-        targetRange <= 25 &&
+        isBotGrenadeSafe(state, player, visibleTarget) &&
         random01(state) < profile.grenadeChance
       ) {
         input.grenade = true;
         input.fire = false;
+      }
+    }
+
+    if (operatingTurret) {
+      const angularTargetSize = visibleTarget ? Math.atan2(visibleTarget.radius, Math.max(1, targetRange)) : 0;
+      const aligned = visibleTarget !== null &&
+        Math.abs(wrapAngle(exactYaw - input.yaw)) <= profile.fireTolerance + angularTargetSize &&
+        Math.abs(wrapAngle(exactPitch - input.pitch)) <= profile.fireTolerance * 0.8 + angularTargetSize;
+      input.moveX = 0;
+      input.moveZ = 0;
+      input.swap = false;
+      input.reload = false;
+      input.aim = false;
+      input.melee = false;
+      input.grenade = false;
+      input.fire = aligned && memory.reactionTimer <= 0;
+    } else if (
+      decisionDue &&
+      state.config.mode === 'towah-of-powah' &&
+      state.tower.turretOwnerId === null &&
+      canBotUseTowerTurret(state, player)
+    ) {
+      input.use = true;
+    } else if (decisionDue && plan.pickupId) {
+      const pickup = state.pickups.find((candidate) => candidate.id === plan.pickupId);
+      if (
+        pickup?.available &&
+        pickup.kind === 'weapon' &&
+        pickup.weaponId &&
+        distance(player.position, pickup.position) <= 1.45 &&
+        botPickupUtility(player, pickup) > 0
+      ) {
+        const existing = player.inventory.find((weapon) => weapon.id === pickup.weaponId);
+        const replacementIndex = existing || player.inventory.length < 2
+          ? player.activeWeapon
+          : weaponReplacementIndex(player, pickup.weaponId);
+        if (replacementIndex >= 0 && player.inventory.length >= 2 && !existing && player.activeWeapon !== replacementIndex) {
+          input.swap = true;
+          input.use = false;
+        } else {
+          input.use = true;
+        }
       }
     }
 

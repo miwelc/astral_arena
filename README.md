@@ -2,10 +2,11 @@
 
 Astral Arena es un prototipo de *arena shooter* 3D para navegador, inspirado en el ritmo de combate, los escudos recargables, el control de armas del mapa y los modos competitivos de los shooters de consola de principios de los 2000. Su identidad propia, **Arctic Orbital Dusk**, combina astronautas *hard-surface*, un campus científico extraterrestre de cerámica blanca/grafito/lima y un bosque frío que invade la instalación. Conserva una composición atmosférica estilizada, pero usa materiales PBR, vegetación densa y una iluminación de sol cálido contra sombras cian.
 
-El diseño se concentra en dos formatos:
+El diseño mantiene formatos cerrados por modo, para que las reglas no puedan combinarse de forma incoherente:
 
-- **Duelo:** 1 contra 1.
-- **Escuadras:** 4 contra 4.
+- **Deathmatch:** duelo 1 contra 1.
+- **Team Deathmatch, Capture the Flag y Towah of Powah:** escuadras 4 contra 4.
+- **Juggernaut / Coloso:** ocho jugadores, todos contra el Coloso y sin equipos.
 
 Las plazas vacías pueden llenarse con bots. El modo local significa **un humano en un navegador contra bots**; no hay pantalla dividida.
 
@@ -15,12 +16,12 @@ El repositorio contiene una **primera vertical jugable completa**, no una versi�
 
 - simulación determinista del combate, movimiento, colisiones, escudos, reapariciones, proyectiles, granadas, cuerpo a cuerpo, puntuación y objetivos;
 - un mapa inicial, **Cresta del Cráter**, de 104 × 84 m, con tres rutas, dos edificios base con interiores, torre central, puestos logísticos, relay meteorológico, laboratorio hidropónico, terrazas, bermas físicas, coberturas y armas recogibles;
-- seis armas, bots con tres dificultades moderadas, controles de teclado/ratón y mando, hitboxes anatómicos ampliados y audio procedural multicapa por arma;
-- una capa de presentación Three.js con terreno PBR húmedo de barro, musgo, raíces, piedras, relieve, césped denso y charcos; bosque instanciado, niebla local, haces solares, puertas, cristales, rampas, barandillas, cajas, iluminación interior, sombras, bloom moderado, profundidad de campo, aberración cromática, astronautas articulados y seis armas *hard-surface* con fogonazo, trazadoras e impactos;
+- seis armas, bots con tres dificultades moderadas, evaluación de utilidad de pickups, memoria antiatasco, controles de teclado/ratón y mando, hitboxes anatómicos ampliados y audio procedural multicapa por arma;
+- una capa de presentación Three.js con terreno PBR húmedo de barro, musgo, raíces, piedras, relieve, césped denso y charcos; UV antirrepetición, tintado macroscópico, bosque instanciado, niebla local, puertas, cristales, rampas, barandillas, cajas, iluminación interior, sombras, bloom moderado, profundidad de campo, aberración cromática, astronautas articulados y seis armas *hard-surface* con fogonazo, trazadoras e impactos;
 - animación procedural compartida entre primera y tercera persona: locomoción ligada a la distancia recorrida y diferenciada por dirección, respiración, salto, caída, aterrizaje, muerte/reaparición, retroceso, recarga, cambio de arma, cuerpo a cuerpo y lanzamiento de granada, con rodillas, pies, manos y piezas de arma móviles;
-- menús, configuración 1v1/4v4, lobby manual P2P, HUD, radar de movimiento de 25 m, IFF aliado/enemigo, avisos contextuales, voz de objetivos, audio y pantalla de resultado integrados;
+- menús con formato canónico por modo, lobby manual P2P, HUD contextual para armas y torreta, radar de movimiento de 25 m, IFF aliado/enemigo, avisos contextuales, voz de objetivos, audio y pantalla de resultado integrados;
 - transporte WebRTC P2P nativo con señalización manual, mensajes tipados y un host con hasta siete invitados;
-- 196 pruebas automatizadas para combate, movimiento, auto-step de rampas y deslizamiento por paredes, hitboxes, perfiles de bots, balance inicial, objetivos, radar, avisos contextuales, regeneración de escudo, validación de snapshots P2P, regresiones, navegación e interiores del mapa, pads de salto, acceso a la torre, puntuación, determinismo, audio, curvas de animación, texturas procedurales, arquitectura y piezas móviles de armamento.
+- 235 pruebas automatizadas para combate, dispersión y retículas, interacciones manuales, movimiento, auto-step de rampas y deslizamiento por paredes, hitboxes, perfiles de bots, balance inicial, objetivos, radar, avisos contextuales, regeneración de escudo, validación de snapshots P2P, regresiones, navegación e interiores del mapa, pads de salto, acceso y manejo de la torreta, puntuación, determinismo, audio, curvas de animación, antirrepetición de materiales, arquitectura y piezas móviles de armamento.
 
 El proyecto pasa `typecheck`, tests y build de producción. Aun así, el flujo WebRTC debe probarse con varios navegadores y redes reales antes de declarar soporte público 4v4; tampoco hay matchmaking, persistencia, cuentas, backend, migración de host ni anti-cheat.
 
@@ -74,6 +75,7 @@ Haz clic sobre el área de juego para capturar el puntero. `Esc` libera el punte
 | Cambiar de arma | `Q`, `1`, `2` o botón central |
 | Golpe cuerpo a cuerpo | `F` |
 | Lanzar granada | `G` |
+| Usar torreta / recoger arma / salir de torreta | `E` |
 | Ver marcador | Mantener `Tab` |
 | Liberar ratón / menú | `Esc` |
 
@@ -94,12 +96,13 @@ Se lee el primer mando que exponga el navegador. La nomenclatura siguiente corre
 | Cambiar de arma | `Y` |
 | Golpe cuerpo a cuerpo | Bumper derecho (`RB`) |
 | Lanzar granada | Bumper izquierdo (`LB`) |
+| Usar torreta / recoger arma / salir de torreta | `B` |
 
 El soporte se basa en la API Gamepad del navegador; nombres, orden de botones y disponibilidad pueden variar en mandos sin mapeo estándar.
 
 ## Formatos, bots y modos
 
-Una partida admite como máximo dos participantes en **Duelo** y ocho en **Escuadras**. Con el relleno de bots activo, la simulación ocupa automáticamente las plazas libres. Cuando entra un jugador remoto, sustituye a un bot; al salir, puede volver a ocupar su plaza un bot. Las dificultades disponibles son Recluta, Veterano y Leyenda.
+Deathmatch admite dos participantes; los modos de equipo y Juggernaut admiten ocho. No existe un selector genérico 1v1/4v4: cada modo impone su composición canónica también al validar snapshots P2P. Con el relleno de bots activo, la simulación ocupa automáticamente las plazas libres. Cuando entra un jugador remoto, sustituye a un bot; al salir, puede volver a ocupar su plaza un bot. Las dificultades disponibles son Recluta, Veterano y Leyenda.
 
 Los cinco modos están modelados en la simulación:
 
@@ -107,21 +110,21 @@ Los cinco modos están modelados en la simulación:
 - **Team Deathmatch:** Aurora contra Nova; las eliminaciones alimentan la puntuación del equipo.
 - **Capture the Flag:** roba la bandera rival y llévala a tu base mientras tu propia bandera esté en casa. Una bandera caída puede devolverse y también retorna por tiempo.
 - **Juggernaut / Coloso:** un jugador recibe escudo reforzado. El Coloso puntúa eliminando y quien elimina al Coloso hereda el rol.
-- **Towah of Powah:** combate por equipos sin escudos, con escopeta y pistola como equipamiento inicial. Ocupar la plataforma central concede el control de su torreta automática; las eliminaciones deciden la puntuación.
+- **Towah of Powah:** combate por equipos sin escudos, con escopeta y pistola como equipamiento inicial. La torreta nunca busca ni dispara automáticamente: un jugador debe acercarse, pulsar `E`, apuntar y disparar desde su HUD de emplazamiento; `E` vuelve a liberarla.
 
 Los límites recomendados de puntos y tiempo cambian según modo y formato. El host mantiene el estado autoritativo de la partida.
 
 ## Armas y combate
 
-El equipamiento inicial normal es rifle de pulso y pistola. Las armas de poder aparecen en el mapa y reaparecen después de un tiempo:
+El equipamiento inicial normal es rifle de pulso y pistola. Las armas de poder aparecen en el mapa y reaparecen después de un tiempo. Pasar sobre ellas no altera el inventario: se muestra qué ranura sería sustituida y hay que pulsar `E`:
 
 | Arma | Función |
 | --- | --- |
-| Rifle de pulso | Automático equilibrado de corto y medio alcance. |
+| Rifle de pulso | Automático equilibrado de corto y medio alcance, con retícula de cono. |
 | Pistola Vector | Semiautomática precisa. |
 | Rifle de batalla | Ráfaga de tres proyectiles para media distancia. |
 | Rifle de precisión | Cuatro disparos por cargador, gran daño a larga distancia y visor escalonado `5×` / `10×`. |
-| Escopeta de brecha | Doce perdigones, fuerte a corta distancia. |
+| Escopeta de brecha | Doce perdigones y retícula circular vinculada a su dispersión real, fuerte a corta distancia. |
 | Lanzacohetes Nova | Proyectil lento con daño explosivo de área. |
 
 También hay granadas con fusible y rebote: nunca detonan suspendidas en el aire, explotan inmediatamente al impactar a un personaje y, una vez agotado el fusible, al siguiente contacto con suelo o escenario. Hay golpe cuerpo a cuerpo —incluido daño elevado por la espalda—, munición, sobreescudo y recarga automática de escudo tras dejar de recibir daño. Los valores son de prototipo y necesitan *playtesting* y balance competitivo.

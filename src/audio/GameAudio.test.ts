@@ -1,7 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { GameEvent, WeaponId } from '../game/types';
-import { GameAudio, SHIELD_RECHARGE_SOUND_PROFILE, shieldRechargeCueWasInterrupted, WEAPON_SOUND_PROFILES } from './GameAudio';
+import {
+  GameAudio,
+  MOVEMENT_SOUND_PROFILE,
+  SHIELD_RECHARGE_SOUND_PROFILE,
+  shieldRechargeCueWasInterrupted,
+  WEAPON_SOUND_PROFILES,
+} from './GameAudio';
 
 const weaponIds: WeaponId[] = [
   'pulse-rifle',
@@ -140,5 +146,20 @@ describe('shield and announcer audio', () => {
     });
 
     expect(new GameAudio().announce('Bandera perdida')).toBe('busy');
+  });
+});
+
+describe('movement audio', () => {
+  it('defines distinct short cues for jumping and landing', () => {
+    expect(MOVEMENT_SOUND_PROFILE.jump.from).toBeLessThan(MOVEMENT_SOUND_PROFILE.jump.to);
+    expect(MOVEMENT_SOUND_PROFILE.land.from).toBeGreaterThan(MOVEMENT_SOUND_PROFILE.land.to);
+    expect(MOVEMENT_SOUND_PROFILE.jump.duration).toBeLessThan(0.3);
+    expect(MOVEMENT_SOUND_PROFILE.land.duration).toBeLessThan(0.3);
+  });
+
+  it('is safe before browser audio has been unlocked', () => {
+    const audio = new GameAudio();
+    expect(() => audio.movement('jump')).not.toThrow();
+    expect(() => audio.movement('land', 0.8)).not.toThrow();
   });
 });

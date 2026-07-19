@@ -326,36 +326,30 @@ textarea:focus-visible {
   background-repeat: no-repeat;
 }
 
-.format-toggle {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 10px;
-}
-
-.format-option {
+.mode-format-card {
   position: relative;
   display: grid;
-  grid-template-columns: 34px auto;
+  grid-template-columns: 38px 1fr auto;
   grid-template-rows: auto auto;
-  text-align: left;
+  align-items: center;
+  min-height: 65px;
   padding: 13px 14px;
-  border: 1px solid var(--line);
-  color: #aec1c5;
-  background: rgba(4, 20, 31, 0.45);
-  cursor: pointer;
-  transition: 170ms ease;
-}
-
-.format-option:hover {
-  border-color: rgba(86, 224, 203, 0.45);
-  transform: translateY(-1px);
-}
-
-.format-option.selected {
   color: #efffff;
-  border-color: var(--teal);
+  border: 1px solid rgba(86, 224, 203, 0.42);
   background: linear-gradient(120deg, rgba(31, 155, 147, 0.24), rgba(7, 39, 50, 0.52));
   box-shadow: inset 3px 0 var(--teal), 0 0 20px rgba(86, 224, 203, 0.08);
+}
+
+.mode-format-card > div { display: flex; flex-direction: column; }
+.mode-format-card > b {
+  grid-column: 3;
+  grid-row: 1 / 3;
+  padding: 4px 7px;
+  color: #77aaa9;
+  border: 1px solid rgba(86, 224, 203, 0.22);
+  font-family: var(--display);
+  font-size: 7px;
+  letter-spacing: 0.16em;
 }
 
 .format-icon {
@@ -365,13 +359,13 @@ textarea:focus-visible {
   font-size: 20px;
 }
 
-.format-option strong {
+.mode-format-card strong {
   font-family: var(--display);
   font-size: 20px;
   letter-spacing: 0.06em;
 }
 
-.format-option small {
+.mode-format-card small {
   color: #78959c;
   font-family: var(--display);
   font-size: 9px;
@@ -991,6 +985,29 @@ kbd {
     linear-gradient(to bottom, rgba(3, 15, 23, 0.25), transparent 18%, transparent 80%, rgba(3, 15, 23, 0.28));
 }
 
+.damage-hud {
+  --damage-strength: 0.6;
+  position: absolute;
+  z-index: 4;
+  inset: -2px;
+  opacity: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(circle at center, transparent 34%, rgba(95, 0, 13, calc(var(--damage-strength) * 0.22)) 66%, rgba(255, 24, 51, calc(var(--damage-strength) * 0.74)) 104%),
+    linear-gradient(90deg, rgba(255, 32, 60, calc(var(--damage-strength) * 0.3)), transparent 13% 87%, rgba(255, 32, 60, calc(var(--damage-strength) * 0.3)));
+  box-shadow: inset 0 0 90px rgba(255, 15, 44, calc(var(--damage-strength) * 0.5));
+  mix-blend-mode: screen;
+}
+
+.damage-hud.active { animation: damage-hud-impact 740ms cubic-bezier(0.12, 0.74, 0.2, 1); }
+
+@keyframes damage-hud-impact {
+  0% { opacity: 0; filter: saturate(1); }
+  8% { opacity: 1; filter: saturate(1.85) contrast(1.08); }
+  28% { opacity: 0.72; }
+  100% { opacity: 0; filter: saturate(1.15); }
+}
+
 .hud-top {
   position: absolute;
   top: 22px;
@@ -1111,19 +1128,23 @@ kbd {
   width: 38px;
   height: 38px;
   transform: translate(-50%, -50%);
+  color: rgba(222, 255, 248, 0.88);
   pointer-events: none;
   filter: drop-shadow(0 0 3px rgba(0, 0, 0, 0.8));
+  transition: width 120ms ease, height 120ms ease, color 100ms ease;
 }
 
 .crosshair.scoped { opacity: 0; }
+.crosshair.enemy { color: #ff556f; }
 .crosshair.enemy i,
 .crosshair.enemy b {
-  background: #ff556f;
+  background: currentColor;
   box-shadow: 0 0 7px rgba(255, 47, 78, 0.85);
 }
+.crosshair.ally { color: #a8f09a; }
 .crosshair.ally i,
 .crosshair.ally b {
-  background: #a8f09a;
+  background: currentColor;
   box-shadow: 0 0 7px rgba(125, 239, 114, 0.72);
 }
 
@@ -1170,7 +1191,7 @@ kbd {
 .crosshair b {
   position: absolute;
   display: block;
-  background: rgba(222, 255, 248, 0.85);
+  background: currentColor;
 }
 
 .crosshair i:nth-child(1) { top: 0; left: 18px; width: 2px; height: 9px; }
@@ -1178,6 +1199,155 @@ kbd {
 .crosshair i:nth-child(3) { top: 18px; left: 0; width: 9px; height: 2px; }
 .crosshair i:nth-child(4) { top: 18px; right: 0; width: 9px; height: 2px; }
 .crosshair b { top: 18px; left: 18px; width: 2px; height: 2px; }
+
+.crosshair::before,
+.crosshair::after {
+  position: absolute;
+  content: "";
+  opacity: 0;
+  transition: transform 90ms ease, opacity 90ms ease;
+}
+
+/* Automatic weapons communicate a forgiving cone, not a pin-point promise. */
+.crosshair[data-reticle="automatic"] { width: 54px; height: 54px; }
+.crosshair[data-reticle="automatic"]::before {
+  inset: 7px;
+  border: 2px solid currentColor;
+  border-radius: 50%;
+  opacity: 0.76;
+}
+.crosshair[data-reticle="automatic"]::after {
+  inset: 15px;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+  opacity: 0.22;
+}
+.crosshair[data-reticle="automatic"] i:nth-child(1) { top: 0; left: 26px; height: 8px; }
+.crosshair[data-reticle="automatic"] i:nth-child(2) { bottom: 0; left: 26px; height: 8px; }
+.crosshair[data-reticle="automatic"] i:nth-child(3) { top: 26px; left: 0; width: 8px; }
+.crosshair[data-reticle="automatic"] i:nth-child(4) { top: 26px; right: 0; width: 8px; }
+.crosshair[data-reticle="automatic"] b { display: none; }
+.crosshair[data-reticle="automatic"].firing::before { transform: scale(1.16); opacity: 0.94; }
+.crosshair[data-reticle="automatic"].firing::after { transform: scale(1.22); }
+
+/* The shotgun ring encloses the actual pellet cone and deliberately has no dot. */
+.crosshair[data-reticle="shotgun"] { width: 68px; height: 68px; }
+.crosshair[data-reticle="shotgun"]::before {
+  inset: 5px;
+  border: 2px solid currentColor;
+  border-radius: 50%;
+  opacity: 0.86;
+}
+.crosshair[data-reticle="shotgun"]::after {
+  inset: 14px;
+  border: 1px dashed currentColor;
+  border-radius: 50%;
+  opacity: 0.34;
+}
+.crosshair[data-reticle="shotgun"] i:nth-child(1) { top: 0; left: 33px; height: 10px; }
+.crosshair[data-reticle="shotgun"] i:nth-child(2) { bottom: 0; left: 33px; height: 10px; }
+.crosshair[data-reticle="shotgun"] i:nth-child(3) { top: 33px; left: 0; width: 10px; }
+.crosshair[data-reticle="shotgun"] i:nth-child(4) { top: 33px; right: 0; width: 10px; }
+.crosshair[data-reticle="shotgun"] b { display: none; }
+.crosshair[data-reticle="shotgun"].firing::before { transform: scale(1.1); }
+
+.crosshair[data-reticle="explosive"] { width: 48px; height: 48px; }
+.crosshair[data-reticle="explosive"]::before {
+  inset: 9px;
+  transform: rotate(45deg);
+  border: 2px solid currentColor;
+  opacity: 0.82;
+}
+.crosshair[data-reticle="explosive"] i { display: none; }
+.crosshair[data-reticle="explosive"] b { top: 23px; left: 23px; }
+
+.crosshair[data-reticle="turret"] {
+  width: 62px;
+  height: 62px;
+  color: rgba(119, 242, 224, 0.94);
+  filter: drop-shadow(0 0 5px rgba(61, 239, 213, 0.45));
+}
+.crosshair[data-reticle="turret"]::before {
+  inset: 6px;
+  border: 2px dashed currentColor;
+  border-radius: 50%;
+  opacity: 0.78;
+}
+.crosshair[data-reticle="turret"]::after {
+  inset: 23px;
+  transform: rotate(45deg);
+  border: 1px solid currentColor;
+  opacity: 0.72;
+}
+.crosshair[data-reticle="turret"] i:nth-child(1) { top: 0; left: 30px; height: 12px; }
+.crosshair[data-reticle="turret"] i:nth-child(2) { bottom: 0; left: 30px; height: 12px; }
+.crosshair[data-reticle="turret"] i:nth-child(3) { top: 30px; left: 0; width: 12px; }
+.crosshair[data-reticle="turret"] i:nth-child(4) { top: 30px; right: 0; width: 12px; }
+.crosshair[data-reticle="turret"] b { display: none; }
+.crosshair[data-reticle="turret"].firing::before { transform: scale(1.1); opacity: 1; }
+
+.interaction-prompt {
+  position: absolute;
+  z-index: 7;
+  top: calc(50% + 74px);
+  left: 50%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 260px;
+  padding: 9px 13px 9px 9px;
+  transform: translate(-50%, 9px);
+  border: 1px solid rgba(151, 211, 207, 0.25);
+  opacity: 0;
+  color: #d9eeec;
+  background: linear-gradient(90deg, rgba(2, 16, 24, 0.9), rgba(8, 37, 43, 0.76));
+  box-shadow: 0 9px 28px rgba(0, 0, 0, 0.34), inset 2px 0 rgba(86, 224, 203, 0.7);
+  pointer-events: none;
+  transition: opacity 110ms ease, transform 110ms ease;
+}
+.interaction-prompt.visible { transform: translate(-50%, 0); opacity: 1; }
+.interaction-prompt.turret-action { box-shadow: 0 9px 32px rgba(0, 0, 0, 0.4), inset 2px 0 #d9ef72, 0 0 22px rgba(207, 236, 109, 0.1); }
+.interaction-prompt kbd {
+  display: grid;
+  flex: 0 0 34px;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border: 1px solid rgba(214, 245, 239, 0.65);
+  color: white;
+  background: rgba(79, 164, 159, 0.2);
+  box-shadow: inset 0 0 10px rgba(94, 225, 208, 0.12);
+  font-family: var(--display);
+  font-size: 16px;
+}
+.interaction-prompt span { display: flex; min-width: 0; flex-direction: column; }
+.interaction-prompt strong { font-family: var(--display); font-size: 11px; letter-spacing: 0.08em; }
+.interaction-prompt small { margin-top: 2px; color: #78999d; font-size: 7px; letter-spacing: 0.12em; }
+
+.turret-hud {
+  position: absolute;
+  z-index: 6;
+  top: 86px;
+  left: 50%;
+  display: flex;
+  min-width: 330px;
+  padding: 7px 14px;
+  transform: translate(-50%, -8px);
+  border-top: 1px solid rgba(188, 235, 119, 0.55);
+  border-bottom: 1px solid rgba(87, 231, 208, 0.28);
+  opacity: 0;
+  flex-direction: column;
+  align-items: center;
+  color: #dff69a;
+  background: linear-gradient(90deg, transparent, rgba(2, 24, 29, 0.78) 18% 82%, transparent);
+  font-family: var(--display);
+  pointer-events: none;
+  transition: opacity 140ms ease, transform 140ms ease;
+}
+.turret-hud.active { transform: translate(-50%, 0); opacity: 1; }
+.turret-hud span { color: #75cfc6; font-size: 7px; letter-spacing: 0.24em; }
+.turret-hud strong { margin-top: 2px; font-size: 13px; letter-spacing: 0.17em; }
+.turret-hud small { margin-top: 3px; color: #759496; font-size: 6px; letter-spacing: 0.12em; }
 
 .scope-overlay {
   z-index: 3;
@@ -1340,6 +1510,14 @@ kbd {
 
 .hud-bottom-left { left: 182px; width: min(330px, 34vw); }
 .hud-bottom-right { right: 25px; display: grid; grid-template-columns: auto auto; align-items: end; gap: 8px 18px; text-align: right; }
+.hud-bottom-right.turret-active {
+  padding: 10px 12px;
+  border-right: 2px solid #d9ef72;
+  background: linear-gradient(90deg, transparent, rgba(7, 35, 38, 0.62));
+}
+.hud-bottom-right.turret-active .weapon-label span,
+.hud-bottom-right.turret-active .reload-state { color: #bcd76c; }
+.hud-bottom-right.turret-active .ammo-readout > b { color: #e9fba8; text-shadow: 0 0 14px rgba(211, 239, 112, 0.42); }
 
 .vital-block {
   display: grid;
@@ -1541,6 +1719,7 @@ kbd {
   .weapon-label { display: none; }
   .ammo-readout > b { font-size: 44px; }
   .kill-feed { right: 12px; top: 58px; }
+  .turret-hud { top: 58px; }
 }
 
 @media (max-width: 560px) {
@@ -1568,6 +1747,8 @@ kbd {
   .combat-alerts { top: 19%; width: 88vw; }
   .combat-alert strong { font-size: 15px; }
   .click-hint { bottom: 84px; font-size: 6px; }
+  .interaction-prompt { top: calc(50% + 58px); min-width: 225px; }
+  .turret-hud { min-width: 260px; }
   .scoreboard-head, .scoreboard-row { grid-template-columns: 1fr 48px 48px 48px; }
 }
 

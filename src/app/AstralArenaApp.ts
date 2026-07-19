@@ -2,15 +2,18 @@ import { GameAudio } from '../audio/GameAudio';
 import { raycastWorld } from '../game/collision';
 import { MAPS } from '../game/map';
 import { add, clamp, directionFromAngles, vec3 } from '../game/math';
+import { canonicalFormatForMode, isTeamGameMode, rulesForMode } from '../game/modeRules';
 import { createDefaultConfig, GameSimulation, recommendedScoreLimit, recommendedTimeLimit } from '../game/simulation';
-import type { ClientMessage, GameMode, HostMessage, MatchConfig, MatchFormat, MatchState, PlayerInput, Team } from '../game/types';
+import type { ClientMessage, GameMode, HostMessage, MatchConfig, MatchState, PlayerInput, Team } from '../game/types';
 import { WEAPONS } from '../game/weapons';
 import { InputController } from '../input/InputController';
 import { isValidMatchState } from '../network/matchStateValidation';
 import { P2PNetwork, P2PNetworkError } from '../network/P2PNetwork';
 import type { ArenaRenderer } from '../render/ArenaRenderer';
 import { presentGameEvents, selectAnnouncementCandidate, type EventPresentation } from './eventPresentation';
+import { interactionPromptFor } from './interactionPrompt';
 import { buildMotionRadarContacts } from './motionRadar';
+import { weaponReticle } from './weaponReticle';
 
 type WireMessage = ClientMessage | HostMessage;
 type SessionRole = 'local' | 'host' | 'guest';
@@ -42,13 +45,13 @@ const formatTime = (seconds: number): string => {
 };
 
 const isTeamMode = (state: MatchState): boolean =>
-  state.config.mode !== 'deathmatch' && !(state.config.mode === 'juggernaut' && state.config.format === 'duel');
+  isTeamGameMode(state.config.mode);
 
 const isValidPlayerInput = (input: unknown): input is PlayerInput => {
   if (!input || typeof input !== 'object') return false;
   const candidate = input as Partial<PlayerInput>;
   const numbers = [candidate.moveX, candidate.moveZ, candidate.yaw, candidate.pitch];
-  const buttons = [candidate.fire, candidate.aim, candidate.jump, candidate.reload, candidate.swap, candidate.melee, candidate.grenade];
+  const buttons = [candidate.fire, candidate.aim, candidate.jump, candidate.reload, candidate.swap, candidate.melee, candidate.grenade, candidate.use];
   return Number.isSafeInteger(candidate.sequence)
     && (candidate.sequence ?? -1) >= 0
     && numbers.every((value) => typeof value === 'number' && Number.isFinite(value))
@@ -74,10 +77,11 @@ export class AstralArenaApp {
   private networkStatus: 'connecting' | 'connected' | 'lost' = 'connecting';
   private inputSequence = 0;
   private lastInput: PlayerInput | null = null;
-  private selectedFormat: MatchFormat = 'duel';
   private guestName = 'Astronauta';
   private gameViewActive = false;
   private lastDamageEvent = 0;
+  private lastLocalGrounded: boolean | null = null;
+  private lastLocalVerticalVelocity = 0;
   private sniperZoomLevel: 0 | 1 = 0;
   private lastPresentedEvent = 0;
   private activeAlerts: Array<{ presentation: EventPresentation; expiresAt: number }> = [];
@@ -86,6 +90,7 @@ export class AstralArenaApp {
   private nextTacticalHudAt = 0;
   private lastFrameErrorAt = 0;
   private lastInvalidSnapshotAt = Number.NEGATIVE_INFINITY;
+  private damageHudTimer = 0;
   private toastTimer = 0;
 
   public constructor(private readonly root: HTMLElement) {
@@ -123,14 +128,11 @@ export class AstralArenaApp {
             <label class="field-label" for="player-name">INDICATIVO</label>
             <input id="player-name" class="text-input" maxlength="18" value="${escapeHtml(this.savedName())}" autocomplete="nickname" />
 
-            <div class="field-label">FORMATO</div>
-            <div class="format-toggle" role="group" aria-label="Formato de partida">
-              <button class="format-option selected" data-format="duel" type="button">
-                <span class="format-icon">◈</span><strong>1 V 1</strong><small>DUELO</small>
-              </button>
-              <button class="format-option" data-format="squads" type="button">
-                <span class="format-icon">✦</span><strong>4 V 4</strong><small>ESCUADRAS</small>
-              </button>
+            <div class="field-label">FORMATO DEL MODO</div>
+            <div id="mode-format" class="mode-format-card" aria-live="polite">
+              <span id="mode-format-icon" class="format-icon">◈</span>
+              <div><strong id="mode-format-label">1 V 1</strong><small id="mode-format-detail">DUELO · TODOS CONTRA TODOS</small></div>
+              <b>FIJO</b>
             </div>
 
             <div class="select-row">
@@ -182,7 +184,7 @@ export class AstralArenaApp {
             <div class="intel-card feature-card">
               <span class="card-number">03</span><div><h3>P2P sin backend</h3><p>El anfitrión simula la partida. Oferta y respuesta se intercambian como códigos copiables.</p></div>
             </div>
-            <div class="controls-strip"><kbd>WASD</kbd> MOVER · <kbd>RATÓN</kbd> APUNTAR · <kbd>F</kbd> MELEE · <kbd>G</kbd> GRANADA</div>
+            <div class="controls-strip"><kbd>WASD</kbd> MOVER · <kbd>RATÓN</kbd> APUNTAR · <kbd>E</kbd> USAR · <kbd>F</kbd> MELEE · <kbd>G</kbd> GRANADA</div>
           </aside>
         </section>
 
@@ -198,18 +200,17 @@ export class AstralArenaApp {
         <footer class="menu-footer"><span>WEBGL / WEBRTC</span><span>v0.1 · PROTOTIPO JUGABLE</span><span>SIN TELEMETRÍA</span></footer>
       </main>`;
 
-    this.selectedFormat = 'duel';
-    this.root.querySelectorAll<HTMLButtonElement>('.format-option').forEach((button) => {
-      button.addEventListener('click', () => {
-        this.selectedFormat = button.dataset.format as MatchFormat;
-        this.root.querySelectorAll('.format-option').forEach((candidate) => candidate.classList.toggle('selected', candidate === button));
-      });
-    });
     const modeSelect = this.required<HTMLSelectElement>('#game-mode');
-    modeSelect.addEventListener('change', () => {
+    const updateModePresentation = (): void => {
       const mode = modeSelect.value as GameMode;
+      const rules = rulesForMode(mode);
       this.required<HTMLElement>('#mode-brief p').textContent = MODE_COPY[mode];
-    });
+      this.setText('#mode-format-label', rules.formatLabel);
+      this.setText('#mode-format-detail', rules.formatDetail);
+      this.setText('#mode-format-icon', rules.teamBased ? '✦' : mode === 'juggernaut' ? '⬢' : '◈');
+    };
+    modeSelect.addEventListener('change', updateModePresentation);
+    updateModePresentation();
     this.required<HTMLButtonElement>('#local-play').addEventListener('click', () => this.startLocal());
     this.required<HTMLButtonElement>('#host-play').addEventListener('click', () => void this.startHostLobby());
     const joinPanel = this.required<HTMLElement>('#join-panel');
@@ -243,13 +244,13 @@ export class AstralArenaApp {
   private renderHostLobby(): void {
     const state = this.simulation?.state;
     if (!state) return;
-    const maxPlayers = this.simulation?.maxPlayers ?? (state.config.format === 'duel' ? 2 : 8);
+    const maxPlayers = this.simulation?.maxPlayers ?? rulesForMode(state.config.mode).maxPlayers;
     this.root.innerHTML = `
       <main class="lobby-shell">
         <div class="lobby-backdrop"></div>
         <header class="lobby-header">
           <button id="lobby-back" class="icon-button" type="button">←</button>
-          <div><span class="eyebrow">SALA P2P / ANFITRIÓN</span><h1>${MODE_LABELS[state.config.mode]} <i>·</i> ${state.config.format === 'duel' ? '1 V 1' : '4 V 4'}</h1></div>
+          <div><span class="eyebrow">SALA P2P / ANFITRIÓN</span><h1>${MODE_LABELS[state.config.mode]} <i>·</i> ${rulesForMode(state.config.mode).formatLabel}</h1></div>
           <span class="connection-badge"><i></i> DIRECTA</span>
         </header>
         <section class="lobby-grid">
@@ -460,12 +461,15 @@ export class AstralArenaApp {
     this.sniperZoomLevel = 0;
     this.nextTacticalHudAt = 0;
     this.lastFrameErrorAt = 0;
+    this.lastLocalGrounded = null;
+    this.lastLocalVerticalVelocity = 0;
     const { ArenaRenderer } = await import('../render/ArenaRenderer');
     if (!this.gameViewActive) return;
     this.root.innerHTML = `
       <main class="game-shell">
         <div id="scene-host" class="scene-host"></div>
         <div class="hud-vignette"></div>
+        <div id="damage-hud" class="damage-hud" aria-hidden="true"></div>
         <div class="hud-top">
           <div class="hud-mode"><span id="hud-mode-name">${MODE_LABELS[state.config.mode]}</span><small id="hud-objective"></small></div>
           <div class="hud-score">
@@ -477,6 +481,8 @@ export class AstralArenaApp {
         <div id="combat-alerts" class="combat-alerts" aria-live="polite"></div>
         <div id="objective-marker" class="objective-marker"></div>
         <div id="crosshair" class="crosshair" aria-hidden="true"><i></i><i></i><i></i><i></i><b></b></div>
+        <div id="interaction-prompt" class="interaction-prompt" aria-live="polite"></div>
+        <div id="turret-hud" class="turret-hud" aria-hidden="true"><span>EMPLAZAMIENTO M41</span><strong>CONTROL MANUAL</strong><small>RATÓN · APUNTAR &nbsp; LMB · FUEGO &nbsp; E · SALIR</small></div>
         <div id="scope-overlay" class="scope-overlay"><div></div><span id="scope-zoom">5×</span><small>RUEDA / Z · CAMBIAR AUMENTO</small></div>
         <div id="motion-radar" class="motion-radar" role="img" aria-label="Radar de movimiento, alcance 25 metros">
           <div class="radar-face"><i></i><i></i><i></i><b></b><span id="radar-blips"></span></div>
@@ -500,7 +506,7 @@ export class AstralArenaApp {
         <div id="pause-panel" class="pause-panel glass-panel hidden">
           <span class="eyebrow">MENÚ DE MISIÓN</span><h2>Partida en curso</h2>
           <p>La simulación continúa mientras el ratón está libre.</p>
-          <div class="control-grid"><span><kbd>WASD</kbd>Mover</span><span><kbd>ESPACIO</kbd>Saltar</span><span><kbd>Q</kbd>Cambiar</span><span><kbd>R</kbd>Recargar</span><span><kbd>F</kbd>Melee</span><span><kbd>G</kbd>Granada</span><span><kbd>RMB</kbd>Apuntar</span><span><kbd>Z / RUEDA</kbd>Zoom sniper</span></div>
+          <div class="control-grid"><span><kbd>WASD</kbd>Mover</span><span><kbd>ESPACIO</kbd>Saltar</span><span><kbd>E</kbd>Usar / torreta</span><span><kbd>Q</kbd>Cambiar</span><span><kbd>R</kbd>Recargar</span><span><kbd>F</kbd>Melee</span><span><kbd>G</kbd>Granada</span><span><kbd>RMB</kbd>Apuntar</span><span><kbd>Z / RUEDA</kbd>Zoom sniper</span></div>
           <button id="resume-game" class="primary-action compact" type="button"><span>Volver a la arena</span><b>→</b></button>
           <button id="exit-game" class="text-button danger" type="button">Abandonar partida</button>
         </div>
@@ -608,8 +614,22 @@ export class AstralArenaApp {
     if (!this.localPlayerId) return;
     const player = state.players[this.localPlayerId];
     if (!player) return;
+    if (player.alive) {
+      if (this.lastLocalGrounded === true && !player.grounded && player.velocity.y > 0.35) {
+        this.audio.movement('jump', Math.min(1, player.velocity.y / 6.5));
+      } else if (this.lastLocalGrounded === false && player.grounded) {
+        this.audio.movement('land', clamp(-this.lastLocalVerticalVelocity / 8, 0.28, 1));
+      }
+      this.lastLocalGrounded = player.grounded;
+      this.lastLocalVerticalVelocity = player.velocity.y;
+    } else {
+      this.lastLocalGrounded = null;
+      this.lastLocalVerticalVelocity = 0;
+    }
     const weapon = player.inventory[player.activeWeapon];
     const definition = weapon ? WEAPONS[weapon.id] : null;
+    const operatingTurret = state.config.mode === 'towah-of-powah'
+      && state.tower.turretOwnerId === player.id;
     const shieldDenominator = Math.max(100, player.maxShield, player.shield);
     this.setWidth('#shield-bar', player.maxShield === 0 ? 0 : (player.shield / shieldDenominator) * 100);
     this.setWidth('#health-bar', (player.health / 70) * 100);
@@ -622,7 +642,13 @@ export class AstralArenaApp {
       && player.shield < player.maxShield
       && state.elapsed - player.lastDamageAt >= (player.isJuggernaut ? 5 : 4);
     this.root.querySelector('#shield-block')?.classList.toggle('recharging', shieldRecharging);
-    if (weapon && definition) {
+    if (operatingTurret) {
+      this.setText('#weapon-name', 'Torreta M41');
+      this.setText('#weapon-role', 'EMPLAZAMIENTO CONECTADO');
+      this.setText('#ammo-mag', '∞');
+      this.setText('#ammo-reserve', 'ACTIVA');
+      this.setText('#reload-state', 'CONTROL MANUAL · 420 RPM');
+    } else if (weapon && definition) {
       this.setText('#weapon-name', definition.label);
       this.setText('#weapon-role', definition.role.toUpperCase());
       this.setText('#ammo-mag', String(weapon.magazine));
@@ -632,19 +658,27 @@ export class AstralArenaApp {
     this.setText('#match-time', formatTime(state.timeRemaining));
     this.setText('#ping-value', this.role === 'guest' && this.networkStatus === 'connected' ? `${this.latency} MS` : '');
     if (this.role === 'guest') this.setText('#net-state', this.networkStatus === 'connected' ? 'P2P' : this.networkStatus === 'lost' ? 'SIN HOST' : 'RECONECTANDO');
-    const sniperScoped = Boolean(this.lastInput?.aim && weapon?.id === 'sniper' && player.alive);
+    const sniperScoped = Boolean(!operatingTurret && this.lastInput?.aim && weapon?.id === 'sniper' && player.alive);
     if (!sniperScoped) this.sniperZoomLevel = 0;
     this.input?.setLookSensitivityScale(
       sniperScoped ? (this.sniperZoomLevel === 0 ? 0.24 : 0.12) : 1,
     );
     this.root.querySelector('#scope-overlay')?.classList.toggle('active', sniperScoped);
-    this.root.querySelector('#crosshair')?.classList.toggle('scoped', sniperScoped);
+    const crosshair = this.root.querySelector<HTMLElement>('#crosshair');
+    crosshair?.classList.toggle('scoped', sniperScoped);
+    crosshair?.classList.toggle('firing', Boolean(this.lastInput?.fire && (operatingTurret ? state.tower.turretCooldown : weapon?.cooldown)));
+    if (crosshair) crosshair.dataset.reticle = operatingTurret ? 'turret' : weaponReticle(weapon?.id);
+    this.root.querySelector('.hud-bottom-right')?.classList.toggle('turret-active', operatingTurret);
+    const turretHud = this.root.querySelector<HTMLElement>('#turret-hud');
+    turretHud?.classList.toggle('active', operatingTurret);
+    turretHud?.setAttribute('aria-hidden', String(!operatingTurret));
+    this.updateInteractionPrompt(state, player);
     this.setText('#scope-zoom', this.sniperZoomLevel === 0 ? '5×' : '10×');
     const hudNow = performance.now();
     if (hudNow >= this.nextTacticalHudAt) {
       const tacticalState = this.presentedTacticalState(state);
       const tacticalPlayer = tacticalState.players[player.id] ?? player;
-      this.updateCombatIdentification(tacticalState, tacticalPlayer, definition?.range ?? 120);
+      this.updateCombatIdentification(tacticalState, tacticalPlayer, operatingTurret ? 70 : definition?.range ?? 120);
       this.updateMotionRadar(tacticalState);
       this.nextTacticalHudAt = hudNow + 1000 / 30;
     }
@@ -680,6 +714,16 @@ export class AstralArenaApp {
     if (damage && damage.id > this.lastDamageEvent) {
       this.lastDamageEvent = damage.id;
       this.renderer?.pulseDamage();
+      const damageHud = this.root.querySelector<HTMLElement>('#damage-hud');
+      if (damageHud) {
+        const strength = clamp((damage.amount ?? 25) / 95, 0.42, 1);
+        damageHud.style.setProperty('--damage-strength', strength.toFixed(2));
+        damageHud.classList.remove('active');
+        void damageHud.offsetWidth;
+        damageHud.classList.add('active');
+        window.clearTimeout(this.damageHudTimer);
+        this.damageHudTimer = window.setTimeout(() => damageHud.classList.remove('active'), 760);
+      }
     }
 
     if (state.phase === 'finished') {
@@ -716,7 +760,11 @@ export class AstralArenaApp {
     scope?.classList.remove('ally', 'enemy');
     if (!player.alive) return;
 
-    const origin = add(player.position, vec3(0, player.height * 0.86, 0));
+    const operatingTurret = state.config.mode === 'towah-of-powah'
+      && state.tower.turretOwnerId === player.id;
+    const origin = operatingTurret
+      ? add(state.tower.center, vec3(0, 2.7, 0))
+      : add(player.position, vec3(0, player.height * 0.86, 0));
     const hit = raycastWorld(
       origin,
       directionFromAngles(player.yaw, player.pitch),
@@ -730,6 +778,20 @@ export class AstralArenaApp {
     const relation = isTeamMode(state) && target.team === player.team ? 'ally' : 'enemy';
     crosshair?.classList.add(relation);
     scope?.classList.add(relation);
+  }
+
+  private updateInteractionPrompt(state: MatchState, player: MatchState['players'][string]): void {
+    const element = this.root.querySelector<HTMLElement>('#interaction-prompt');
+    if (!element) return;
+    const prompt = interactionPromptFor(state, player);
+    element.classList.toggle('visible', prompt !== null);
+    element.classList.toggle('turret-action', prompt?.action === 'enter-turret' || prompt?.action === 'exit-turret');
+    if (!prompt) {
+      element.replaceChildren();
+      return;
+    }
+    const markup = `<kbd>${prompt.key}</kbd><span><strong>${escapeHtml(prompt.label)}</strong><small>${escapeHtml(prompt.detail)}</small></span>`;
+    if (element.innerHTML !== markup) element.innerHTML = markup;
   }
 
   private updateMotionRadar(state: MatchState): void {
@@ -865,14 +927,15 @@ export class AstralArenaApp {
     const name = this.root.querySelector<HTMLInputElement>('#player-name')?.value.trim() || 'Astronauta';
     const mode = (this.root.querySelector<HTMLSelectElement>('#game-mode')?.value ?? 'deathmatch') as GameMode;
     const difficulty = (this.root.querySelector<HTMLSelectElement>('#difficulty')?.value ?? 'veteran') as MatchConfig['difficulty'];
+    const format = canonicalFormatForMode(mode);
     try { localStorage.setItem('astral-player-name', name); } catch { /* Storage can be disabled. */ }
     return createDefaultConfig({
       playerName: name,
       mode,
-      format: this.selectedFormat,
+      format,
       difficulty,
-      scoreLimit: recommendedScoreLimit(mode, this.selectedFormat),
-      timeLimitSeconds: recommendedTimeLimit(mode, this.selectedFormat),
+      scoreLimit: recommendedScoreLimit(mode, format),
+      timeLimitSeconds: recommendedTimeLimit(mode, format),
     });
   }
 
@@ -939,6 +1002,8 @@ export class AstralArenaApp {
     this.latency = 0;
     this.networkStatus = 'connecting';
     this.lastDamageEvent = 0;
+    this.lastLocalGrounded = null;
+    this.lastLocalVerticalVelocity = 0;
     this.sniperZoomLevel = 0;
     this.lastPresentedEvent = 0;
     this.activeAlerts = [];
@@ -946,6 +1011,8 @@ export class AstralArenaApp {
     this.pendingAnnouncement = null;
     this.nextTacticalHudAt = 0;
     this.lastFrameErrorAt = 0;
+    window.clearTimeout(this.damageHudTimer);
+    this.damageHudTimer = 0;
     if (document.pointerLockElement) document.exitPointerLock();
   }
 

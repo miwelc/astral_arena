@@ -1,5 +1,6 @@
 import { hasLineOfSight, moveCapsule, raycastWorld } from './collision';
 import { isJumpPad, MAPS } from './map';
+import { canonicalFormatForMode, isTeamGameMode, rulesForMode } from './modeRules';
 import {
   add,
   clamp,
@@ -26,6 +27,7 @@ import type {
   PlayerInput,
   PlayerKind,
   PlayerState,
+  PickupState,
   ProjectileState,
   Team,
   Vec3,
@@ -69,6 +71,7 @@ interface ButtonState {
   swap: boolean;
   melee: boolean;
   grenade: boolean;
+  use: boolean;
 }
 
 interface JumpPadMomentum {
@@ -76,15 +79,47 @@ interface JumpPadMomentum {
   minimumSpeed: number;
 }
 
-const noButtons = (): ButtonState => ({ fire: false, jump: false, reload: false, swap: false, melee: false, grenade: false });
+const noButtons = (): ButtonState => ({
+  fire: false,
+  jump: false,
+  reload: false,
+  swap: false,
+  melee: false,
+  grenade: false,
+  use: false,
+});
+
+export const WEAPON_PICKUP_INTERACTION_RADIUS = Math.sqrt(2.2);
+export const TURRET_INTERACTION_RADIUS = 6.4;
+export const TURRET_INTERACTION_VERTICAL_RANGE = 2.2;
+
+const horizontalDistanceSquared = (from: Vec3, to: Vec3): number => {
+  const x = from.x - to.x;
+  const z = from.z - to.z;
+  return x * x + z * z;
+};
+
+/** Shared by simulation and HUD prompts so the usable control deck is unambiguous. */
+export const canUseTowerTurret = (player: PlayerState, tower: MatchState['tower']): boolean =>
+  player.alive
+  && horizontalDistanceSquared(player.position, tower.center) <= TURRET_INTERACTION_RADIUS ** 2
+  && Math.abs(player.position.y - tower.center.y) <= TURRET_INTERACTION_VERTICAL_RANGE;
+
+/** Exact predicate used by presentation code to offer an E-key weapon prompt. */
+export const canUseWeaponPickup = (player: PlayerState, pickup: PickupState): boolean =>
+  player.alive
+  && pickup.available
+  && pickup.kind === 'weapon'
+  && pickup.weaponId !== undefined
+  && distanceSquared(player.position, pickup.position) <= WEAPON_PICKUP_INTERACTION_RADIUS ** 2;
 
 const teamForSlot = (config: MatchConfig, slot: number): Team => {
-  if (config.mode === 'deathmatch' || (config.mode === 'juggernaut' && config.format === 'duel')) return 'neutral';
+  if (!isTeamGameMode(config.mode)) return 'neutral';
   return slot % 2 === 0 ? 'aurora' : 'nova';
 };
 
 const isTeamMode = (state: MatchState): boolean =>
-  state.config.mode !== 'deathmatch' && !(state.config.mode === 'juggernaut' && state.config.format === 'duel');
+  isTeamGameMode(state.config.mode);
 
 const isEnemy = (state: MatchState, attacker: PlayerState, target: PlayerState): boolean => {
   if (attacker.id === target.id) return false;
@@ -98,18 +133,17 @@ const modeRespawnSeconds = (config: MatchConfig): number => {
   return 3;
 };
 
-export const recommendedScoreLimit = (mode: MatchConfig['mode'], format: MatchConfig['format']): number => {
-  if (mode === 'capture-the-flag') return format === 'duel' ? 3 : 5;
-  if (mode === 'juggernaut') return format === 'duel' ? 15 : 25;
-  if (mode === 'team-deathmatch') return format === 'duel' ? 15 : 50;
-  if (mode === 'towah-of-powah') return format === 'duel' ? 15 : 50;
-  return format === 'duel' ? 15 : 25;
+export const recommendedScoreLimit = (mode: MatchConfig['mode'], _format: MatchConfig['format']): number => {
+  if (mode === 'capture-the-flag') return 5;
+  if (mode === 'juggernaut') return 25;
+  if (mode === 'team-deathmatch' || mode === 'towah-of-powah') return 50;
+  return 15;
 };
 
-export const recommendedTimeLimit = (mode: MatchConfig['mode'], format: MatchConfig['format']): number => {
-  if (mode === 'capture-the-flag') return (format === 'duel' ? 8 : 12) * 60;
-  if (mode === 'deathmatch' && format === 'squads') return 10 * 60;
-  return (format === 'duel' ? 8 : 10) * 60;
+export const recommendedTimeLimit = (mode: MatchConfig['mode'], _format: MatchConfig['format']): number => {
+  if (mode === 'capture-the-flag') return 12 * 60;
+  if (mode === 'deathmatch') return 8 * 60;
+  return 10 * 60;
 };
 
 export class GameSimulation {
@@ -120,25 +154,33 @@ export class GameSimulation {
   private readonly jumpPadMomentum = new Map<string, JumpPadMomentum>();
   /** Tracks the transition, not every recharge tick, so audiovisual events never spam. */
   private readonly shieldRechargeActive = new Set<string>();
+  /** Rising-edge context actions captured before button history advances. */
+  private readonly usePressedThisTick = new Set<string>();
+  /** One context action may activate at most one world interaction. */
+  private readonly consumedUseThisTick = new Set<string>();
   private projectileSequence = 0;
 
   public constructor(config: MatchConfig, initialHumans: Array<{ id: string; name: string; kind?: PlayerKind }> = []) {
-    this.map = MAPS[config.mapId];
-    const seed = hashString(`${config.mode}:${config.format}:${Date.now()}`);
+    const normalizedConfig: MatchConfig = {
+      ...config,
+      format: canonicalFormatForMode(config.mode),
+    };
+    this.map = MAPS[normalizedConfig.mapId];
+    const seed = hashString(`${normalizedConfig.mode}:${normalizedConfig.format}:${Date.now()}`);
     this.state = {
       version: 1,
       matchId: `arena-${seed.toString(36)}`,
-      config: { ...config },
+      config: normalizedConfig,
       tick: 0,
       elapsed: 0,
-      timeRemaining: config.timeLimitSeconds,
+      timeRemaining: normalizedConfig.timeLimitSeconds,
       phase: 'countdown',
       countdown: 3,
       winner: null,
       players: {},
       projectiles: [],
       pickups: this.map.pickups
-        .filter((pickup) => config.mode !== 'towah-of-powah' || (pickup.kind !== 'overshield' && (pickup.kind !== 'weapon' || pickup.weaponId === 'shotgun')))
+        .filter((pickup) => normalizedConfig.mode !== 'towah-of-powah' || (pickup.kind !== 'overshield' && (pickup.kind !== 'weapon' || pickup.weaponId === 'shotgun')))
         .map((pickup) => ({ ...pickup, position: cloneVec3(pickup.position), available: true, respawnTimer: 0 })),
       flags: [
         {
@@ -163,6 +205,8 @@ export class GameSimulation {
         radius: 7,
         controllingTeam: 'neutral',
         turretOwnerId: null,
+        turretYaw: 0,
+        turretPitch: 0,
         turretCooldown: 0,
       },
       teamScores: { aurora: 0, nova: 0 },
@@ -172,13 +216,13 @@ export class GameSimulation {
       randomState: seed,
     };
 
-    initialHumans.forEach((human, index) => this.insertPlayer(human.id, human.name, human.kind ?? 'human', teamForSlot(config, index)));
-    if (config.botFill) this.fillWithBots();
-    if (config.mode === 'juggernaut') this.assignInitialJuggernaut();
+    initialHumans.forEach((human, index) => this.insertPlayer(human.id, human.name, human.kind ?? 'human', teamForSlot(normalizedConfig, index)));
+    if (normalizedConfig.botFill) this.fillWithBots();
+    if (normalizedConfig.mode === 'juggernaut') this.assignInitialJuggernaut();
   }
 
   public get maxPlayers(): number {
-    return this.state.config.format === 'duel' ? 2 : 8;
+    return rulesForMode(this.state.config.mode).maxPlayers;
   }
 
   public setInput(playerId: string, input: PlayerInput): void {
@@ -218,6 +262,7 @@ export class GameSimulation {
         this.previousButtons.delete(replacement.id);
         this.jumpPadReadyAt.delete(replacement.id);
         this.jumpPadMomentum.delete(replacement.id);
+        this.releaseTurret(replacement.id);
       }
       slot = Object.keys(this.state.players).length;
     }
@@ -237,6 +282,7 @@ export class GameSimulation {
     this.jumpPadReadyAt.delete(id);
     this.jumpPadMomentum.delete(id);
     this.shieldRechargeActive.delete(id);
+    this.releaseTurret(id);
     if (this.state.config.botFill && this.state.phase !== 'finished') this.fillWithBots();
     if (wasJuggernaut && this.state.config.mode === 'juggernaut') {
       const successor = Object.values(this.state.players).find((candidate) => candidate.alive);
@@ -263,12 +309,16 @@ export class GameSimulation {
     if (this.state.phase === 'playing') this.state.timeRemaining = Math.max(0, this.state.timeRemaining - safeDt);
 
     updateBotInputs(this.state, this.map, safeDt, (from, to) => hasLineOfSight(from, to, this.map));
+    this.usePressedThisTick.clear();
+    this.consumedUseThisTick.clear();
     for (const player of Object.values(this.state.players)) this.updatePlayer(player, safeDt);
     this.updateProjectiles(safeDt);
     if (this.state.phase === 'playing') {
+      // Turret interaction wins over a colocated weapon prompt for the same
+      // context-action edge, and an operator must explicitly pull the trigger.
+      this.updateTower(safeDt);
       this.updatePickups(safeDt);
       this.updateFlags(safeDt);
-      this.updateTower(safeDt);
       this.ensureJuggernaut();
     }
     this.evaluateMatchEnd();
@@ -369,10 +419,21 @@ export class GameSimulation {
 
     const previous = this.previousButtons.get(player.id) ?? noButtons();
     const canAct = this.state.phase === 'playing';
-    if (canAct) this.updateMovement(player, dt, !previous.jump && player.input.jump);
+    const usePressed = canAct && !previous.use && player.input.use;
+    if (usePressed) this.usePressedThisTick.add(player.id);
+    const operatingTurret = this.state.config.mode === 'towah-of-powah'
+      && this.state.tower.turretOwnerId === player.id;
+    const enteringTurret = usePressed
+      && this.state.config.mode === 'towah-of-powah'
+      && this.state.tower.turretOwnerId === null
+      && canUseTowerTurret(player, this.state.tower);
+    if (canAct) {
+      if (operatingTurret) this.holdTurretOperator(player, dt);
+      else this.updateMovement(player, dt, !previous.jump && player.input.jump);
+    }
 
     const currentWeapon = player.inventory[player.activeWeapon];
-    if (currentWeapon && canAct) {
+    if (currentWeapon && canAct && !operatingTurret && !enteringTurret) {
       if (!previous.swap && player.input.swap && player.inventory.length > 1) player.activeWeapon = (player.activeWeapon + 1) % player.inventory.length;
       if (!previous.reload && player.input.reload) this.startReload(player);
       const definition = WEAPONS[currentWeapon.id];
@@ -389,7 +450,18 @@ export class GameSimulation {
       swap: player.input.swap,
       melee: player.input.melee,
       grenade: player.input.grenade,
+      use: player.input.use,
     });
+  }
+
+  private holdTurretOperator(player: PlayerState, dt: number): void {
+    player.velocity.x = 0;
+    player.velocity.z = 0;
+    player.velocity.y -= PLAYER_MOVEMENT_TUNING.gravity * dt;
+    const movement = moveCapsule(player, this.map, dt);
+    player.position = movement.position;
+    player.velocity = movement.velocity;
+    player.grounded = movement.grounded;
   }
 
   private updateMovement(player: PlayerState, dt: number, jumpPressed: boolean): void {
@@ -542,20 +614,14 @@ export class GameSimulation {
     player.spawnProtection = 0;
     const origin = { x: player.position.x, y: player.position.y + 1.5, z: player.position.z };
     const baseDirection = directionFromAngles(player.yaw, player.pitch);
-    const visualRange = definition.projectile === 'rocket' ? Math.min(5, definition.range) : definition.range;
-    const visualHit = definition.projectile
-      ? null
-      : raycastWorld(origin, baseDirection, definition.range, this.map, Object.values(this.state.players), player.id);
-    const visualEndpoint = visualHit?.point ?? add(origin, scale(baseDirection, visualRange));
-    this.pushEvent({
-      type: 'shot',
-      actorId: player.id,
-      weaponId: weapon.id,
-      position: visualEndpoint,
-      impact: visualHit !== null,
-    });
-
     if (definition.projectile === 'rocket') {
+      this.pushEvent({
+        type: 'shot',
+        actorId: player.id,
+        weaponId: weapon.id,
+        position: add(origin, scale(baseDirection, Math.min(5, definition.range))),
+        impact: false,
+      });
       this.state.projectiles.push({
         id: `projectile-${this.projectileSequence++}`,
         kind: 'rocket',
@@ -572,6 +638,8 @@ export class GameSimulation {
       return;
     }
 
+    const traces: Vec3[] = [];
+    const resolvedHits: Array<ReturnType<typeof raycastWorld>> = [];
     for (let pellet = 0; pellet < definition.pellets; pellet += 1) {
       const spreadScale = definition.spread;
       const direction = normalize({
@@ -580,6 +648,19 @@ export class GameSimulation {
         z: baseDirection.z + randomRange(this.state, -spreadScale, spreadScale),
       });
       const hit = raycastWorld(origin, direction, definition.range, this.map, Object.values(this.state.players), player.id);
+      resolvedHits.push(hit);
+      traces.push(hit?.point ?? add(origin, scale(direction, definition.range)));
+    }
+    this.pushEvent({
+      type: 'shot',
+      actorId: player.id,
+      weaponId: weapon.id,
+      position: traces[0],
+      impact: resolvedHits.some((hit) => hit !== null),
+      traces: traces.length > 1 ? traces : undefined,
+    });
+
+    for (const hit of resolvedHits) {
       if (!hit?.playerId) continue;
       const target = this.state.players[hit.playerId];
       if (!target || !isEnemy(this.state, player, target)) continue;
@@ -657,6 +738,7 @@ export class GameSimulation {
     victim.streak = 0;
     victim.respawnTimer = modeRespawnSeconds(this.state.config);
     victim.velocity = vec3();
+    this.releaseTurret(victim.id);
     this.dropCarriedFlag(victim);
     if (killer && killer.id !== victim.id) {
       killer.kills += 1;
@@ -869,7 +951,7 @@ export class GameSimulation {
             grantedAmmo ||= weapon.reserve > previousReserve;
           }
           consumed = grantedAmmo;
-        } else if (pickup.kind === 'weapon' && pickup.weaponId) {
+        } else if (canUseWeaponPickup(player, pickup) && pickup.weaponId && this.hasUnconsumedUse(player.id)) {
           const existing = player.inventory.find((weapon) => weapon.id === pickup.weaponId);
           if (existing) {
             const previousReserve = existing.reserve;
@@ -884,6 +966,7 @@ export class GameSimulation {
           }
         }
         if (consumed) {
+          if (pickup.kind === 'weapon') this.consumeUse(player.id);
           pickup.available = false;
           pickup.respawnTimer = pickup.respawnSeconds;
           this.pushEvent({ type: 'pickup', actorId: player.id, weaponId: pickup.weaponId, position: cloneVec3(pickup.position) });
@@ -891,6 +974,14 @@ export class GameSimulation {
         }
       }
     }
+  }
+
+  private hasUnconsumedUse(playerId: string): boolean {
+    return this.usePressedThisTick.has(playerId) && !this.consumedUseThisTick.has(playerId);
+  }
+
+  private consumeUse(playerId: string): void {
+    this.consumedUseThisTick.add(playerId);
   }
 
   private updateFlags(dt: number): void {
@@ -1005,37 +1096,82 @@ export class GameSimulation {
       const [team] = teams;
       if (team) {
         this.state.tower.controllingTeam = team;
-        this.state.tower.turretOwnerId = occupants[0]?.id ?? null;
       }
     } else if (teams.size > 1) {
       this.state.tower.controllingTeam = 'neutral';
-      this.state.tower.turretOwnerId = null;
     } else {
       this.state.tower.controllingTeam = 'neutral';
+    }
+
+    const previousOperator = this.state.tower.turretOwnerId
+      ? this.state.players[this.state.tower.turretOwnerId]
+      : null;
+    if (!previousOperator || !canUseTowerTurret(previousOperator, this.state.tower)) {
       this.state.tower.turretOwnerId = null;
     }
+
+    const currentOperator = this.state.tower.turretOwnerId
+      ? this.state.players[this.state.tower.turretOwnerId]
+      : null;
+    if (currentOperator && this.hasUnconsumedUse(currentOperator.id)) {
+      this.consumeUse(currentOperator.id);
+      this.releaseTurret(currentOperator.id);
+    } else if (!currentOperator) {
+      const candidate = Object.values(this.state.players)
+        .filter((player) => canUseTowerTurret(player, this.state.tower) && this.hasUnconsumedUse(player.id))
+        .sort((left, right) => {
+          const distanceDelta = horizontalDistanceSquared(left.position, this.state.tower.center)
+            - horizontalDistanceSquared(right.position, this.state.tower.center);
+          return distanceDelta || left.id.localeCompare(right.id);
+        })[0];
+      if (candidate) {
+        this.consumeUse(candidate.id);
+        this.state.tower.turretOwnerId = candidate.id;
+        this.state.tower.turretYaw = candidate.yaw;
+        this.state.tower.turretPitch = clamp(candidate.pitch, -0.6, 0.85);
+      }
+    }
+
     this.state.tower.turretCooldown = Math.max(0, this.state.tower.turretCooldown - dt);
     const controller = this.state.tower.turretOwnerId ? this.state.players[this.state.tower.turretOwnerId] : null;
-    if (!controller || this.state.tower.turretCooldown > 0) return;
+    if (!controller) return;
+    this.state.tower.turretYaw = controller.yaw;
+    this.state.tower.turretPitch = clamp(controller.pitch, -0.6, 0.85);
+    if (!controller.input.fire || this.state.tower.turretCooldown > 0) return;
+
     const turretOrigin = add(this.state.tower.center, vec3(0, 2.7, 0));
-    const target = Object.values(this.state.players)
-      .filter((player) => player.alive && isEnemy(this.state, controller, player) && distance(player.position, turretOrigin) < 70)
-      .filter((player) => hasLineOfSight(turretOrigin, add(player.position, vec3(0, 1, 0)), this.map))
-      .sort((a, b) => distanceSquared(a.position, turretOrigin) - distanceSquared(b.position, turretOrigin))[0];
-    if (target) {
-      this.state.tower.turretCooldown = 0.14;
-      this.pushEvent({
-        type: 'shot',
-        actorId: controller.id,
-        position: add(target.position, vec3(0, target.height * 0.56, 0)),
-        impact: true,
-        message: 'Torreta',
-      });
-      this.applyDamage(target, 13, controller, 'pulse-rifle', target.position);
+    const direction = directionFromAngles(this.state.tower.turretYaw, this.state.tower.turretPitch);
+    const hit = raycastWorld(
+      turretOrigin,
+      direction,
+      70,
+      this.map,
+      Object.values(this.state.players),
+      controller.id,
+    );
+    const endpoint = hit?.point ?? add(turretOrigin, scale(direction, 70));
+    this.state.tower.turretCooldown = 0.14;
+    this.pushEvent({
+      type: 'shot',
+      actorId: controller.id,
+      weaponId: 'pulse-rifle',
+      position: cloneVec3(endpoint),
+      impact: hit !== null,
+      message: 'Torreta',
+    });
+    if (!hit?.playerId) return;
+    const target = this.state.players[hit.playerId];
+    if (target && isEnemy(this.state, controller, target)) {
+      this.applyDamage(target, 13, controller, 'pulse-rifle', hit.point);
     }
   }
 
+  private releaseTurret(playerId: string): void {
+    if (this.state.tower.turretOwnerId === playerId) this.state.tower.turretOwnerId = null;
+  }
+
   private spawnPlayer(player: PlayerState, initial: boolean): void {
+    this.releaseTurret(player.id);
     const matching = this.map.spawns.filter((spawn) => {
       if (!isTeamMode(this.state)) return true;
       return spawn.team === player.team;
@@ -1134,7 +1270,7 @@ export class GameSimulation {
 
 export const createDefaultConfig = (overrides: Partial<MatchConfig> = {}): MatchConfig => {
   const mode = overrides.mode ?? 'deathmatch';
-  const format = overrides.format ?? 'duel';
+  const format = canonicalFormatForMode(mode);
   return {
     mode,
     format,

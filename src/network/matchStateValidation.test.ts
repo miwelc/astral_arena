@@ -118,11 +118,22 @@ describe('P2P MatchState validation', () => {
     ['map', (state: MatchState) => { (state.config as { mapId: string }).mapId = 'unknown-map'; }],
     ['mode', (state: MatchState) => { (state.config as { mode: string }).mode = 'racing'; }],
     ['format', (state: MatchState) => { (state.config as { format: string }).format = 'sixteen'; }],
+    ['mode-incompatible format', (state: MatchState) => { state.config.format = 'duel'; }],
     ['phase', (state: MatchState) => { (state as { phase: string }).phase = 'paused'; }],
     ['missing tower', (state: MatchState) => { delete (state as Partial<MatchState>).tower; }],
+    ['turret operator outside Towah', (state: MatchState) => { state.tower.turretOwnerId = firstPlayer(state).id; }],
   ])('rejects invalid top-level/config shape: %s', (_label, mutate) => {
     const state = copy(makeState());
     mutate(state);
+    expect(isValidMatchState(state)).toBe(false);
+  });
+
+  it('rejects a roster larger than the selected mode allows', () => {
+    const state = copy(makeState('team-deathmatch'));
+    state.config.mode = 'deathmatch';
+    state.config.format = 'duel';
+
+    expect(Object.keys(state.players)).toHaveLength(8);
     expect(isValidMatchState(state)).toBe(false);
   });
 
@@ -133,12 +144,21 @@ describe('P2P MatchState validation', () => {
     ['huge position', (state: MatchState) => { firstPlayer(state).position.z = Number.MAX_VALUE; }],
     ['missing input', (state: MatchState) => { delete (firstPlayer(state) as Partial<PlayerState>).input; }],
     ['invalid input number', (state: MatchState) => { firstPlayer(state).input.yaw = Number.POSITIVE_INFINITY; }],
+    ['invalid use input', (state: MatchState) => { (firstPlayer(state).input as unknown as { use: string }).use = 'yes'; }],
     ['invalid weapon', (state: MatchState) => { firstPlayer(state).inventory[0]!.id = 'laser' as WeaponId; }],
     ['invalid active weapon', (state: MatchState) => { firstPlayer(state).activeWeapon = 99; }],
     ['invalid bot memory', (state: MatchState) => {
       const bot = Object.values(state.players).find((player) => player.kind === 'bot');
       if (!bot?.bot) throw new Error('Missing bot fixture');
       bot.bot.lastSeenAt = Number.NEGATIVE_INFINITY;
+    }],
+    ['duplicate bot pickup blacklist', (state: MatchState) => {
+      const bot = Object.values(state.players).find((player) => player.kind === 'bot');
+      if (!bot?.bot) throw new Error('Missing bot fixture');
+      bot.bot.pickupBlacklist = [
+        { pickupId: 'pickup-grenade-west', retryAt: 12 },
+        { pickupId: 'pickup-grenade-west', retryAt: 15 },
+      ];
     }],
   ])('rejects invalid player state: %s', (_label, mutate) => {
     const state = copy(makeState());
@@ -163,6 +183,11 @@ describe('P2P MatchState validation', () => {
       if (!event) throw new Error('Missing event fixture');
       event.id = Number.NaN;
     }],
+    ['oversized shot traces', (state: MatchState) => {
+      const event = state.events[0];
+      if (!event) throw new Error('Missing event fixture');
+      event.traces = Array.from({ length: 13 }, () => ({ x: 0, y: 0, z: 0 }));
+    }],
   ])('rejects malformed arrays/events: %s', (_label, mutate) => {
     const state = copy(makeState('juggernaut'));
     mutate(state);
@@ -175,9 +200,18 @@ describe('P2P MatchState validation', () => {
     ['event sequence', (state: MatchState) => { state.eventSequence = Number.POSITIVE_INFINITY; }],
     ['team score', (state: MatchState) => { state.teamScores.aurora = Number.NaN; }],
     ['tower cooldown', (state: MatchState) => { state.tower.turretCooldown = Number.NEGATIVE_INFINITY; }],
+    ['turret yaw', (state: MatchState) => { state.tower.turretYaw = Number.NaN; }],
+    ['turret pitch', (state: MatchState) => { state.tower.turretPitch = 1.2; }],
   ])('rejects non-finite scalar values: %s', (_label, mutate) => {
     const state = copy(makeState());
     mutate(state);
+    expect(isValidMatchState(state)).toBe(false);
+  });
+
+  it('rejects a turret operator that is absent from the roster', () => {
+    const state = copy(makeState('towah-of-powah'));
+    state.tower.turretOwnerId = 'missing-operator';
+
     expect(isValidMatchState(state)).toBe(false);
   });
 

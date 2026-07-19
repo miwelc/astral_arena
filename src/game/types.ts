@@ -36,6 +36,8 @@ export interface PlayerInput {
   swap: boolean;
   melee: boolean;
   grenade: boolean;
+  /** Context action: take a weapon or enter/leave an emplaced turret. */
+  use: boolean;
 }
 
 export interface WeaponState {
@@ -97,6 +99,12 @@ export interface BotMemory {
   lastPosition: Vec3 | null;
   stuckTimer: number;
   unstickTimer: number;
+  /** Pickup currently pursued; persisted so navigation can measure real progress. */
+  pickupTargetId: string | null;
+  pickupBestDistance: number;
+  pickupProgressAt: number;
+  /** Recently unreachable or unusable pickups, with simulation-time retry deadlines. */
+  pickupBlacklist: Array<{ pickupId: string; retryAt: number }>;
 }
 
 export interface ProjectileState {
@@ -136,7 +144,10 @@ export interface TowerState {
   center: Vec3;
   radius: number;
   controllingTeam: Team;
+  /** Player currently operating the turret; null means the turret cannot fire. */
   turretOwnerId: string | null;
+  turretYaw: number;
+  turretPitch: number;
   turretCooldown: number;
 }
 
@@ -166,6 +177,8 @@ export interface GameEvent {
   position?: Vec3;
   /** True when a shot endpoint is an actual world/player impact, not max range. */
   impact?: boolean;
+  /** Authoritative pellet/burst endpoints used to render the same cone that dealt damage. */
+  traces?: Vec3[];
   message?: string;
   amount?: number;
   flagTeam?: Exclude<Team, 'neutral'>;

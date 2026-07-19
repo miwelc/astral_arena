@@ -152,6 +152,8 @@ export const createFacilityMaterialKit = (
     grass: new THREE.MeshStandardMaterial({
       name: 'facility-forest-grass',
       color: palette.grass,
+      emissive: palette.grass,
+      emissiveIntensity: 0.035,
       roughness: 0.88,
       metalness: 0,
       side: THREE.DoubleSide,
@@ -516,12 +518,14 @@ const createFernFrondGeometry = (): THREE.BufferGeometry => {
 const createGrassTuftGeometry = (): THREE.BufferGeometry => {
   const positions: number[] = [];
   const indices: number[] = [];
-  const blades = 7;
+  const blades = 9;
   for (let blade = 0; blade < blades; blade += 1) {
-    const angle = (blade / blades) * TAU + (blade % 2) * 0.21;
-    const width = 0.025 + (blade % 3) * 0.008;
-    const height = 0.68 + (blade % 4) * 0.095;
-    const bend = 0.12 + (blade % 3) * 0.045;
+    // An intentionally irregular crown reads as continuous lawn instead of a
+    // field of identical black starbursts at grazing camera angles.
+    const angle = (blade / blades) * TAU + Math.sin(blade * 4.17) * 0.18;
+    const width = 0.018 + (blade % 4) * 0.0045;
+    const height = 0.36 + (blade % 5) * 0.052 + Math.sin(blade * 2.31) * 0.025;
+    const bend = 0.075 + (blade % 4) * 0.021;
     const rightX = Math.cos(angle) * width;
     const rightZ = Math.sin(angle) * width;
     const bendX = Math.sin(angle) * bend;
@@ -539,6 +543,7 @@ const createGrassTuftGeometry = (): THREE.BufferGeometry => {
   geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
   geometry.setIndex(indices);
   geometry.computeVertexNormals();
+  geometry.computeBoundingBox();
   geometry.computeBoundingSphere();
   return geometry;
 };
@@ -627,7 +632,7 @@ export const createUnderstoryField = (options: UnderstoryFieldOptions): THREE.Gr
   grasses.castShadow = castShadow;
   grasses.receiveShadow = true;
   grassPoints.forEach((point, index) => {
-    const size = 0.4 + random() * 0.75;
+    const size = 0.48 + random() * 0.62;
     grasses.setMatrixAt(
       index,
       composeMatrix(

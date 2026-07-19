@@ -1,4 +1,5 @@
-import type { MatchState } from '../game/types';
+import { canonicalFormatForMode, rulesForMode } from '../game/modeRules';
+import type { GameMode, MatchState } from '../game/types';
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -80,7 +81,7 @@ const isPlayerInput = (value: unknown): boolean => {
     && isFiniteNumber(value.moveZ) && Math.abs(value.moveZ) <= 1
     && isFiniteNumber(value.yaw) && Math.abs(value.yaw) <= Math.PI + 0.001
     && isFiniteNumber(value.pitch) && Math.abs(value.pitch) <= 1.481
-    && [value.fire, value.aim, value.jump, value.reload, value.swap, value.melee, value.grenade]
+    && [value.fire, value.aim, value.jump, value.reload, value.swap, value.melee, value.grenade, value.use]
       .every((button) => typeof button === 'boolean');
 };
 
@@ -91,6 +92,17 @@ const isWeaponState = (value: unknown): boolean => {
     && isSafeNonNegativeInteger(value.reserve)
     && isNonNegativeNumber(value.cooldown)
     && isNonNegativeNumber(value.reloadTimer);
+};
+
+const isPickupBlacklist = (value: unknown): boolean => {
+  if (!Array.isArray(value) || value.length > 4) return false;
+  const pickupIds = new Set<string>();
+  for (const entry of value) {
+    if (!isRecord(entry) || !isIdentifier(entry.pickupId) || !isNonNegativeNumber(entry.retryAt)) return false;
+    if (pickupIds.has(entry.pickupId)) return false;
+    pickupIds.add(entry.pickupId);
+  }
+  return true;
 };
 
 const isBotMemory = (value: unknown): boolean => {
@@ -107,7 +119,11 @@ const isBotMemory = (value: unknown): boolean => {
     && isEnumValue(BOT_OBJECTIVES, value.objective)
     && (value.lastPosition === null || isVec3(value.lastPosition))
     && isNonNegativeNumber(value.stuckTimer)
-    && isNonNegativeNumber(value.unstickTimer);
+    && isNonNegativeNumber(value.unstickTimer)
+    && isNullableIdentifier(value.pickupTargetId)
+    && isNonNegativeNumber(value.pickupBestDistance)
+    && isNonNegativeNumber(value.pickupProgressAt)
+    && isPickupBlacklist(value.pickupBlacklist);
 };
 
 const isPlayerState = (value: unknown, recordId: string): boolean => {
@@ -149,9 +165,9 @@ const isPlayerState = (value: unknown, recordId: string): boolean => {
 
 const isMatchConfig = (value: unknown): boolean => {
   if (!isRecord(value)) return false;
-  return isEnumValue(GAME_MODES, value.mode)
-    && isEnumValue(MATCH_FORMATS, value.format)
-    && isEnumValue(DIFFICULTIES, value.difficulty)
+  if (!isEnumValue(GAME_MODES, value.mode) || !isEnumValue(MATCH_FORMATS, value.format)) return false;
+  if (value.format !== canonicalFormatForMode(value.mode as GameMode)) return false;
+  return isEnumValue(DIFFICULTIES, value.difficulty)
     && isSafeNonNegativeInteger(value.scoreLimit) && value.scoreLimit > 0 && value.scoreLimit <= 10_000
     && isSafeNonNegativeInteger(value.timeLimitSeconds) && value.timeLimitSeconds > 0 && value.timeLimitSeconds <= 86_400
     && typeof value.botFill === 'boolean'
@@ -201,6 +217,8 @@ const isTower = (value: unknown): boolean => {
     && isFiniteNumber(value.radius) && value.radius > 0
     && isEnumValue(TEAMS, value.controllingTeam)
     && isNullableIdentifier(value.turretOwnerId)
+    && isFiniteNumber(value.turretYaw) && Math.abs(value.turretYaw) <= Math.PI + 0.001
+    && isFiniteNumber(value.turretPitch) && value.turretPitch >= -0.601 && value.turretPitch <= 0.851
     && isNonNegativeNumber(value.turretCooldown);
 };
 
@@ -214,6 +232,12 @@ const isGameEvent = (value: unknown, elapsed: number, eventSequence: number): va
   if (!(value.weaponId === undefined || isEnumValue(WEAPON_IDS, value.weaponId))) return false;
   if (!(value.position === undefined || isVec3(value.position))) return false;
   if (!(value.impact === undefined || typeof value.impact === 'boolean')) return false;
+  if (!(value.traces === undefined || (
+    Array.isArray(value.traces)
+    && value.traces.length > 0
+    && value.traces.length <= 12
+    && value.traces.every(isVec3)
+  ))) return false;
   if (!(value.message === undefined || (typeof value.message === 'string' && value.message.length <= 512))) return false;
   if (!(value.amount === undefined || isNonNegativeNumber(value.amount))) return false;
   if (!(value.flagTeam === undefined || isEnumValue(FLAG_TEAMS, value.flagTeam))) return false;
@@ -244,7 +268,8 @@ const validateMatchState = (value: unknown): boolean => {
 
   if (!isRecord(value.players)) return false;
   const playerIds = Object.keys(value.players);
-  if (playerIds.length > MAX_PLAYERS) return false;
+  const config = value.config as UnknownRecord;
+  if (playerIds.length > MAX_PLAYERS || playerIds.length > rulesForMode(config.mode as GameMode).maxPlayers) return false;
   for (const playerId of playerIds) {
     if (!isIdentifier(playerId) || !isPlayerState(value.players[playerId], playerId)) return false;
   }
@@ -262,6 +287,9 @@ const validateMatchState = (value: unknown): boolean => {
   }
 
   if (!isTower(value.tower)) return false;
+  const tower = value.tower as UnknownRecord;
+  if (tower.turretOwnerId !== null && value.players[tower.turretOwnerId as string] === undefined) return false;
+  if (config.mode !== 'towah-of-powah' && tower.turretOwnerId !== null) return false;
   if (!isRecord(value.teamScores)
     || !isSafeNonNegativeInteger(value.teamScores.aurora)
     || !isSafeNonNegativeInteger(value.teamScores.nova)) return false;
