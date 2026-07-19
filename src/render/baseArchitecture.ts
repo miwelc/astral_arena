@@ -193,6 +193,9 @@ const createArchitectureMaterials = (textures: ArchitectureTextures): Architectu
       opacity: 0.48,
       depthWrite: false,
       side: THREE.DoubleSide,
+      polygonOffset: true,
+      polygonOffsetFactor: -6,
+      polygonOffsetUnits: -6,
     }),
     growBed: new THREE.MeshPhysicalMaterial({
       name: 'architecture-hydroponic-bed',

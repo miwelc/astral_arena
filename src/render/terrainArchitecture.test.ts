@@ -47,6 +47,45 @@ describe('terrain and architecture visual vocabulary', () => {
     rock.dispose();
   });
 
+  it('winds every organic face toward the exterior instead of exposing a hollow back wall', () => {
+    const geometry = createOrganicObstacleGeometry(new THREE.Vector3(8, 1.2, 5), 441, false);
+    const positions = geometry.getAttribute('position');
+    const index = geometry.getIndex();
+    expect(index).not.toBeNull();
+
+    const a = new THREE.Vector3();
+    const b = new THREE.Vector3();
+    const c = new THREE.Vector3();
+    const edgeA = new THREE.Vector3();
+    const edgeB = new THREE.Vector3();
+    const normal = new THREE.Vector3();
+    const centroid = new THREE.Vector3();
+    const faceNormal = (triangle: number): THREE.Vector3 => {
+      const offset = triangle * 3;
+      a.fromBufferAttribute(positions, index!.getX(offset));
+      b.fromBufferAttribute(positions, index!.getX(offset + 1));
+      c.fromBufferAttribute(positions, index!.getX(offset + 2));
+      edgeA.subVectors(b, a);
+      edgeB.subVectors(c, a);
+      normal.crossVectors(edgeA, edgeB).normalize();
+      centroid.copy(a).add(b).add(c).multiplyScalar(1 / 3);
+      return normal;
+    };
+
+    // Four rings with twenty segments produce 120 side faces, followed by
+    // alternating bottom/top fan triangles.
+    for (let triangle = 0; triangle < 120; triangle += 1) {
+      const outward = faceNormal(triangle).x * centroid.x + normal.z * centroid.z;
+      expect(outward, `side face ${triangle}`).toBeGreaterThan(0);
+    }
+    for (let segment = 0; segment < 20; segment += 1) {
+      expect(faceNormal(120 + segment * 2).y, `bottom face ${segment}`).toBeLessThan(0);
+      expect(faceNormal(121 + segment * 2).y, `top face ${segment}`).toBeGreaterThan(0);
+    }
+
+    geometry.dispose();
+  });
+
   it('provides a clipped-corner cargo primitive with full collision extents', () => {
     const size = new THREE.Vector3(4, 2.7, 3.8);
     const geometry = createChamferedCargoGeometry(size);

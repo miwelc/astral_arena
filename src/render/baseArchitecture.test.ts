@@ -78,6 +78,27 @@ describe('human base architecture', () => {
     expect(findAuthoredMesh(group, 'cover-se-b-cargo-id-back')).toBeInstanceOf(THREE.Mesh);
   });
 
+  it('only makes intentional glazing and painted floor overlays transparent', () => {
+    const { group } = createBundle();
+    const transparentMaterials = new Set<string>();
+    group.traverse((object) => {
+      if (!(object instanceof THREE.Mesh)) return;
+      const materials = Array.isArray(object.material) ? object.material : [object.material];
+      for (const material of materials) {
+        if (material.transparent) transparentMaterials.add(material.name);
+      }
+    });
+
+    expect([...transparentMaterials].sort()).toEqual([
+      'architecture-floor-marking',
+      'architecture-laminated-glass',
+    ]);
+    const routeLine = findAuthoredMesh(group, 'aurora-interior-navigation-lane');
+    const routeMaterial = routeLine?.material as THREE.Material | undefined;
+    expect(routeMaterial?.polygonOffset).toBe(true);
+    expect(routeMaterial?.polygonOffsetFactor).toBeLessThan(0);
+  });
+
   it('disposes owned resources and is safe to dispose twice', () => {
     const bundle = createBundle();
     expect(bundle.group.children.length).toBeGreaterThan(0);

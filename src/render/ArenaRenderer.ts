@@ -54,6 +54,7 @@ import {
   createIndustrialPlanterVisual,
   createOrganicObstacleGeometry,
 } from './terrainArchitecture';
+import { setCoplanarSurfaceLayer } from './surfaceLayering';
 import { DepthFocusPass } from './DepthFocusPass';
 import {
   createColdEnvironmentTexture,
@@ -1547,24 +1548,29 @@ export class ArenaRenderer {
       clearcoatRoughness: 0.36,
       envMapIntensity: 0.86,
     });
-    const facilityUnderlay = new THREE.MeshStandardMaterial({
+    const facilityUnderlayTemplate = new THREE.MeshStandardMaterial({
       color: 0x091216,
       roughness: 0.5,
       metalness: 0.58,
       envMapIntensity: 0.82,
     });
+    let facilityPathLayer = 0;
     const addFacilityPath = (
       pathWidth: number,
       pathDepth: number,
       x: number,
       z: number,
     ): void => {
+      const pathLayer = facilityPathLayer;
+      facilityPathLayer += 1;
+      const underlayMaterial = facilityUnderlayTemplate.clone();
       const underlay = new THREE.Mesh(
         new THREE.PlaneGeometry(pathWidth + 0.62, pathDepth + 0.62),
-        facilityUnderlay,
+        underlayMaterial,
       );
       underlay.rotation.x = -Math.PI / 2;
-      underlay.position.set(x, this.map.bounds.floorY + 0.012, z);
+      underlay.position.set(x, 0, z);
+      setCoplanarSurfaceLayer(underlay, this.map.bounds.floorY + 0.012, pathLayer * 2);
       underlay.receiveShadow = true;
       this.scene.add(underlay);
 
@@ -1581,7 +1587,8 @@ export class ArenaRenderer {
       }
       const panels = new THREE.Mesh(new THREE.PlaneGeometry(pathWidth, pathDepth), surfaceMaterial);
       panels.rotation.x = -Math.PI / 2;
-      panels.position.set(x, this.map.bounds.floorY + 0.022, z);
+      panels.position.set(x, 0, z);
+      setCoplanarSurfaceLayer(panels, this.map.bounds.floorY + 0.022, pathLayer * 2 + 1);
       panels.receiveShadow = true;
       this.scene.add(panels);
     };
@@ -1593,6 +1600,7 @@ export class ArenaRenderer {
     addFacilityPath(width * 0.68, 4, centerX, centerZ - depth * 0.32);
     addFacilityPath(width * 0.68, 4, centerX, centerZ + depth * 0.32);
     facilitySurfaceTemplate.dispose();
+    facilityUnderlayTemplate.dispose();
 
     const routeAccentMaterial = new THREE.MeshStandardMaterial({
       color: 0xb4ef3f,
@@ -1607,7 +1615,8 @@ export class ArenaRenderer {
         routeAccentMaterial,
       );
       routeAccent.rotation.x = -Math.PI / 2;
-      routeAccent.position.set(centerX, this.map.bounds.floorY + 0.027, z);
+      routeAccent.position.set(centerX, 0, z);
+      setCoplanarSurfaceLayer(routeAccent, this.map.bounds.floorY + 0.022, 16);
       this.scene.add(routeAccent);
     }
 
@@ -1621,7 +1630,8 @@ export class ArenaRenderer {
     for (const radius of [5.9, 12.2, Math.min(width, depth) * 0.34]) {
       const marking = new THREE.Mesh(new THREE.RingGeometry(radius, radius + 0.065, 96), markingMaterial);
       marking.rotation.x = -Math.PI / 2;
-      marking.position.set(centerX, this.map.bounds.floorY + 0.018, centerZ);
+      marking.position.set(centerX, 0, centerZ);
+      setCoplanarSurfaceLayer(marking, this.map.bounds.floorY + 0.022, 17);
       this.scene.add(marking);
     }
 
@@ -1639,7 +1649,8 @@ export class ArenaRenderer {
       for (const zOffset of [-4.2, 4.2]) {
         const lane = new THREE.Mesh(new THREE.PlaneGeometry(laneLength, 0.075), laneMaterial);
         lane.rotation.x = -Math.PI / 2;
-        lane.position.set(laneCenterX, this.map.bounds.floorY + 0.021, laneCenterZ + zOffset);
+        lane.position.set(laneCenterX, 0, laneCenterZ + zOffset);
+        setCoplanarSurfaceLayer(lane, this.map.bounds.floorY + 0.022, 18);
         this.scene.add(lane);
       }
     }

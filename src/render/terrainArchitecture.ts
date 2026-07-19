@@ -162,7 +162,10 @@ export const createOrganicObstacleGeometry = (
       const lowerNext = ringIndex * segments + next;
       const upper = (ringIndex + 1) * segments + segment;
       const upperNext = (ringIndex + 1) * segments + next;
-      indices.push(lower, lowerNext, upperNext, lower, upperNext, upper);
+      // The angular rings advance around +Y. Keep the winding counter-clockwise
+      // when viewed from outside the mound so WebGL's normal back-face culling
+      // does not expose the far inner wall and make the volume look hollow.
+      indices.push(lower, upperNext, lowerNext, lower, upper, upperNext);
     }
   }
 
@@ -177,8 +180,8 @@ export const createOrganicObstacleGeometry = (
   const topRingStart = (rings.length - 1) * segments;
   for (let segment = 0; segment < segments; segment += 1) {
     const next = (segment + 1) % segments;
-    indices.push(bottomCenter, next, segment);
-    indices.push(topCenter, topRingStart + segment, topRingStart + next);
+    indices.push(bottomCenter, segment, next);
+    indices.push(topCenter, topRingStart + next, topRingStart + segment);
   }
 
   const indexed = new THREE.BufferGeometry();
