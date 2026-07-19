@@ -53,7 +53,7 @@ export const DEFAULT_FACILITY_PALETTE: Readonly<FacilityPalette> = Object.freeze
   accent: 0xa4e83f,
   accentOrange: 0xd47a45,
   accentBlue: 0x4c9db6,
-  glass: 0x6fbcc7,
+  glass: 0x315c65,
   bark: 0x101b19,
   canopy: 0x3b6242,
   fern: 0x568c4d,
@@ -238,14 +238,17 @@ export const createFacilityMaterialKit = (
     glass: new THREE.MeshPhysicalMaterial({
       name: 'facility-smoked-glass',
       color: palette.glass,
-      metalness: 0.12,
-      roughness: 0.12,
-      transmission: 0.25,
-      thickness: 0.08,
-      transparent: true,
-      opacity: 0.72,
-      clearcoat: 0.75,
+      // These background blocks have no playable interior. Opaque, reflective
+      // privacy glass reads as a deliberate window and avoids transparent
+      // sorting against the structural core and vegetation behind the arena.
+      metalness: 0.34,
+      roughness: 0.18,
+      transmission: 0,
+      transparent: false,
+      opacity: 1,
+      clearcoat: 0.92,
       clearcoatRoughness: 0.08,
+      envMapIntensity: 1.34,
     }),
     bark: new THREE.MeshStandardMaterial({
       name: 'facility-forest-bark',
@@ -1128,7 +1131,10 @@ export const createFacilityBlock = (options: FacilityBlockOptions): THREE.Group 
 
   const bayCount = clampInteger(width / (options.panelWidth ?? 2.2), 2, 12);
   const bayWidth = width / bayCount;
-  const lowerHeight = height * 0.5;
+  const facadeBaseY = height * 0.12;
+  const windowBottomY = height * 0.555;
+  const windowTopY = height * 0.705;
+  const lowerHeight = windowBottomY - facadeBaseY;
   const upperHeight = height * 0.26;
   const windowBand = options.windowBand ?? true;
   for (const side of [-1, 1] as const) {
@@ -1139,7 +1145,7 @@ export const createFacilityBlock = (options: FacilityBlockOptions): THREE.Group 
         group,
         `facade-${side > 0 ? 'front' : 'back'}-lower-${bay}`,
         new THREE.Vector3(bayWidth - skin * 0.45, lowerHeight, skin),
-        new THREE.Vector3(x, height * 0.12 + lowerHeight * 0.5, side * (depth * 0.5 + skin * 0.5)),
+        new THREE.Vector3(x, facadeBaseY + lowerHeight * 0.5, side * (depth * 0.5 + skin * 0.5)),
         panelMaterial,
         castShadow,
       );
@@ -1153,14 +1159,48 @@ export const createFacilityBlock = (options: FacilityBlockOptions): THREE.Group 
       );
     }
     if (windowBand) {
+      const windowHeight = windowTopY - windowBottomY;
+      const windowCenterY = (windowBottomY + windowTopY) * 0.5;
       addBox(
         group,
         `continuous-window-${side > 0 ? 'front' : 'back'}`,
-        new THREE.Vector3(width * 0.89, height * 0.16, skin * 0.75),
-        new THREE.Vector3(0, height * 0.63, side * (depth * 0.5 + skin * 1.12)),
+        new THREE.Vector3(width * 0.89, windowHeight, skin * 0.35),
+        // Recess the glazing behind the ceramic skin instead of intersecting
+        // it. The opaque structural core remains further behind this pane.
+        new THREE.Vector3(0, windowCenterY, side * (depth * 0.5 + skin * 0.2)),
         options.materials.glass,
         false,
       );
+      const frameDepth = skin * 0.42;
+      // Frames sit clearly proud of the ceramic face. Keeping their rear face
+      // outside the panel avoids replacing the former glass conflict with a
+      // near-coplanar trim conflict at the sill and header.
+      const frameZ = side * (depth * 0.5 + skin * 1.28);
+      for (const y of [windowBottomY - skin * 0.18, windowTopY + skin * 0.18]) {
+        addBox(
+          group,
+          `window-frame-${side > 0 ? 'front' : 'back'}-${y < windowCenterY ? 'lower' : 'upper'}`,
+          new THREE.Vector3(width * 0.93, skin * 0.42, frameDepth),
+          new THREE.Vector3(0, y, frameZ),
+          options.materials.structural,
+          castShadow,
+        );
+      }
+      const mullionInset = skin * 0.075;
+      const mullionHeight = windowHeight - mullionInset * 2;
+      for (let bay = 1; bay < bayCount; bay += 1) {
+        const x = -width * 0.5 + bayWidth * bay;
+        addBox(
+          group,
+          `window-mullion-${side > 0 ? 'front' : 'back'}-${bay}`,
+          // Leave a small clearance at header and sill: intersecting trim
+          // boxes with the same front plane can still shimmer at their joins.
+          new THREE.Vector3(skin * 0.52, mullionHeight, frameDepth),
+          new THREE.Vector3(x, windowCenterY, frameZ),
+          options.materials.structural,
+          castShadow,
+        );
+      }
     }
   }
 

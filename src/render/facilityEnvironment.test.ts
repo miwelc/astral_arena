@@ -95,6 +95,38 @@ describe('facility environment geometry', () => {
     expect(block.getObjectByName('access-light')).toBeInstanceOf(THREE.Mesh);
   });
 
+  it('recesses opaque window bands into real facade gaps without intersecting the panels', () => {
+    const materials = makeKit();
+    const block = createFacilityBlock({
+      seed: 82,
+      materials,
+      width: 10,
+      height: 5,
+      depth: 7,
+    });
+    block.updateWorldMatrix(true, true);
+    const window = block.getObjectByName('continuous-window-front') as THREE.Mesh;
+    const lower = block.getObjectByName('facade-front-lower-0') as THREE.Mesh;
+    const upper = block.getObjectByName('facade-front-upper-0') as THREE.Mesh;
+    const lowerFrame = block.getObjectByName('window-frame-front-lower') as THREE.Mesh;
+    const firstMullion = block.getObjectByName('window-mullion-front-1') as THREE.Mesh;
+    const windowBounds = new THREE.Box3().setFromObject(window);
+    const lowerBounds = new THREE.Box3().setFromObject(lower);
+    const upperBounds = new THREE.Box3().setFromObject(upper);
+    const lowerFrameBounds = new THREE.Box3().setFromObject(lowerFrame);
+    const firstMullionBounds = new THREE.Box3().setFromObject(firstMullion);
+
+    expect(materials.glass.transparent).toBe(false);
+    expect(materials.glass.transmission).toBe(0);
+    expect(windowBounds.intersectsBox(lowerBounds)).toBe(false);
+    expect(windowBounds.intersectsBox(upperBounds)).toBe(false);
+    expect(windowBounds.max.z).toBeLessThan(lowerBounds.max.z);
+    expect(lowerFrame).toBeInstanceOf(THREE.Mesh);
+    expect(lowerFrameBounds.min.z).toBeGreaterThan(lowerBounds.max.z);
+    expect(firstMullion).toBeInstanceOf(THREE.Mesh);
+    expect(lowerFrameBounds.intersectsBox(firstMullionBounds)).toBe(false);
+  });
+
   it('assigns distinct manufactured facade families instead of repeating white and lime everywhere', () => {
     const materials = makeKit();
     const ceramic = createFacilityBlock({
