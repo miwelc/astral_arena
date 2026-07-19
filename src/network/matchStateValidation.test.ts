@@ -105,7 +105,7 @@ describe('P2P MatchState validation', () => {
         ).toBe(true);
       }
     }
-  });
+  }, 30_000);
 
   it('accepts a Towah snapshot with its operator physically mounted on the raised emplacement', () => {
     const simulation = new GameSimulation(

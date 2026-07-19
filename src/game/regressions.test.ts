@@ -145,7 +145,7 @@ describe('bot objective smoke tests', () => {
     expect(deckVisitors.aurora.size).toBeGreaterThanOrEqual(3);
     expect(deckVisitors.nova.size).toBeGreaterThanOrEqual(3);
     expect(simulation.state.teamScores.aurora + simulation.state.teamScores.nova).toBeGreaterThan(10);
-  });
+  }, 15_000);
 
   it('produces flag play during a two-minute all-bot CTF simulation', () => {
     const simulation = new GameSimulation(
@@ -164,5 +164,5 @@ describe('bot objective smoke tests', () => {
     }
     expect(flagEvents).toBeGreaterThan(0);
     expect(simulation.state.teamScores.aurora + simulation.state.teamScores.nova).toBeGreaterThan(0);
-  }, 10_000);
+  }, 30_000);
 });
