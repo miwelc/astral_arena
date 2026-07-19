@@ -656,6 +656,7 @@ const navigationAdjacency = (map: MapDefinition): NavigationEdge[][] => {
 };
 
 const NAVIGATION_ADJACENCY_CACHE = new WeakMap<MapDefinition, NavigationEdge[][]>();
+const NAVIGATION_ROUTE_CACHE = new WeakMap<MapDefinition, Map<number, readonly number[]>>();
 
 const cachedNavigationAdjacency = (map: MapDefinition): NavigationEdge[][] => {
   let adjacency = NAVIGATION_ADJACENCY_CACHE.get(map);
@@ -707,6 +708,27 @@ const shortestNavigationRoute = (
   return route;
 };
 
+const cachedShortestNavigationRoute = (
+  map: MapDefinition,
+  start: number,
+  destination: number,
+): number[] => {
+  let routes = NAVIGATION_ROUTE_CACHE.get(map);
+  if (!routes) {
+    routes = new Map();
+    NAVIGATION_ROUTE_CACHE.set(map, routes);
+  }
+  const key = start * map.waypoints.length + destination;
+  let route = routes.get(key);
+  if (!route) {
+    route = shortestNavigationRoute(map, cachedNavigationAdjacency(map), start, destination);
+    routes.set(key, route);
+  }
+  // Bot memory is part of the mutable simulation snapshot. Keep the cached
+  // canonical route private so reconciliation or a test cannot mutate it.
+  return route.slice();
+};
+
 const closestGraphWaypoint = (
   player: PlayerState,
   map: MapDefinition,
@@ -733,13 +755,8 @@ const traversalBetween = (
   map: MapDefinition,
   from: number,
   to: number,
-): NavigationTraversal => {
-  for (const link of map.waypointLinks ?? []) {
-    if (link.from === from && link.to === to) return link.traversal;
-    if (link.bidirectional && link.from === to && link.to === from) return link.traversal;
-  }
-  return 'walk';
-};
+): NavigationTraversal => cachedNavigationAdjacency(map)[from]
+  ?.find((edge) => edge.to === to)?.traversal ?? 'walk';
 
 const selectGraphWaypoint = (
   player: PlayerState,
@@ -795,7 +812,7 @@ const selectGraphWaypoint = (
   if (routeIsStale) {
     if (start < 0) start = closestGraphWaypoint(player, map, hasLineOfSight);
     if (start < 0) return null;
-    memory.navigationRoute = shortestNavigationRoute(map, cachedNavigationAdjacency(map), start, destination);
+    memory.navigationRoute = cachedShortestNavigationRoute(map, start, destination);
     memory.navigationGoalIndex = destination;
     memory.navigationCursor = memory.navigationRoute[0] === start
       && horizontalDistance(player.position, map.waypoints[start]!) <= 2.2

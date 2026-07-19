@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   BOT_DIFFICULTY_PROFILES,
@@ -9,7 +9,7 @@ import {
   isPlayerRevealedToBotRadar,
   updateBotInputs,
 } from './bots';
-import { UMBRA_STATION } from './map';
+import { CRATER_RIDGE, UMBRA_STATION } from './map';
 import { createDefaultConfig, GameSimulation } from './simulation';
 import type { Difficulty, GameMode, PickupState, PlayerState, Vec3 } from './types';
 import { WEAPONS } from './weapons';
@@ -247,6 +247,7 @@ describe('bot situational awareness and safety', () => {
       { id: 'bot', name: 'Bot', kind: 'bot' },
       { id: 'enemy', name: 'Enemy', kind: 'human' },
     ]);
+    simulation.state.randomState = 0x5eed1234;
     const bot = botPlayer(simulation);
     const enemy = simulation.state.players.enemy!;
     bot.position = { ...simulation.state.tower.center };
@@ -510,5 +511,63 @@ describe('bot navigation on stacked authored maps', () => {
     );
     expect(link?.traversal).toBe('drop');
     expect(bot.input.jump).toBe(false);
+  });
+
+  it('physically completes every authored Crater jump and launch transition', () => {
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(1_700_000_000_000);
+    const failures: string[] = [];
+    const transitions = (CRATER_RIDGE.waypointLinks ?? []).filter((link) =>
+      link.traversal === 'jump' || link.traversal === 'launch',
+    );
+    try {
+      for (const link of transitions) {
+        const simulation = new GameSimulation(
+          createDefaultConfig({
+            mapId: 'crater-ridge',
+            mode: 'capture-the-flag',
+            format: 'squads',
+            difficulty: 'veteran',
+            botFill: false,
+          }),
+          [{ id: 'runner', name: 'Runner', kind: 'bot' }],
+        );
+        simulation.state.phase = 'playing';
+        simulation.state.countdown = 0;
+        simulation.state.pickups.forEach((candidate) => {
+          candidate.available = false;
+          candidate.respawnTimer = 999;
+        });
+        const runner = botPlayer(simulation, 'runner');
+        const from = CRATER_RIDGE.waypoints[link.from]!;
+        const to = CRATER_RIDGE.waypoints[link.to]!;
+        runner.position = { ...from };
+        runner.velocity = { x: 0, y: 0, z: 0 };
+        runner.grounded = true;
+        runner.bot!.decisionTimer = 0;
+        const targetFlag = simulation.state.flags.find((flag) => flag.team !== runner.team)!;
+        targetFlag.status = 'dropped';
+        targetFlag.carrierId = null;
+        targetFlag.position = { ...to };
+        targetFlag.returnTimer = 999;
+
+        let reached = false;
+        for (let tick = 0; tick < 600; tick += 1) {
+          simulation.step(1 / 120);
+          if (
+            Math.hypot(runner.position.x - to.x, runner.position.z - to.z) <= 1.65
+            && Math.abs(runner.position.y - to.y) <= 1.25
+          ) {
+            reached = true;
+            break;
+          }
+        }
+        if (!reached) failures.push(`${link.from}->${link.to} (${link.traversal})`);
+      }
+    } finally {
+      clock.mockRestore();
+    }
+
+    expect(transitions).toHaveLength(14);
+    expect(failures, failures.join('\n')).toEqual([]);
   });
 });

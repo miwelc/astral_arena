@@ -1,4 +1,5 @@
 import { createUmbraStation } from './maps/umbraStation';
+import { createNamedNavigationGraph } from './navigationGraph';
 import type { AabbObstacle, JumpPadZone, MapDefinition, Vec3 } from './types';
 
 export type { JumpPadZone } from './types';
@@ -78,6 +79,276 @@ export const JUMP_PAD_ZONES: readonly JumpPadZone[] = [
     launchVelocity: point(-5.8, 14.2, 0),
   },
 ] as const;
+
+/**
+ * Crater used to expose an unordered bag of waypoints. Bots therefore tested
+ * line of sight against most of the bag whenever a wall hid their objective.
+ * This authored graph follows the actual doors, flanking lanes, raised
+ * terraces and one-way jump-pad arcs, so routes can be calculated once and
+ * retained until the objective changes.
+ */
+const createCraterNavigationGraph = () => {
+  const nodes: Record<string, Vec3> = {
+    // West base, checkpoint and tower approach. Keep this declaration order
+    // stable because bot navigation memory stores the resulting numeric ids.
+    westFlag: point(-43, 0.39, 0),
+    westBaseDoor: point(-39.8, 0.39, 0),
+    westBaseStep: point(-38.2, 0.3, 0),
+    westBaseRamp: point(-36.8, 0.17, 0),
+    westBaseApproach: point(-32, 0.05, 0),
+    westNorthExit: point(-36, 0.05, -14),
+    westSouthExit: point(-36, 0.05, 14),
+    westCheckpointNorth: point(-29, 0.05, -9),
+    westCheckpointSouth: point(-29, 0.05, 9),
+    westCheckpointCenter: point(-24, 0.05, 0),
+    westInnerNorth: point(-18, 0.05, -7),
+    westInnerSouth: point(-18, 0.05, 7),
+    westPadApproach: point(-14.2, 0.05, 0),
+    westPad: point(-12.4, 0.05, 0),
+    towerGroundNorthWest: point(-10, 0.05, -10),
+    towerGroundSouthWest: point(-10, 0.05, 10),
+
+    // Towah deck corners.
+    towerDeckNorthWest: point(-7.4, 6, -6.5),
+    towerDeckSouthWest: point(-7.4, 6, 6.5),
+    towerDeckNorthEast: point(7.4, 6, -6.5),
+    towerDeckSouthEast: point(7.4, 6, 6.5),
+
+    // East tower approach, checkpoint and base.
+    eastPad: point(12.4, 0.05, 0),
+    eastPadApproach: point(14.2, 0.05, 0),
+    eastInnerNorth: point(18, 0.05, -7),
+    eastInnerSouth: point(18, 0.05, 7),
+    eastCheckpointCenter: point(24, 0.05, 0),
+    eastCheckpointNorth: point(29, 0.05, -9),
+    eastCheckpointSouth: point(29, 0.05, 9),
+    eastBaseApproach: point(32, 0.05, 0),
+    eastBaseRamp: point(36.8, 0.17, 0),
+    eastBaseStep: point(38.2, 0.3, 0),
+    eastBaseDoor: point(39.8, 0.39, 0),
+    eastNorthExit: point(36, 0.05, -14),
+    eastSouthExit: point(36, 0.05, 14),
+    eastFlag: point(43, 0.39, 0),
+
+    // North observatory and relay circuit.
+    outerNorthWest: point(-43, 0.05, -25),
+    northBackWest: point(-34, 0.05, -35),
+    northOverlookWest: point(-30, 1.45, -29),
+    northStepWest: point(-17, 0.65, -30),
+    northApproachWest: point(-13, 0.05, -27),
+    relayApproachWest: point(-8.8, 0.05, -28),
+    relayDoorWest: point(-2, 0.05, -28),
+    relayInterior: point(0, 0.21, -32.5),
+    relayDoorEast: point(2, 0.05, -28),
+    relayApproachEast: point(8.8, 0.05, -28),
+    northApproachEast: point(13, 0.05, -27),
+    northStepEast: point(17, 0.65, -30),
+    northOverlookEast: point(30, 1.45, -29),
+    northBackEast: point(34, 0.05, -35),
+    outerNorthEast: point(43, 0.05, -25),
+
+    // South hydroponics and greenhouse circuit.
+    outerSouthWest: point(-43, 0.05, 25),
+    southBackWest: point(-34, 0.05, 35),
+    southPlanterWest: point(-30, 1.25, 29),
+    southStepWest: point(-18, 0.6, 30),
+    southApproachWest: point(-14, 0.05, 25),
+    greenhouseApproachWest: point(-6, 0.05, 26),
+    greenhouseDoor: point(0, 0.05, 26),
+    greenhouseInterior: point(0, 0.2, 32.2),
+    greenhouseApproachEast: point(6, 0.05, 26),
+    southApproachEast: point(14, 0.05, 25),
+    southStepEast: point(18, 0.6, 30),
+    southPlanterEast: point(30, 1.25, 29),
+    southBackEast: point(34, 0.05, 35),
+    outerSouthEast: point(43, 0.05, 25),
+
+    // Added junctions keep every graph edge physically local. In particular,
+    // routes no longer cut through the tower core, relay or greenhouse backs.
+    towerGroundNorth: point(0, 0.05, -11),
+    towerGroundSouth: point(0, 0.05, 11),
+    towerDeckWest: point(-6.2, 6, 0),
+    towerDeckNorth: point(0, 6, -6.2),
+    towerDeckEast: point(6.2, 6, 0),
+    towerDeckSouth: point(0, 6, 6.2),
+    northBackInnerWest: point(-15.5, 0.05, -35.5),
+    relayBackWest: point(-10, 0.05, -39),
+    relayBackCenter: point(0, 0.05, -39),
+    relayBackEast: point(10, 0.05, -39),
+    northBackInnerEast: point(15.5, 0.05, -35.5),
+    southBackInnerWest: point(-17, 0.05, 36.7),
+    greenhouseBackWest: point(-11, 0.05, 38),
+    greenhouseBackCenter: point(0, 0.05, 38),
+    greenhouseBackEast: point(11, 0.05, 38),
+    southBackInnerEast: point(17, 0.05, 36.7),
+    northInnerWestNear: point(-9.5, 0.05, -17),
+    northInnerWestFar: point(-9, 0.05, -25),
+    northInnerEastFar: point(9, 0.05, -25),
+    northInnerEastNear: point(9.5, 0.05, -17),
+    northOverlookWestBypassOuter: point(-29, 1.45, -27.5),
+    northOverlookWestBypassInner: point(-23.5, 1.45, -27.5),
+    northOverlookEastBypassInner: point(23.5, 1.45, -27.5),
+    northOverlookEastBypassOuter: point(29, 1.45, -27.5),
+    southPlanterWestBypassOuter: point(-29, 1.25, 33.4),
+    southPlanterWestBypassInner: point(-23.5, 1.25, 33.4),
+    southPlanterEastBypassInner: point(23.5, 1.25, 33.4),
+    southPlanterEastBypassOuter: point(29, 1.25, 33.4),
+    towerGroundNorthEast: point(10, 0.05, -10),
+    towerGroundSouthEast: point(10, 0.05, 10),
+  };
+
+  const walkEdges = [
+    // West base to the two safe tower flanks.
+    ['westFlag', 'westBaseDoor'],
+    ['westBaseDoor', 'westBaseStep'],
+    ['westBaseStep', 'westBaseRamp'],
+    ['westBaseRamp', 'westBaseApproach'],
+    ['westBaseApproach', 'westCheckpointNorth'],
+    ['westBaseApproach', 'westCheckpointSouth'],
+    ['westBaseApproach', 'westCheckpointCenter'],
+    ['westNorthExit', 'westCheckpointNorth'],
+    ['westSouthExit', 'westCheckpointSouth'],
+    ['westCheckpointSouth', 'westCheckpointCenter'],
+    ['westCheckpointNorth', 'westInnerNorth'],
+    ['westCheckpointSouth', 'westInnerSouth'],
+    ['westCheckpointCenter', 'westPadApproach'],
+    ['westInnerNorth', 'westPadApproach'],
+    ['westInnerSouth', 'westPadApproach'],
+    ['westInnerNorth', 'towerGroundNorthWest'],
+    ['westInnerSouth', 'towerGroundSouthWest'],
+
+    // Mirrored east route.
+    ['eastPadApproach', 'eastInnerNorth'],
+    ['eastPadApproach', 'eastInnerSouth'],
+    ['eastPadApproach', 'eastCheckpointCenter'],
+    ['eastInnerNorth', 'towerGroundNorthEast'],
+    ['eastInnerSouth', 'towerGroundSouthEast'],
+    ['eastInnerNorth', 'eastCheckpointNorth'],
+    ['eastInnerSouth', 'eastCheckpointSouth'],
+    ['eastCheckpointCenter', 'eastCheckpointSouth'],
+    ['eastCheckpointCenter', 'eastBaseApproach'],
+    ['eastCheckpointNorth', 'eastBaseApproach'],
+    ['eastCheckpointSouth', 'eastBaseApproach'],
+    ['eastNorthExit', 'eastCheckpointNorth'],
+    ['eastSouthExit', 'eastCheckpointSouth'],
+    ['eastBaseApproach', 'eastBaseRamp'],
+    ['eastBaseRamp', 'eastBaseStep'],
+    ['eastBaseStep', 'eastBaseDoor'],
+    ['eastBaseDoor', 'eastFlag'],
+
+    // Ground-level paths around (never through) the tower core.
+    ['towerGroundNorthWest', 'towerGroundNorth'],
+    ['towerGroundNorth', 'towerGroundNorthEast'],
+    ['towerGroundSouthWest', 'towerGroundSouth'],
+    ['towerGroundSouth', 'towerGroundSouthEast'],
+    ['towerGroundNorth', 'northInnerWestNear'],
+    ['towerGroundNorth', 'northInnerEastNear'],
+    ['northInnerWestNear', 'northInnerWestFar'],
+    ['northInnerWestFar', 'relayApproachWest'],
+    ['northInnerWestFar', 'northApproachWest'],
+    ['northInnerEastNear', 'northInnerEastFar'],
+    ['northInnerEastFar', 'relayApproachEast'],
+    ['northInnerEastFar', 'northApproachEast'],
+    ['towerGroundSouth', 'greenhouseDoor'],
+
+    // North relay interior and the safe exterior route behind it.
+    ['westNorthExit', 'outerNorthWest'],
+    ['outerNorthWest', 'northBackWest'],
+    ['northBackWest', 'northBackInnerWest'],
+    ['northBackInnerWest', 'relayBackWest'],
+    ['relayBackWest', 'relayBackCenter'],
+    ['relayBackCenter', 'relayBackEast'],
+    ['relayBackEast', 'northBackInnerEast'],
+    ['northBackInnerEast', 'northBackEast'],
+    ['northBackEast', 'outerNorthEast'],
+    ['outerNorthEast', 'eastNorthExit'],
+    ['northApproachWest', 'relayApproachWest'],
+    ['relayApproachWest', 'relayDoorWest'],
+    ['relayDoorWest', 'relayInterior'],
+    ['relayInterior', 'relayDoorEast'],
+    ['relayDoorEast', 'relayApproachEast'],
+    ['relayApproachEast', 'northApproachEast'],
+    ['northOverlookWest', 'northOverlookWestBypassOuter'],
+    ['northOverlookWestBypassOuter', 'northOverlookWestBypassInner'],
+    ['northOverlookEastBypassInner', 'northOverlookEastBypassOuter'],
+    ['northOverlookEastBypassOuter', 'northOverlookEast'],
+
+    // South greenhouse interior and the exterior service loop.
+    ['westSouthExit', 'outerSouthWest'],
+    ['outerSouthWest', 'southBackWest'],
+    ['southBackWest', 'southBackInnerWest'],
+    ['southBackInnerWest', 'greenhouseBackWest'],
+    ['greenhouseBackWest', 'greenhouseBackCenter'],
+    ['greenhouseBackCenter', 'greenhouseBackEast'],
+    ['greenhouseBackEast', 'southBackInnerEast'],
+    ['southBackInnerEast', 'southBackEast'],
+    ['southBackEast', 'outerSouthEast'],
+    ['outerSouthEast', 'eastSouthExit'],
+    ['southApproachWest', 'greenhouseApproachWest'],
+    ['greenhouseApproachWest', 'greenhouseDoor'],
+    ['greenhouseDoor', 'greenhouseInterior'],
+    ['greenhouseDoor', 'greenhouseApproachEast'],
+    ['greenhouseApproachEast', 'southApproachEast'],
+    ['southPlanterWest', 'southPlanterWestBypassOuter'],
+    ['southPlanterWestBypassOuter', 'southPlanterWestBypassInner'],
+    ['southPlanterEastBypassInner', 'southPlanterEastBypassOuter'],
+    ['southPlanterEastBypassOuter', 'southPlanterEast'],
+
+    // Raised Towah deck ring.
+    ['towerDeckWest', 'towerDeckNorthWest'],
+    ['towerDeckNorthWest', 'towerDeckNorth'],
+    ['towerDeckNorth', 'towerDeckNorthEast'],
+    ['towerDeckNorthEast', 'towerDeckEast'],
+    ['towerDeckEast', 'towerDeckSouthEast'],
+    ['towerDeckSouthEast', 'towerDeckSouth'],
+    ['towerDeckSouth', 'towerDeckSouthWest'],
+    ['towerDeckSouthWest', 'towerDeckWest'],
+  ] as const;
+
+  const directedEdges = [
+    // A pad is entered from the ground and left only through its physical
+    // launch arc. Directed walk edges prevent a deck exit from selecting the
+    // pad and being immediately launched back up.
+    ['westPadApproach', 'westPad', 'walk'],
+    ['towerGroundNorthWest', 'westPad', 'walk'],
+    ['towerGroundSouthWest', 'westPad', 'walk'],
+    ['eastPadApproach', 'eastPad', 'walk'],
+    ['towerGroundNorthEast', 'eastPad', 'walk'],
+    ['towerGroundSouthEast', 'eastPad', 'walk'],
+
+    // Physical grav-lift arcs and intentional jumps over the deck rails.
+    ['westPad', 'towerDeckWest', 'launch'],
+    ['eastPad', 'towerDeckEast', 'launch'],
+    ['towerDeckNorthWest', 'westInnerNorth', 'jump'],
+    ['towerDeckSouthWest', 'westInnerSouth', 'jump'],
+    ['towerDeckNorthEast', 'eastInnerNorth', 'jump'],
+    ['towerDeckSouthEast', 'eastInnerSouth', 'jump'],
+
+    // The observatory and planter ledges need a deliberate jump going up and
+    // a non-jumping drop going down; treating them as bidirectional walk edges
+    // made bots repeatedly shoulder the vertical face.
+    ['northApproachWest', 'northStepWest', 'jump'],
+    ['northStepWest', 'northApproachWest', 'drop'],
+    ['northStepWest', 'northOverlookWestBypassInner', 'jump'],
+    ['northOverlookWestBypassInner', 'northStepWest', 'drop'],
+    ['northApproachEast', 'northStepEast', 'jump'],
+    ['northStepEast', 'northApproachEast', 'drop'],
+    ['northStepEast', 'northOverlookEastBypassInner', 'jump'],
+    ['northOverlookEastBypassInner', 'northStepEast', 'drop'],
+    ['southApproachWest', 'southStepWest', 'jump'],
+    ['southStepWest', 'southApproachWest', 'drop'],
+    ['southStepWest', 'southPlanterWestBypassInner', 'jump'],
+    ['southPlanterWestBypassInner', 'southStepWest', 'drop'],
+    ['southApproachEast', 'southStepEast', 'jump'],
+    ['southStepEast', 'southApproachEast', 'drop'],
+    ['southStepEast', 'southPlanterEastBypassInner', 'jump'],
+    ['southPlanterEastBypassInner', 'southStepEast', 'drop'],
+  ] as const;
+
+  return createNamedNavigationGraph(nodes, walkEdges, directedEdges);
+};
+
+const CRATER_NAVIGATION = createCraterNavigationGraph();
 
 export const CRATER_RIDGE: MapDefinition = {
   id: 'crater-ridge',
@@ -315,29 +586,8 @@ export const CRATER_RIDGE: MapDefinition = {
     { position: point(-14, 0.05, 5), yaw: -Math.PI / 2, team: 'neutral' },
     { position: point(14, 0.05, -5), yaw: Math.PI / 2, team: 'neutral' },
   ],
-  waypoints: [
-    // Base exits and the direct lane.
-    point(-43, 0.39, 0), point(-39.8, 0.39, 0), point(-38.2, 0.3, 0), point(-36.8, 0.17, 0), point(-32, 0.05, 0),
-    point(-36, 0.05, -14), point(-36, 0.05, 14),
-    point(-29, 0.05, -9), point(-29, 0.05, 9), point(-24, 1.3, 0),
-    point(-18, 0.05, -7), point(-18, 0.05, 7), point(-14.2, 0.05, 0),
-    point(-12.4, 0.05, 0), point(-10, 0.05, -10), point(-10, 0.05, 10),
-    // Central deck and its four escape corners.
-    point(-7.4, 6, -6.5), point(-7.4, 6, 6.5), point(7.4, 6, -6.5), point(7.4, 6, 6.5),
-    point(12.4, 0.05, 0), point(14.2, 0.05, 0), point(18, 0.05, -7), point(18, 0.05, 7),
-    point(24, 1.3, 0), point(29, 0.05, -9), point(29, 0.05, 9),
-    point(32, 0.05, 0), point(36.8, 0.17, 0), point(38.2, 0.3, 0), point(39.8, 0.39, 0),
-    point(36, 0.05, -14), point(36, 0.05, 14), point(43, 0.39, 0),
-    // North observatory circuit.
-    point(-43, 0.05, -25), point(-34, 0.05, -35), point(-30, 1.45, -29), point(-17, 0.65, -30),
-    point(-13, 0.05, -27), point(-8.8, 0.05, -28), point(-2, 0.05, -28), point(0, 0.21, -32.5),
-    point(2, 0.05, -28), point(8.8, 0.05, -28),
-    point(13, 0.05, -27), point(17, 0.65, -30), point(30, 1.45, -29), point(34, 0.05, -35), point(43, 0.05, -25),
-    // South hydroponics circuit.
-    point(-43, 0.05, 25), point(-34, 0.05, 35), point(-30, 1.25, 29), point(-18, 0.6, 30),
-    point(-14, 0.05, 25), point(-6, 0.05, 26), point(0, 0.05, 26), point(0, 0.2, 32.2), point(6, 0.05, 26),
-    point(14, 0.05, 25), point(18, 0.6, 30), point(30, 1.25, 29), point(34, 0.05, 35), point(43, 0.05, 25),
-  ],
+  waypoints: CRATER_NAVIGATION.waypoints,
+  waypointLinks: CRATER_NAVIGATION.links,
   jumpPads: [...JUMP_PAD_ZONES],
   pickups: [
     { id: 'pickup-sniper', kind: 'weapon', weaponId: 'sniper', position: point(0, 6.38, -5.8), respawnSeconds: 50 },

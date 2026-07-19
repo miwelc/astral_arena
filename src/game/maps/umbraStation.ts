@@ -1,4 +1,5 @@
-import type { AabbObstacle, JumpPadZone, MapDefinition, Vec3, WaypointLink } from '../types';
+import { createNamedNavigationGraph } from '../navigationGraph';
+import type { AabbObstacle, JumpPadZone, MapDefinition, Vec3 } from '../types';
 
 const box = (
   id: string,
@@ -79,18 +80,13 @@ interface TurretLayoutContract {
   platformTopOffset: number;
 }
 
-interface NavigationGraph {
-  waypoints: Vec3[];
-  links: WaypointLink[];
-}
-
 /**
  * A deliberately authored navigation graph. The arena has three stacked
  * combat bands, so relying on sight alone would make a bot run into the floor
  * below a visible pickup. Named edges encode doors, stair flights, bridges and
  * the two physical jump-pad arcs.
  */
-const createNavigationGraph = (): NavigationGraph => {
+const createUmbraNavigationGraph = () => {
   const nodes: Record<string, Vec3> = {
     westFlag: point(-32.2, 0.37, 0),
     westDoor: point(-25.2, 0.05, 0),
@@ -171,17 +167,17 @@ const createNavigationGraph = (): NavigationGraph => {
     southGroundInside: point(0, 0.23, 15),
     southGroundEastCorner: point(8.8, 0.05, 12.2),
   };
-  const names = Object.keys(nodes);
-  const index = new Map(names.map((name, nodeIndex) => [name, nodeIndex]));
   const edges: Array<readonly [string, string]> = [
     ['westFlag', 'westDoor'],
     ['westDoor', 'westNorthGround'], ['westDoor', 'westSouthGround'], ['westDoor', 'westMidGround'],
     ['westNorthGround', 'northWestGround'], ['westNorthGround', 'westBaseStairBottom'], ['westSouthGround', 'southWestGround'],
     ['westMidGround', 'westPad'], ['westMidGround', 'northWestGround'], ['westMidGround', 'southWestGround'],
     ['northWestGround', 'northUnder'], ['northUnder', 'northEastGround'],
+    ['northEastGround', 'eastNorthGround'],
     ['southWestGround', 'southGroundWestCorner'], ['southGroundWestCorner', 'southGroundFront'],
     ['southGroundFront', 'southGroundInside'], ['southGroundInside', 'southUnder'],
     ['southGroundFront', 'southGroundEastCorner'], ['southGroundEastCorner', 'southEastGround'],
+    ['southEastGround', 'eastSouthGround'],
     ['northEastGround', 'eastMidGround'], ['southEastGround', 'eastMidGround'],
     ['eastMidGround', 'eastPad'], ['eastMidGround', 'eastDoor'],
     ['eastDoor', 'eastNorthGround'], ['eastDoor', 'eastSouthGround'], ['eastDoor', 'eastFlag'],
@@ -217,29 +213,13 @@ const createNavigationGraph = (): NavigationGraph => {
     ['towerWest', 'towerNorth'], ['towerNorth', 'towerEast'],
     ['towerEast', 'towerSouth'], ['towerSouth', 'towerWest'],
   ];
-  const directedEdges: Array<readonly [string, string, WaypointLink['traversal']]> = [
+  const directedEdges = [
     ['westPad', 'towerWest', 'launch'],
     ['towerWest', 'westPad', 'drop'],
     ['eastPad', 'towerEast', 'launch'],
     ['towerEast', 'eastPad', 'drop'],
-  ];
-  return {
-    waypoints: names.map((name) => nodes[name]!),
-    links: [
-      ...edges.map(([from, to]): WaypointLink => ({
-        from: index.get(from)!,
-        to: index.get(to)!,
-        traversal: 'walk',
-        bidirectional: true,
-      })),
-      ...directedEdges.map(([from, to, traversal]): WaypointLink => ({
-        from: index.get(from)!,
-        to: index.get(to)!,
-        traversal,
-        bidirectional: false,
-      })),
-    ],
-  };
+  ] as const;
+  return createNamedNavigationGraph(nodes, edges, directedEdges);
 };
 
 export const UMBRA_STATION_JUMP_PADS: JumpPadZone[] = [
@@ -264,7 +244,7 @@ export const UMBRA_STATION_JUMP_PADS: JumpPadZone[] = [
  * flag carrier. The layout and fiction are original to Astral Arena.
  */
 export const createUmbraStation = (turretLayout: TurretLayoutContract): MapDefinition => {
-  const navigation = createNavigationGraph();
+  const navigation = createUmbraNavigationGraph();
   const towerCenterY = 6.05;
   return {
     id: 'umbra-station',

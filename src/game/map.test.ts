@@ -276,6 +276,118 @@ const simulateGroundTraversal = (
   return { reached: false, final: player.position, hitWallTicks };
 };
 
+interface NavigationArc {
+  from: number;
+  to: number;
+  traversal: string;
+}
+
+const navigationArcs = (map: MapDefinition): NavigationArc[] => (map.waypointLinks ?? [])
+  .flatMap((link) => link.bidirectional
+    ? [
+        { from: link.from, to: link.to, traversal: link.traversal },
+        { from: link.to, to: link.from, traversal: link.traversal },
+      ]
+    : [{ from: link.from, to: link.to, traversal: link.traversal }]);
+
+const navigationGraphFailures = (map: MapDefinition): string[] => {
+  const failures: string[] = [];
+  const seenArcs = new Set<string>();
+  for (const arc of navigationArcs(map)) {
+    if (!map.waypoints[arc.from] || !map.waypoints[arc.to]) {
+      failures.push(`invalid ${arc.from}->${arc.to}`);
+      continue;
+    }
+    if (arc.from === arc.to) failures.push(`self ${arc.from}->${arc.to}`);
+    const key = `${arc.from}->${arc.to}`;
+    if (seenArcs.has(key)) failures.push(`duplicate ${key}`);
+    seenArcs.add(key);
+  }
+  for (let start = 0; start < map.waypoints.length; start += 1) {
+    const reachable = reachableWaypointIndexes(map, start).size;
+    if (reachable !== map.waypoints.length) failures.push(`reachable from ${start}: ${reachable}`);
+  }
+  return failures;
+};
+
+const mirroredNavigationFailures = (
+  map: MapDefinition,
+  requireMirroredNodes: boolean,
+): string[] => {
+  const nodeByPosition = new Map(map.waypoints.map((node, index) => [
+    `${node.x}:${node.y}:${node.z}`,
+    index,
+  ]));
+  const arcs = navigationArcs(map);
+  const arcKeys = new Set(arcs.map((arc) => `${arc.from}->${arc.to}:${arc.traversal}`));
+  const failures: string[] = [];
+  for (const arc of arcs) {
+    const from = map.waypoints[arc.from]!;
+    const to = map.waypoints[arc.to]!;
+    const mirroredFrom = nodeByPosition.get(`${from.x === 0 ? 0 : -from.x}:${from.y}:${from.z}`);
+    const mirroredTo = nodeByPosition.get(`${to.x === 0 ? 0 : -to.x}:${to.y}:${to.z}`);
+    if (mirroredFrom === undefined || mirroredTo === undefined) {
+      if (requireMirroredNodes) failures.push(`missing mirror node for ${arc.from}->${arc.to}`);
+      continue;
+    }
+    const mirrorKey = `${mirroredFrom}->${mirroredTo}:${arc.traversal}`;
+    if (!arcKeys.has(mirrorKey)) failures.push(`missing mirror arc ${mirrorKey}`);
+  }
+  return failures;
+};
+
+const groundTraversalFailures = (map: MapDefinition): string[] => {
+  const failures: string[] = [];
+  for (const arc of navigationArcs(map)) {
+    if (arc.traversal !== 'walk' && arc.traversal !== 'drop') continue;
+    const result = simulateGroundTraversal(map, map.waypoints[arc.from]!, map.waypoints[arc.to]!);
+    if (!result.reached) {
+      failures.push(
+        `${arc.from}->${arc.to} (${arc.traversal}) final=${JSON.stringify(result.final)} walls=${result.hitWallTicks}`,
+      );
+    }
+  }
+  return failures;
+};
+
+describe('Authored map navigation', () => {
+  it.each([
+    ['Crater Ridge', CRATER_RIDGE],
+    ['Umbra Station', UMBRA_STATION],
+  ] as const)('keeps every %s waypoint supported and capsule-safe', (_name, map) => {
+    for (const [index, position] of map.waypoints.entries()) {
+      expect(isInMapBounds(position, map), `waypoint-${index} bounds`).toBe(true);
+      expect(pointInsideObstacle(position, map), `waypoint-${index} solid`).toBe(false);
+      expect(hasNearbySupport(position, map, 0.12), `waypoint-${index} support ${JSON.stringify(position)}`).toBe(true);
+      expect(canOccupyCapsule(position, 0.48, 1.8, map), `waypoint-${index} capsule ${JSON.stringify(position)}`).toBe(true);
+    }
+  });
+
+  it.each([
+    ['Crater Ridge', CRATER_RIDGE],
+    ['Umbra Station', UMBRA_STATION],
+  ] as const)('gives %s a strongly connected, duplicate-free directed graph', (_name, map) => {
+    const failures = navigationGraphFailures(map);
+    expect(failures, failures.join('\n')).toEqual([]);
+  });
+
+  it.each([
+    ['Crater Ridge', CRATER_RIDGE, true],
+    ['Umbra Station', UMBRA_STATION, false],
+  ] as const)('keeps all mirrorable %s navigation arcs mirrored across the team axis', (_name, map, requireMirroredNodes) => {
+    const failures = mirroredNavigationFailures(map, requireMirroredNodes);
+    expect(failures, failures.join('\n')).toEqual([]);
+  });
+
+  it.each([
+    ['Crater Ridge', CRATER_RIDGE],
+    ['Umbra Station', UMBRA_STATION],
+  ] as const)('makes every %s walk and drop arc physically traversable', (_name, map) => {
+    const failures = groundTraversalFailures(map);
+    expect(failures, failures.join('\n')).toEqual([]);
+  });
+});
+
 describe('Umbra Station vertical competitive layout', () => {
   it('is a registered compact three-level arena with coherent named structures', () => {
     expect(MAPS['umbra-station']).toBe(UMBRA_STATION);
@@ -307,7 +419,6 @@ describe('Umbra Station vertical competitive layout', () => {
     const points = [
       ...UMBRA_STATION.spawns.map((spawn) => ({ label: `spawn-${spawn.team}`, position: spawn.position, hover: 0.12 })),
       ...UMBRA_STATION.pickups.map((pickup) => ({ label: pickup.id, position: pickup.position, hover: 0.48 })),
-      ...UMBRA_STATION.waypoints.map((position, index) => ({ label: `waypoint-${index}`, position, hover: 0.12 })),
       ...Object.entries(UMBRA_STATION.flagBases).map(([team, position]) => ({ label: `flag-${team}`, position, hover: 0.48 })),
     ];
     for (const { label, position, hover } of points) {
@@ -318,43 +429,14 @@ describe('Umbra Station vertical competitive layout', () => {
     }
   });
 
-  it('uses a valid directed graph that connects every authored floor and preserves launch/drop semantics', () => {
+  it('preserves launch/drop semantics for both grav lifts', () => {
     expect(UMBRA_STATION.waypointLinks?.length).toBeGreaterThan(UMBRA_STATION.waypoints.length);
-    for (const link of UMBRA_STATION.waypointLinks ?? []) {
-      expect(Number.isInteger(link.from)).toBe(true);
-      expect(Number.isInteger(link.to)).toBe(true);
-      expect(UMBRA_STATION.waypoints[link.from], `link from ${link.from}`).toBeDefined();
-      expect(UMBRA_STATION.waypoints[link.to], `link to ${link.to}`).toBeDefined();
-      expect(['walk', 'jump', 'drop', 'launch']).toContain(link.traversal);
-    }
-    expect(reachableWaypointIndexes(UMBRA_STATION, 0).size).toBe(UMBRA_STATION.waypoints.length);
     const launches = UMBRA_STATION.waypointLinks?.filter((link) => link.traversal === 'launch') ?? [];
     const drops = UMBRA_STATION.waypointLinks?.filter((link) => link.traversal === 'drop') ?? [];
     expect(launches).toHaveLength(UMBRA_STATION.jumpPads.length);
     expect(drops).toHaveLength(UMBRA_STATION.jumpPads.length);
     expect(launches.every((link) => !link.bidirectional)).toBe(true);
     expect(drops.every((link) => !link.bidirectional)).toBe(true);
-  });
-
-  it('makes every authored walk and drop edge physically traversable by a player capsule', () => {
-    const failures: string[] = [];
-    for (const link of UMBRA_STATION.waypointLinks ?? []) {
-      if (link.traversal !== 'walk' && link.traversal !== 'drop') continue;
-      const directions = link.bidirectional
-        ? [[link.from, link.to], [link.to, link.from]] as const
-        : [[link.from, link.to]] as const;
-      for (const [fromIndex, toIndex] of directions) {
-        const from = UMBRA_STATION.waypoints[fromIndex]!;
-        const to = UMBRA_STATION.waypoints[toIndex]!;
-        const result = simulateGroundTraversal(UMBRA_STATION, from, to);
-        if (!result.reached) {
-          failures.push(
-            `${fromIndex}->${toIndex} (${link.traversal}) final=${JSON.stringify(result.final)} walls=${result.hitWallTicks}`,
-          );
-        }
-      }
-    }
-    expect(failures, failures.join('\n')).toEqual([]);
   });
 
   it('lets a standard movement capsule climb the exterior base stair onto the upper ring', () => {
