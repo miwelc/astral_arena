@@ -11,7 +11,14 @@ const overlapsVertical = (feetY: number, height: number, obstacle: AabbObstacle)
   feetY < obstacle.max.y - 0.02 && feetY + height > obstacle.min.y + 0.02;
 
 const CONTACT_EPSILON = 0.0001;
+const MAX_AUTO_STEP_HEIGHT = 0.42;
 type HorizontalAxis = 'x' | 'z';
+
+export const COMBAT_HITBOX_TUNING = Object.freeze({
+  pelvisRadiusPadding: 0.045,
+  torsoRadiusPadding: 0.09,
+  headRadiusScale: 0.74,
+});
 
 const overlapsExpandedAxis = (
   value: number,
@@ -21,6 +28,91 @@ const overlapsExpandedAxis = (
 ): boolean =>
   value > obstacle.min[axis] - radius + CONTACT_EPSILON
   && value < obstacle.max[axis] + radius - CONTACT_EPSILON;
+
+const segmentIntersectsExpandedFootprint = (
+  start: Vec3,
+  end: Vec3,
+  obstacle: AabbObstacle,
+  radius: number,
+): boolean => {
+  let near = 0;
+  let far = 1;
+  for (const axis of ['x', 'z'] as const) {
+    const delta = end[axis] - start[axis];
+    const minimum = obstacle.min[axis] - radius;
+    const maximum = obstacle.max[axis] + radius;
+    if (Math.abs(delta) < EPSILON) {
+      if (start[axis] < minimum || start[axis] > maximum) return false;
+      continue;
+    }
+    const first = (minimum - start[axis]) / delta;
+    const second = (maximum - start[axis]) / delta;
+    near = Math.max(near, Math.min(first, second));
+    far = Math.min(far, Math.max(first, second));
+    if (near > far) return false;
+  }
+  return far >= 0 && near <= 1;
+};
+
+const hasAutoStepHeadroom = (
+  start: Vec3,
+  target: Vec3,
+  feetY: number,
+  player: Pick<PlayerState, 'height' | 'radius'>,
+  map: MapDefinition,
+  supportId: string,
+): boolean => {
+  if (feetY + player.height > map.bounds.ceilingY - CONTACT_EPSILON) return false;
+  for (const obstacle of map.obstacles) {
+    if (obstacle.id === supportId || !overlapsVertical(feetY, player.height, obstacle)) continue;
+    if (segmentIntersectsExpandedFootprint(start, target, obstacle, player.radius)) return false;
+  }
+  return true;
+};
+
+interface AutoStepResult {
+  height: number;
+  supportId: string;
+}
+
+/**
+ * Finds a shallow walkable platform under the intended horizontal endpoint.
+ * Only platform geometry participates, so low kerbs and stair treads feel
+ * continuous without turning crates, rails, or combat cover into climb aids.
+ */
+const autoStepHeight = (
+  position: Vec3,
+  velocity: Vec3,
+  player: Pick<PlayerState, 'height' | 'radius' | 'grounded'>,
+  map: MapDefinition,
+  dt: number,
+): AutoStepResult | null => {
+  if (!player.grounded && velocity.y > 0) return null;
+  const target = {
+    x: clamp(position.x + velocity.x * dt, map.bounds.minX + player.radius, map.bounds.maxX - player.radius),
+    y: position.y,
+    z: clamp(position.z + velocity.z * dt, map.bounds.minZ + player.radius, map.bounds.maxZ - player.radius),
+  };
+  if (Math.hypot(target.x - position.x, target.z - position.z) < EPSILON) return null;
+
+  const candidates = map.obstacles
+    .filter((obstacle) => {
+      if (obstacle.kind !== 'platform') return false;
+      const step = obstacle.max.y - position.y;
+      if (step <= 0.02 || step > MAX_AUTO_STEP_HEIGHT + CONTACT_EPSILON) return false;
+      if (!overlapsVertical(position.y, player.height, obstacle)) return false;
+      if (!insideHorizontal(target, obstacle, player.radius)) return false;
+      return segmentIntersectsExpandedFootprint(position, target, obstacle, player.radius);
+    })
+    .sort((left, right) => right.max.y - left.max.y);
+
+  for (const candidate of candidates) {
+    if (hasAutoStepHeadroom(position, target, candidate.max.y, player, map, candidate.id)) {
+      return { height: candidate.max.y, supportId: candidate.id };
+    }
+  }
+  return null;
+};
 
 /**
  * Sweeps one horizontal axis while treating exact surface contact as free for
@@ -102,14 +194,17 @@ export const moveCapsule = (
   map: MapDefinition,
   dt: number,
 ): MovementResult => {
-  const previous = { ...player.position };
   const position = { ...player.position };
   const velocity = { ...player.velocity };
   let hitWall = false;
 
+  const autoStep = autoStepHeight(position, velocity, player, map, dt);
+  if (autoStep) position.y = autoStep.height;
+
   hitWall = sweepHorizontalAxis(position, velocity, player, map, dt, 'x') || hitWall;
   hitWall = sweepHorizontalAxis(position, velocity, player, map, dt, 'z') || hitWall;
 
+  const verticalStartY = position.y;
   const nextY = position.y + velocity.y * dt;
   let resolvedY = nextY;
   let grounded = false;
@@ -117,9 +212,12 @@ export const moveCapsule = (
   if (velocity.y <= 0) {
     let floor = map.bounds.floorY;
     for (const obstacle of map.obstacles) {
-      if (!insideHorizontal(position, obstacle, Math.max(0, player.radius - 0.08))) continue;
+      const supportMargin = obstacle.id === autoStep?.supportId
+        ? player.radius
+        : Math.max(0, player.radius - 0.08);
+      if (!insideHorizontal(position, obstacle, supportMargin)) continue;
       const top = obstacle.max.y;
-      if (previous.y >= top - 0.08 && nextY <= top + 0.08 && top > floor) floor = top;
+      if (verticalStartY >= top - 0.08 && nextY <= top + 0.08 && top > floor) floor = top;
     }
     if (resolvedY <= floor) {
       resolvedY = floor;
@@ -129,7 +227,7 @@ export const moveCapsule = (
   } else {
     for (const obstacle of map.obstacles) {
       if (!insideHorizontal(position, obstacle, player.radius * 0.75)) continue;
-      const previousHead = previous.y + player.height;
+      const previousHead = verticalStartY + player.height;
       const nextHead = nextY + player.height;
       if (previousHead <= obstacle.min.y && nextHead >= obstacle.min.y) {
         resolvedY = obstacle.min.y - player.height;
@@ -195,15 +293,49 @@ export const raycastWorld = (
 
   for (const player of players) {
     if (!player.alive || player.id === ignoredPlayerId) continue;
-    const bodyCenter = { x: player.position.x, y: player.position.y + player.height * 0.47, z: player.position.z };
+    // The rendered astronaut is wider than the physical movement capsule at
+    // the armour plates and is made of several readable target zones. Two
+    // overlapping body spheres cover legs/pelvis and torso without inflating
+    // the player's world collision radius, while the helmet remains a distinct
+    // (and deliberately smaller) precision zone.
+    const pelvisCenter = { x: player.position.x, y: player.position.y + player.height * 0.3, z: player.position.z };
+    const torsoCenter = { x: player.position.x, y: player.position.y + player.height * 0.58, z: player.position.z };
     const headCenter = { x: player.position.x, y: player.position.y + player.height * 0.86, z: player.position.z };
-    const bodyDistance = raySphere(origin, direction, bodyCenter, player.radius * 1.02);
-    const headDistance = raySphere(origin, direction, headCenter, player.radius * 0.58);
+    const pelvisDistance = raySphere(
+      origin,
+      direction,
+      pelvisCenter,
+      player.radius + COMBAT_HITBOX_TUNING.pelvisRadiusPadding,
+    );
+    const torsoDistance = raySphere(
+      origin,
+      direction,
+      torsoCenter,
+      player.radius + COMBAT_HITBOX_TUNING.torsoRadiusPadding,
+    );
+    const bodyDistances = [pelvisDistance, torsoDistance].filter((value): value is number => value !== null);
+    const bodyDistance = bodyDistances.length > 0 ? Math.min(...bodyDistances) : null;
+    const headDistance = raySphere(
+      origin,
+      direction,
+      headCenter,
+      player.radius * COMBAT_HITBOX_TUNING.headRadiusScale,
+    );
     if (bodyDistance !== null) {
-      consider({ distance: bodyDistance, point: add(origin, scale(direction, bodyDistance)), playerId: player.id, headshot: false });
+      consider({
+        distance: bodyDistance,
+        point: add(origin, scale(direction, bodyDistance)),
+        playerId: player.id,
+        headshot: false,
+      });
     }
     if (headDistance !== null) {
-      consider({ distance: headDistance, point: add(origin, scale(direction, headDistance)), playerId: player.id, headshot: true });
+      consider({
+        distance: headDistance,
+        point: add(origin, scale(direction, headDistance)),
+        playerId: player.id,
+        headshot: true,
+      });
     }
   }
   return result;

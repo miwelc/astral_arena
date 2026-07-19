@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { hasLineOfSight, pointInsideObstacle, raycastWorld } from './collision';
 import { isJumpPad } from './map';
-import { createDefaultConfig, GameSimulation } from './simulation';
+import { emptyInput } from './math';
+import { createDefaultConfig, GameSimulation, PLAYER_MOVEMENT_TUNING } from './simulation';
 import type { MapDefinition, PlayerState, ProjectileState, Vec3 } from './types';
 
 const TEST_NOW = 1_700_000_200_000;
@@ -53,6 +54,24 @@ const findClearLine = (map: MapDefinition): { start: Vec3; end: Vec3 } => {
   throw new Error('The map has no clear test line');
 };
 
+const findClearRun = (map: MapDefinition, length = 15): { start: Vec3; end: Vec3 } => {
+  for (let z = map.bounds.minZ + 4; z <= map.bounds.maxZ - 4; z += 2) {
+    for (let x = map.bounds.minX + 4; x <= map.bounds.maxX - length - 4; x += 2) {
+      const start = { x, y: map.bounds.floorY, z };
+      const end = { x: x + length, y: map.bounds.floorY, z };
+      const corridorIsClear = [-0.62, 0, 0.62].every((zOffset) =>
+        [0.12, 0.75, 1.45].every((height) => hasLineOfSight(
+          { x: start.x, y: start.y + height, z: start.z + zOffset },
+          { x: end.x, y: end.y + height, z: end.z + zOffset },
+          map,
+        )),
+      );
+      if (corridorIsClear) return { start, end };
+    }
+  }
+  throw new Error('The map has no clear movement corridor');
+};
+
 const grenade = (
   owner: PlayerState,
   position: Vec3,
@@ -74,6 +93,81 @@ const grenade = (
 
 beforeEach(() => vi.spyOn(Date, 'now').mockReturnValue(TEST_NOW));
 afterEach(() => vi.restoreAllMocks());
+
+describe('classic arena movement', () => {
+  it('accelerates progressively to a deliberately restrained running speed', () => {
+    const simulation = createSimulation();
+    const local = player(simulation, 'local');
+    const { start } = findClearRun(simulation.map);
+    local.position = { ...start };
+    local.velocity = { x: 0, y: 0, z: 0 };
+    local.grounded = true;
+    simulation.setInput(local.id, {
+      ...emptyInput(),
+      sequence: 1,
+      yaw: -Math.PI / 2,
+      moveZ: 1,
+    });
+
+    simulation.step(0.05);
+    expect(Math.hypot(local.velocity.x, local.velocity.z)).toBeCloseTo(1.4, 5);
+
+    for (let index = 0; index < 10; index += 1) simulation.step(0.05);
+    expect(Math.hypot(local.velocity.x, local.velocity.z)).toBeCloseTo(PLAYER_MOVEMENT_TUNING.moveSpeed, 5);
+    expect(PLAYER_MOVEMENT_TUNING.moveSpeed).toBeGreaterThan(6);
+    expect(PLAYER_MOVEMENT_TUNING.moveSpeed).toBeLessThan(6.5);
+  });
+
+  it('keeps forward momentum through a longer, controlled jump arc', () => {
+    const simulation = createSimulation();
+    const local = player(simulation, 'local');
+    const { start } = findClearRun(simulation.map);
+    local.position = { ...start };
+    local.velocity = { x: 0, y: 0, z: 0 };
+    local.grounded = true;
+    simulation.setInput(local.id, {
+      ...emptyInput(),
+      sequence: 1,
+      yaw: -Math.PI / 2,
+      moveZ: 1,
+    });
+    for (let index = 0; index < 10; index += 1) simulation.step(0.05);
+
+    simulation.setInput(local.id, {
+      ...emptyInput(),
+      sequence: 2,
+      yaw: -Math.PI / 2,
+      moveZ: 1,
+      jump: true,
+    });
+    simulation.step(0);
+    const takeoff = { ...local.position };
+    const takeoffSpeed = Math.hypot(local.velocity.x, local.velocity.z);
+    simulation.setInput(local.id, {
+      ...emptyInput(),
+      sequence: 3,
+      yaw: -Math.PI / 2,
+    });
+
+    let airtime = 0;
+    let apex = local.position.y;
+    for (let index = 0; index < 60 && !local.grounded; index += 1) {
+      simulation.step(0.025);
+      airtime += 0.025;
+      apex = Math.max(apex, local.position.y);
+    }
+
+    const jumpDistance = Math.hypot(local.position.x - takeoff.x, local.position.z - takeoff.z);
+    expect(local.grounded).toBe(true);
+    expect(airtime).toBeGreaterThanOrEqual(0.85);
+    expect(airtime).toBeLessThan(0.95);
+    expect(apex - takeoff.y).toBeGreaterThan(1.4);
+    expect(apex - takeoff.y).toBeLessThan(1.6);
+    expect(jumpDistance).toBeGreaterThan(5.3);
+    expect(jumpDistance).toBeLessThan(5.9);
+    expect(takeoffSpeed).toBeCloseTo(PLAYER_MOVEMENT_TUNING.moveSpeed, 5);
+  });
+});
 
 describe('jump pad movement', () => {
   it('launches toward the tower in a continuous arc and lands on its upper deck', () => {

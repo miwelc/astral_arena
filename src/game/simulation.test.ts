@@ -198,7 +198,12 @@ describe('combat rules', () => {
     expect(weapon.magazine).toBe(ammunitionBefore - 1);
     expect(target.shield).toBeLessThan(100);
     expect(target.health).toBe(70);
-    expect(simulation.state.events.some((event) => event.type === 'shot' && event.actorId === shooter.id)).toBe(true);
+    const shot = simulation.state.events.find((event) => event.type === 'shot' && event.actorId === shooter.id);
+    expect(shot).toBeDefined();
+    expect(shot?.position?.x).toBeCloseTo(target.position.x, 5);
+    expect(shot?.position?.z).toBeGreaterThan(target.position.z);
+    expect(shot?.position?.z).toBeLessThan(target.position.z + 1);
+    expect(shot?.impact).toBe(true);
     expect(simulation.state.events.some((event) => event.type === 'hit' && event.targetId === target.id)).toBe(true);
   });
 });

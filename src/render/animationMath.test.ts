@@ -1,11 +1,15 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  advanceLocomotionPhase,
   damp,
+  evaluateDirectionalGait,
   evaluateGrenade,
+  evaluateLocomotionCycle,
   evaluateMelee,
   evaluateReload,
   evaluateSwap,
+  evaluateWeaponBob,
   normalizedTimer,
   saturate,
   smootherstep01,
@@ -115,5 +119,58 @@ describe('action pose evaluators', () => {
       peak = Math.max(peak, ...values(evaluate(index / 100)));
     }
     expect(peak).toBeGreaterThan(0.95);
+  });
+});
+
+describe('velocity-driven locomotion', () => {
+  it('ties gait phase to actual distance and remains frame-rate independent', () => {
+    const oneStep = evaluateLocomotionCycle(4.8, 4.8, 0, 1);
+    const halfStep = evaluateLocomotionCycle(4.8, 4.8, 0, 0.5);
+    expect(oneStep.phaseDelta).toBeCloseTo(halfStep.phaseDelta * 2, 12);
+    expect(oneStep.cyclesPerSecond).toBeCloseTo(4.8 / oneStep.strideLength, 12);
+    expect(oneStep.cyclesPerSecond).toBeLessThan(2.2);
+    expect(evaluateLocomotionCycle(1.5, 1.5, 0, 1 / 60).moveBlend).toBe(1);
+  });
+
+  it('reverses a backward gait without changing its physical cadence', () => {
+    const forward = evaluateLocomotionCycle(3.2, 3.2, 0, 1 / 60);
+    const backward = evaluateLocomotionCycle(3.2, -3.2, 0, 1 / 60);
+    expect(backward.phaseDelta).toBeCloseTo(-forward.phaseDelta, 12);
+    expect(backward.forwardBlend).toBe(-1);
+    expect(forward.forwardBlend).toBe(1);
+  });
+
+  it('wraps phase cleanly in either direction', () => {
+    expect(advanceLocomotionPhase(Math.PI * 2 - 0.1, 0.2)).toBeCloseTo(0.1, 12);
+    expect(advanceLocomotionPhase(0.1, -0.2)).toBeCloseTo(Math.PI * 2 - 0.1, 12);
+    expect(advanceLocomotionPhase(Number.NaN, Number.NaN)).toBe(0);
+  });
+
+  it('uses sagittal leg swing forward and lateral articulation while strafing', () => {
+    const base = { moveBlend: 1, runBlend: 0.6 };
+    const forward = evaluateDirectionalGait(Math.PI / 2, {
+      ...base,
+      forwardBlend: 1,
+      strafeBlend: 0,
+    });
+    const strafe = evaluateDirectionalGait(Math.PI / 2, {
+      ...base,
+      forwardBlend: 0,
+      strafeBlend: 1,
+    });
+    expect(Math.abs(forward.leftHipPitch)).toBeGreaterThan(Math.abs(strafe.leftHipPitch) * 3);
+    expect(Math.abs(forward.leftHipRoll)).toBe(0);
+    expect(Math.abs(strafe.rightHipRoll)).toBeGreaterThan(0.1);
+    expect(strafe.torsoRoll).toBeLessThan(0);
+  });
+
+  it('keeps weapon movement restrained and strongly steadies it while aiming', () => {
+    const locomotion = evaluateLocomotionCycle(5.4, 5.4, 0, 1 / 60);
+    const hip = evaluateWeaponBob(Math.PI / 2, locomotion, 1, 0);
+    const aimed = evaluateWeaponBob(Math.PI / 2, locomotion, 1, 1);
+    expect(Math.abs(hip.x)).toBeLessThan(0.015);
+    expect(Math.abs(hip.y)).toBeLessThan(0.012);
+    expect(Math.abs(aimed.x)).toBeLessThan(Math.abs(hip.x) * 0.1);
+    expect(Object.values(evaluateWeaponBob(Number.NaN, locomotion, Number.NaN, Number.NaN)).every(Number.isFinite)).toBe(true);
   });
 });

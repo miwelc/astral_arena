@@ -615,6 +615,94 @@ export const createFacilityPanelTexture = (size = 512): THREE.CanvasTexture => {
   return texture;
 };
 
+export interface TechnicalSurfaceTextures {
+  normal: THREE.CanvasTexture;
+  roughness: THREE.CanvasTexture;
+}
+
+/**
+ * Tileable micro-surface shared by ceramic architecture, weapon shells and
+ * astronaut armour. Panel joints, recessed fasteners and fine abrasion add
+ * material scale without baking a light direction into the albedo.
+ */
+export const createTechnicalSurfaceTextures = (size = 256): TechnicalSurfaceTextures => {
+  const safeSize = Math.max(128, Math.round(size));
+  const height = new Float32Array(safeSize * safeSize);
+  const roughnessCanvas = createCanvas(safeSize, safeSize);
+  const roughnessContext = getContext(roughnessCanvas);
+  const roughnessImage = roughnessContext.createImageData(safeSize, safeSize);
+  const fract = (value: number): number => value - Math.floor(value);
+  const clamp01 = (value: number): number => Math.min(1, Math.max(0, value));
+
+  for (let y = 0; y < safeSize; y += 1) {
+    const v = y / safeSize;
+    for (let x = 0; x < safeSize; x += 1) {
+      const u = x / safeSize;
+      const panelU = fract(u * 4);
+      const panelV = fract(v * 4);
+      const seamDistance = Math.min(panelU, 1 - panelU, panelV, 1 - panelV);
+      const seam = 1 - smoothstep(clamp01((seamDistance - 0.006) / 0.032));
+      const fastenerX = panelU - 0.12;
+      const fastenerY = panelV - 0.12;
+      const fastener = 1 - smoothstep(clamp01((Math.hypot(fastenerX, fastenerY) - 0.025) / 0.045));
+      const brushed = tiledNoise(u * 67, v * 67, 67, 0x7e611) - 0.5;
+      const grain = tiledNoise(u * 149, v * 149, 149, 0x5ca7c) - 0.5;
+      const abrasion = Math.abs(Math.sin((u * 31 + v * 3.7) * TWO_PI + brushed * 2.2));
+      const scratch = smoothstep(clamp01((abrasion - 0.965) / 0.035));
+      const index = y * safeSize + x;
+      height[index] = brushed * 0.035 + grain * 0.015 - seam * 0.13 + fastener * 0.19 - scratch * 0.035;
+
+      const roughness = clamp01(0.54 + grain * 0.12 + seam * 0.2 - fastener * 0.16 + scratch * 0.18);
+      const byte = Math.round(roughness * 255);
+      const offset = index * 4;
+      roughnessImage.data[offset] = byte;
+      roughnessImage.data[offset + 1] = byte;
+      roughnessImage.data[offset + 2] = byte;
+      roughnessImage.data[offset + 3] = 255;
+    }
+  }
+  roughnessContext.putImageData(roughnessImage, 0, 0);
+
+  const normalCanvas = createCanvas(safeSize, safeSize);
+  const normalContext = getContext(normalCanvas);
+  const normalImage = normalContext.createImageData(safeSize, safeSize);
+  const wrap = (value: number): number => (value + safeSize) % safeSize;
+  for (let y = 0; y < safeSize; y += 1) {
+    for (let x = 0; x < safeSize; x += 1) {
+      const left = height[y * safeSize + wrap(x - 1)]!;
+      const right = height[y * safeSize + wrap(x + 1)]!;
+      const top = height[wrap(y - 1) * safeSize + x]!;
+      const bottom = height[wrap(y + 1) * safeSize + x]!;
+      const normalX = (left - right) * 4.1;
+      const normalY = (top - bottom) * 4.1;
+      const inverseLength = 1 / Math.hypot(normalX, normalY, 1);
+      const offset = (y * safeSize + x) * 4;
+      normalImage.data[offset] = Math.round((normalX * inverseLength * 0.5 + 0.5) * 255);
+      normalImage.data[offset + 1] = Math.round((normalY * inverseLength * 0.5 + 0.5) * 255);
+      normalImage.data[offset + 2] = Math.round((inverseLength * 0.5 + 0.5) * 255);
+      normalImage.data[offset + 3] = 255;
+    }
+  }
+  normalContext.putImageData(normalImage, 0, 0);
+
+  const makeTexture = (canvas: HTMLCanvasElement, name: string): THREE.CanvasTexture => {
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.name = name;
+    texture.colorSpace = THREE.NoColorSpace;
+    texture.wrapS = THREE.RepeatWrapping;
+    texture.wrapT = THREE.RepeatWrapping;
+    texture.minFilter = THREE.LinearMipmapLinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+    texture.generateMipmaps = true;
+    return texture;
+  };
+
+  return {
+    normal: makeTexture(normalCanvas, 'technical-surface-normal'),
+    roughness: makeTexture(roughnessCanvas, 'technical-surface-roughness'),
+  };
+};
+
 export type RadialTextureProfile = 'shadow' | 'glow';
 
 export interface RadialTextureOptions {

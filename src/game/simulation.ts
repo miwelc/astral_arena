@@ -36,10 +36,15 @@ import { createBotMemory, updateBotInputs } from './bots';
 
 const FIXED_PLAYER_HEIGHT = 1.8;
 const FIXED_PLAYER_RADIUS = 0.48;
-const GRAVITY = 18;
-const MOVE_SPEED = 7.6;
-const GROUND_ACCELERATION = 38;
-const AIR_ACCELERATION = 9;
+const PROJECTILE_GRAVITY = 18;
+export const PLAYER_MOVEMENT_TUNING = Object.freeze({
+  moveSpeed: 6.35,
+  groundAcceleration: 28,
+  groundDeceleration: 35,
+  airAcceleration: 4.8,
+  gravity: 15.5,
+  jumpVelocity: 6.85,
+});
 const SHIELD_RECHARGE_DELAY = 4;
 const SHIELD_RECHARGE_RATE = 25;
 const MAX_HEALTH = 70;
@@ -384,17 +389,31 @@ export class GameSimulation {
     let wish = add(scale(right, player.input.moveX), scale(forward, player.input.moveZ));
     if (dot(wish, wish) > 1) wish = normalize(wish);
     const speedModifier = (player.isJuggernaut ? 0.95 : 1) * (player.carryingFlagTeam ? 0.95 : 1);
-    const desired = scale(wish, MOVE_SPEED * speedModifier);
-    const acceleration = player.grounded ? GROUND_ACCELERATION : AIR_ACCELERATION;
-    const maxChange = acceleration * dt;
-    const changeX = clamp(desired.x - player.velocity.x, -maxChange, maxChange);
-    const changeZ = clamp(desired.z - player.velocity.z, -maxChange, maxChange);
-    player.velocity.x += changeX;
-    player.velocity.z += changeZ;
-    if (dot(wish, wish) < 0.01 && player.grounded) {
-      const friction = Math.max(0, 1 - 10 * dt);
-      player.velocity.x *= friction;
-      player.velocity.z *= friction;
+    const hasMovementInput = dot(wish, wish) >= 0.01;
+    const desired = scale(wish, PLAYER_MOVEMENT_TUNING.moveSpeed * speedModifier);
+    // Ground movement stays responsive, but reaches its top speed progressively
+    // instead of snapping into the very fast arena-shooter cadence. In the air,
+    // releasing the stick preserves the jump's momentum while directional input
+    // only bends the trajectory moderately, like the classic console shooters.
+    if (player.grounded || hasMovementInput) {
+      const acceleration = player.grounded
+        ? (hasMovementInput ? PLAYER_MOVEMENT_TUNING.groundAcceleration : PLAYER_MOVEMENT_TUNING.groundDeceleration)
+        : PLAYER_MOVEMENT_TUNING.airAcceleration;
+      const change = {
+        x: desired.x - player.velocity.x,
+        y: 0,
+        z: desired.z - player.velocity.z,
+      };
+      const changeLength = Math.hypot(change.x, change.z);
+      const maxChange = acceleration * dt;
+      if (changeLength <= maxChange || changeLength < 0.0001) {
+        player.velocity.x = desired.x;
+        player.velocity.z = desired.z;
+      } else {
+        const changeScale = maxChange / changeLength;
+        player.velocity.x += change.x * changeScale;
+        player.velocity.z += change.z * changeScale;
+      }
     }
     const padMomentum = this.jumpPadMomentum.get(player.id);
     if (padMomentum && !player.grounded) {
@@ -407,10 +426,10 @@ export class GameSimulation {
     }
     const launchedFromPad = this.tryLaunchFromJumpPad(player);
     if (!launchedFromPad && jumpPressed && player.grounded) {
-      player.velocity.y = 6.3;
+      player.velocity.y = PLAYER_MOVEMENT_TUNING.jumpVelocity;
       player.grounded = false;
     }
-    player.velocity.y -= GRAVITY * dt;
+    player.velocity.y -= PLAYER_MOVEMENT_TUNING.gravity * dt;
     const movement = moveCapsule(player, this.map, dt);
     player.position = movement.position;
     player.velocity = movement.velocity;
@@ -431,8 +450,8 @@ export class GameSimulation {
     const landingDistance = Math.max(0, towerDistance - landingRadius);
     const targetHeight = Math.max(this.state.tower.center.y, player.position.y + 3.5);
     const heightDelta = targetHeight - player.position.y;
-    const launchVelocityY = Math.sqrt(2 * GRAVITY * (heightDelta + JUMP_PAD_APEX_CLEARANCE));
-    const descendingTime = (launchVelocityY + Math.sqrt(Math.max(0, launchVelocityY ** 2 - 2 * GRAVITY * heightDelta))) / GRAVITY;
+    const launchVelocityY = Math.sqrt(2 * PLAYER_MOVEMENT_TUNING.gravity * (heightDelta + JUMP_PAD_APEX_CLEARANCE));
+    const descendingTime = (launchVelocityY + Math.sqrt(Math.max(0, launchVelocityY ** 2 - 2 * PLAYER_MOVEMENT_TUNING.gravity * heightDelta))) / PLAYER_MOVEMENT_TUNING.gravity;
     const targetHorizontalSpeed = clamp(landingDistance / Math.max(0.1, descendingTime), 3.2, 9.5);
     const currentHorizontal = { x: player.velocity.x, y: 0, z: player.velocity.z };
     const targetHorizontal = scale(towardTower, targetHorizontalSpeed);
@@ -473,7 +492,18 @@ export class GameSimulation {
     player.spawnProtection = 0;
     const origin = { x: player.position.x, y: player.position.y + 1.5, z: player.position.z };
     const baseDirection = directionFromAngles(player.yaw, player.pitch);
-    this.pushEvent({ type: 'shot', actorId: player.id, weaponId: weapon.id, position: origin });
+    const visualRange = definition.projectile === 'rocket' ? Math.min(5, definition.range) : definition.range;
+    const visualHit = definition.projectile
+      ? null
+      : raycastWorld(origin, baseDirection, definition.range, this.map, Object.values(this.state.players), player.id);
+    const visualEndpoint = visualHit?.point ?? add(origin, scale(baseDirection, visualRange));
+    this.pushEvent({
+      type: 'shot',
+      actorId: player.id,
+      weaponId: weapon.id,
+      position: visualEndpoint,
+      impact: visualHit !== null,
+    });
 
     if (definition.projectile === 'rocket') {
       this.state.projectiles.push({
@@ -646,7 +676,7 @@ export class GameSimulation {
       if (!projectile.alive) continue;
       projectile.fuse -= dt;
       const previous = cloneVec3(projectile.position);
-      if (projectile.kind === 'grenade') projectile.velocity.y -= GRAVITY * dt;
+      if (projectile.kind === 'grenade') projectile.velocity.y -= PROJECTILE_GRAVITY * dt;
       projectile.position = add(projectile.position, scale(projectile.velocity, dt));
       let explode = projectile.kind === 'rocket' && projectile.fuse <= 0;
 
@@ -909,7 +939,13 @@ export class GameSimulation {
       .sort((a, b) => distanceSquared(a.position, turretOrigin) - distanceSquared(b.position, turretOrigin))[0];
     if (target) {
       this.state.tower.turretCooldown = 0.14;
-      this.pushEvent({ type: 'shot', actorId: controller.id, position: turretOrigin, message: 'Torreta' });
+      this.pushEvent({
+        type: 'shot',
+        actorId: controller.id,
+        position: add(target.position, vec3(0, target.height * 0.56, 0)),
+        impact: true,
+        message: 'Torreta',
+      });
       this.applyDamage(target, 13, controller, 'pulse-rifle', target.position);
     }
   }

@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { createForestGroundTextures } from './visualTextures';
+import { createForestGroundTextures, createTechnicalSurfaceTextures } from './visualTextures';
 
 interface CapturedCanvas {
   width: number;
@@ -112,5 +112,25 @@ describe('forest ground PBR texture set', () => {
     expect(normalYMaximum - normalYMinimum).toBeGreaterThan(40);
     expect(roughnessMinimum).toBeLessThan(120);
     expect(roughnessMaximum).toBeGreaterThan(230);
+  });
+});
+
+describe('technical surface PBR texture set', () => {
+  it('adds deterministic panel, fastener and abrasion microdetail', () => {
+    const first = createTechnicalSurfaceTextures(128);
+    const second = createTechnicalSurfaceTextures(128);
+    const normal = pixelsOf(first.normal);
+    const roughness = pixelsOf(first.roughness);
+    const [normalMinimum, normalMaximum] = channelRange(normal, 0);
+    const [roughnessMinimum, roughnessMaximum] = channelRange(roughness, 0);
+
+    expect(byteHash(normal)).toBe(byteHash(pixelsOf(second.normal)));
+    expect(byteHash(roughness)).toBe(byteHash(pixelsOf(second.roughness)));
+    expect(normalMaximum - normalMinimum).toBeGreaterThan(35);
+    expect(roughnessMaximum - roughnessMinimum).toBeGreaterThan(45);
+    expect(first.normal.colorSpace).toBe(THREE.NoColorSpace);
+    expect(first.roughness.colorSpace).toBe(THREE.NoColorSpace);
+    expect(first.normal.wrapS).toBe(THREE.RepeatWrapping);
+    expect(first.roughness.wrapT).toBe(THREE.RepeatWrapping);
   });
 });

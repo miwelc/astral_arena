@@ -16,6 +16,49 @@ export interface ActionPoseWeights {
   hand: number;
 }
 
+/** Direction-aware locomotion values shared by the character and viewmodel. */
+export interface LocomotionCycle {
+  /** Visual transition from idle to moving. */
+  moveBlend: number;
+  /** Walk-to-run transition derived from actual world velocity. */
+  runBlend: number;
+  /** Signed, normalized velocity along the direction the character is facing. */
+  forwardBlend: number;
+  /** Signed, normalized velocity across the direction the character is facing. */
+  strafeBlend: number;
+  /** World metres covered by one complete left/right gait cycle. */
+  strideLength: number;
+  /** Complete gait cycles per second. Useful for footsteps and camera motion. */
+  cyclesPerSecond: number;
+  /** Frame-rate-independent phase increment, expressed in radians. */
+  phaseDelta: number;
+}
+
+/** A lower-body pose in radians. It deliberately exposes both pitch and roll. */
+export interface DirectionalGaitPose {
+  leftHipPitch: number;
+  rightHipPitch: number;
+  leftHipRoll: number;
+  rightHipRoll: number;
+  leftKnee: number;
+  rightKnee: number;
+  leftFootPitch: number;
+  rightFootPitch: number;
+  pelvisRoll: number;
+  torsoPitch: number;
+  torsoRoll: number;
+}
+
+/** Small first-person offsets, kept separate from recoil and authored actions. */
+export interface WeaponBobPose {
+  x: number;
+  y: number;
+  pitch: number;
+  roll: number;
+}
+
+const TAU = Math.PI * 2;
+
 /** Clamps a number to [0, 1]. NaN is treated as the neutral value, zero. */
 export const saturate = (value: number): number => {
   if (Number.isNaN(value)) return 0;
@@ -70,6 +113,140 @@ export const normalizedTimer = (remaining: number, duration: number): number => 
   if (remaining === Number.POSITIVE_INFINITY) return 0;
   if (remaining === Number.NEGATIVE_INFINITY) return 1;
   return saturate(1 - remaining / duration);
+};
+
+/**
+ * Produces a gait clock from metres travelled instead of elapsed time. This is
+ * what keeps the feet visually planted when movement speeds are tuned: a full
+ * cycle covers roughly 1.55 m while walking and 2.8 m while running.
+ */
+export const evaluateLocomotionCycle = (
+  horizontalSpeed: number,
+  forwardSpeed: number,
+  strafeSpeed: number,
+  delta: number,
+): LocomotionCycle => {
+  const speed = Number.isFinite(horizontalSpeed) ? Math.max(0, horizontalSpeed) : 0;
+  const safeDelta = Number.isFinite(delta) ? Math.max(0, delta) : 0;
+  const safeForward = Number.isFinite(forwardSpeed) ? forwardSpeed : 0;
+  const safeStrafe = Number.isFinite(strafeSpeed) ? strafeSpeed : 0;
+  // Leg articulation should be fully established at an ordinary walking pace;
+  // speed itself already controls the cycle frequency.
+  const moveBlend = smootherstep01((speed - 0.08) / 1.35);
+  const runBlend = smootherstep01((speed - 2.35) / 3.05);
+  const strideLength = 1.55 + (2.8 - 1.55) * runBlend;
+  const cyclesPerSecond = speed / strideLength;
+  const inverseSpeed = speed > 0.001 ? 1 / speed : 0;
+  const forwardBlend = Math.max(-1, Math.min(1, safeForward * inverseSpeed));
+  const strafeBlend = Math.max(-1, Math.min(1, safeStrafe * inverseSpeed));
+  // Walking backwards reverses the gait, but diagonal strafing does not cause
+  // the phase direction to flicker as the dominant input axis changes.
+  const phaseDirection = safeForward < -Math.abs(safeStrafe) * 0.45 ? -1 : 1;
+
+  return {
+    moveBlend,
+    runBlend,
+    forwardBlend,
+    strafeBlend,
+    strideLength,
+    cyclesPerSecond,
+    phaseDelta: cyclesPerSecond * safeDelta * TAU * phaseDirection,
+  };
+};
+
+/** Keeps a continuously accumulated locomotion phase numerically well behaved. */
+export const advanceLocomotionPhase = (phase: number, phaseDelta: number): number => {
+  const safePhase = Number.isFinite(phase) ? phase : 0;
+  const safeDelta = Number.isFinite(phaseDelta) ? phaseDelta : 0;
+  const wrapped = (safePhase + safeDelta) % TAU;
+  return wrapped < 0 ? wrapped + TAU : wrapped;
+};
+
+/**
+ * Builds distinct forward/backward and lateral stepping poses. Forward motion
+ * primarily swings the thighs in pitch. Strafing shortens that swing and uses
+ * hip roll plus alternating knee compression, avoiding the old moon-walk look.
+ */
+export const evaluateDirectionalGait = (
+  phase: number,
+  locomotion: Pick<LocomotionCycle, 'moveBlend' | 'runBlend' | 'forwardBlend' | 'strafeBlend'>,
+): DirectionalGaitPose => {
+  const safePhase = Number.isFinite(phase) ? phase : 0;
+  const move = saturate(locomotion.moveBlend);
+  const run = saturate(locomotion.runBlend);
+  const forward = Math.max(-1, Math.min(1, Number.isFinite(locomotion.forwardBlend) ? locomotion.forwardBlend : 0));
+  const strafe = Math.max(-1, Math.min(1, Number.isFinite(locomotion.strafeBlend) ? locomotion.strafeBlend : 0));
+  const directionTotal = Math.abs(forward) + Math.abs(strafe);
+  const forwardWeight = directionTotal > 0.001 ? Math.abs(forward) / directionTotal : 1;
+  const strafeWeight = directionTotal > 0.001 ? Math.abs(strafe) / directionTotal : 0;
+  const backwardScale = forward < -0.05 ? 0.78 : 1;
+  const strafeSign = strafe < 0 ? -1 : 1;
+  const cycle = Math.sin(safePhase);
+  const opposite = -cycle;
+  const forwardAmplitude = (0.3 + run * 0.33) * move * forwardWeight * backwardScale;
+  const lateralPitchAmplitude = (0.055 + run * 0.035) * move * strafeWeight;
+  const lateralRollAmplitude = (0.12 + run * 0.11) * move * strafeWeight;
+
+  const leftHipPitch = cycle * forwardAmplitude + cycle * lateralPitchAmplitude;
+  const rightHipPitch = opposite * forwardAmplitude + opposite * lateralPitchAmplitude;
+  const leftHipRoll = strafeSign
+    * (0.035 + Math.max(0, -cycle) * lateralRollAmplitude)
+    * strafeWeight
+    * move;
+  const rightHipRoll = strafeSign
+    * (0.035 + Math.max(0, cycle) * lateralRollAmplitude)
+    * strafeWeight
+    * move;
+
+  const recovery = (0.34 + run * 0.34) * move;
+  const lateralCompression = (0.18 + run * 0.2) * move * strafeWeight;
+  const leftKnee = Math.max(0, -cycle) * recovery * forwardWeight
+    + Math.max(0, cycle * strafeSign) * lateralCompression;
+  const rightKnee = Math.max(0, cycle) * recovery * forwardWeight
+    + Math.max(0, -cycle * strafeSign) * lateralCompression;
+
+  return {
+    leftHipPitch,
+    rightHipPitch,
+    leftHipRoll,
+    rightHipRoll,
+    leftKnee,
+    rightKnee,
+    leftFootPitch: -leftHipPitch + leftKnee * 0.76,
+    rightFootPitch: -rightHipPitch + rightKnee * 0.76,
+    pelvisRoll: -strafe * (0.045 + run * 0.025) * move + Math.cos(safePhase) * 0.012 * move,
+    torsoPitch: -forward * (0.038 + run * 0.035) * move,
+    torsoRoll: -strafe * (0.065 + run * 0.035) * move,
+  };
+};
+
+/**
+ * Restrained viewmodel motion: aiming damps it almost completely and lateral
+ * movement favours side-to-side sway instead of a rapid vertical shake.
+ */
+export const evaluateWeaponBob = (
+  phase: number,
+  locomotion: Pick<LocomotionCycle, 'moveBlend' | 'runBlend' | 'forwardBlend' | 'strafeBlend'>,
+  groundBlend: number,
+  aimBlend: number,
+): WeaponBobPose => {
+  const safePhase = Number.isFinite(phase) ? phase : 0;
+  const move = saturate(locomotion.moveBlend) * saturate(groundBlend);
+  const run = saturate(locomotion.runBlend);
+  const steadying = 1 - saturate(aimBlend) * 0.92;
+  const forward = Math.abs(Number.isFinite(locomotion.forwardBlend) ? locomotion.forwardBlend : 0);
+  const strafe = Math.abs(Number.isFinite(locomotion.strafeBlend) ? locomotion.strafeBlend : 0);
+  const xAmplitude = 0.0065 + run * 0.0045 + strafe * 0.003;
+  const yAmplitude = 0.0055 + run * 0.0035 + forward * 0.0015;
+  const horizontal = Math.sin(safePhase);
+  const vertical = 0.5 - 0.5 * Math.cos(safePhase * 2);
+
+  return {
+    x: horizontal * xAmplitude * move * steadying,
+    y: vertical * yAmplitude * move * steadying,
+    pitch: vertical * (0.004 + run * 0.004) * move * steadying,
+    roll: -horizontal * (0.005 + strafe * 0.004) * move * steadying,
+  };
 };
 
 /** Magazine/energy-cell manipulation with a long support-hand release. */

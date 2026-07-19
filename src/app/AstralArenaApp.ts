@@ -420,7 +420,7 @@ export class AstralArenaApp {
     if (this.gameViewActive) return;
     this.gameViewActive = true;
     this.currentState = state;
-    this.audio.beginSession();
+    this.audio.beginSession(state.eventSequence);
     const { ArenaRenderer } = await import('../render/ArenaRenderer');
     if (!this.gameViewActive) return;
     this.root.innerHTML = `

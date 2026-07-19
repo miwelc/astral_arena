@@ -30,7 +30,7 @@ import { WEAPONS } from './weapons';
 
 export type LineOfSightTest = (from: Vec3, to: Vec3) => boolean;
 
-interface DifficultyProfile {
+export interface DifficultyProfile {
   reaction: number;
   decisionInterval: number;
   aimError: number;
@@ -41,6 +41,7 @@ interface DifficultyProfile {
   memorySeconds: number;
   grenadeChance: number;
   jumpChance: number;
+  combatMovementScale: number;
 }
 
 interface ObjectivePlan {
@@ -48,42 +49,45 @@ interface ObjectivePlan {
   urgent: boolean;
 }
 
-const DIFFICULTY: Record<Difficulty, DifficultyProfile> = {
+export const BOT_DIFFICULTY_PROFILES: Readonly<Record<Difficulty, Readonly<DifficultyProfile>>> = {
   recruit: {
-    reaction: 0.45,
-    decisionInterval: 0.24,
-    aimError: 5 * (Math.PI / 180),
-    turnRate: 120 * (Math.PI / 180),
-    visionRange: 42,
-    fieldOfView: 120 * (Math.PI / 180),
-    fireTolerance: 4.5 * (Math.PI / 180),
-    memorySeconds: 2.2,
-    grenadeChance: 0.035,
-    jumpChance: 0.025,
+    reaction: 0.72,
+    decisionInterval: 0.34,
+    aimError: 8 * (Math.PI / 180),
+    turnRate: 90 * (Math.PI / 180),
+    visionRange: 34,
+    fieldOfView: 100 * (Math.PI / 180),
+    fireTolerance: 3.4 * (Math.PI / 180),
+    memorySeconds: 1.6,
+    grenadeChance: 0.012,
+    jumpChance: 0.015,
+    combatMovementScale: 0.78,
   },
   veteran: {
-    reaction: 0.28,
-    decisionInterval: 0.16,
-    aimError: 2.8 * (Math.PI / 180),
-    turnRate: 220 * (Math.PI / 180),
-    visionRange: 58,
-    fieldOfView: 132 * (Math.PI / 180),
-    fireTolerance: 2.5 * (Math.PI / 180),
-    memorySeconds: 3,
-    grenadeChance: 0.06,
-    jumpChance: 0.04,
+    reaction: 0.46,
+    decisionInterval: 0.23,
+    aimError: 4.8 * (Math.PI / 180),
+    turnRate: 145 * (Math.PI / 180),
+    visionRange: 48,
+    fieldOfView: 116 * (Math.PI / 180),
+    fireTolerance: 2.2 * (Math.PI / 180),
+    memorySeconds: 2.3,
+    grenadeChance: 0.03,
+    jumpChance: 0.025,
+    combatMovementScale: 0.88,
   },
   legend: {
-    reaction: 0.16,
-    decisionInterval: 0.1,
-    aimError: 1.4 * (Math.PI / 180),
-    turnRate: 360 * (Math.PI / 180),
-    visionRange: 76,
-    fieldOfView: 145 * (Math.PI / 180),
+    reaction: 0.28,
+    decisionInterval: 0.16,
+    aimError: 2.5 * (Math.PI / 180),
+    turnRate: 225 * (Math.PI / 180),
+    visionRange: 62,
+    fieldOfView: 132 * (Math.PI / 180),
     fireTolerance: 1.35 * (Math.PI / 180),
-    memorySeconds: 3.6,
-    grenadeChance: 0.085,
-    jumpChance: 0.055,
+    memorySeconds: 3,
+    grenadeChance: 0.05,
+    jumpChance: 0.04,
+    combatMovementScale: 0.95,
   },
 };
 
@@ -470,7 +474,7 @@ export const updateBotInputs = (
     if (player.kind !== 'bot') continue;
     player.bot ??= createBotMemory(state.config.difficulty);
     const memory = player.bot;
-    const profile = DIFFICULTY[memory.difficulty];
+    const profile = BOT_DIFFICULTY_PROFILES[memory.difficulty];
     const input = emptyInput();
     input.sequence = player.input.sequence + 1;
 
@@ -573,8 +577,9 @@ export const updateBotInputs = (
     );
 
     const localMovement = movementToLocalInput(navigationDirection, input.yaw);
-    input.moveX = localMovement.moveX;
-    input.moveZ = localMovement.moveZ;
+    const combatMovementScale = visibleTarget && !plan.urgent ? profile.combatMovementScale : 1;
+    input.moveX = localMovement.moveX * combatMovementScale;
+    input.moveZ = localMovement.moveZ * combatMovementScale;
 
     if (desiredWeaponIndex !== player.activeWeapon && desiredWeapon && weaponUsable(desiredWeapon)) {
       input.swap = true;
@@ -599,10 +604,11 @@ export const updateBotInputs = (
         player.meleeCooldown <= 0;
       input.fire = visibleTarget !== null &&
         !input.melee &&
+        decisionDue &&
         memory.reactionTimer <= 0 &&
         activeWeapon.magazine > 0 &&
         activeWeapon.reloadTimer <= 0 &&
-        (definition.automatic || (decisionDue && activeWeapon.cooldown <= 0)) &&
+        activeWeapon.cooldown <= 0 &&
         aligned &&
         withinWeaponRange &&
         safeRocketRange;

@@ -56,6 +56,36 @@ describe('Crater Ridge competitive layout', () => {
     ]));
   });
 
+  it('uses coherent roofed buildings with playable interiors and open doors', () => {
+    const ids = new Set(CRATER_RIDGE.obstacles.map((obstacle) => obstacle.id));
+    for (const id of [
+      'west-base-roof',
+      'east-base-roof',
+      'north-relay-floor',
+      'north-relay-roof',
+      'south-greenhouse-floor',
+      'south-greenhouse-roof',
+      'west-mid-canopy',
+      'east-mid-canopy',
+    ]) expect(ids.has(id), id).toBe(true);
+
+    const traversableInteriorPoints = [
+      { x: -40, y: 1.2, z: 0 },
+      { x: -44, y: 1.2, z: 0 },
+      { x: -48, y: 1.2, z: 0 },
+      { x: 40, y: 1.2, z: 0 },
+      { x: 44, y: 1.2, z: 0 },
+      { x: 48, y: 1.2, z: 0 },
+      { x: 0, y: 1, z: -32.5 },
+      { x: 0, y: 1, z: -35.2 },
+      { x: 0, y: 1, z: 30.2 },
+      { x: 0, y: 1, z: 34.7 },
+    ];
+    for (const position of traversableInteriorPoints) {
+      expect(pointInsideObstacle(position, CRATER_RIDGE), JSON.stringify(position)).toBe(false);
+    }
+  });
+
   it('mirrors collision geometry and team starts across the team axis', () => {
     const geometrySet = new Set(CRATER_RIDGE.obstacles.map(geometry));
     for (const obstacle of CRATER_RIDGE.obstacles) {
@@ -109,6 +139,18 @@ describe('Crater Ridge competitive layout', () => {
         expect(top - previousTop, id).toBeLessThan(1.05);
         previousTop = top;
       }
+    }
+  });
+
+  it('adds shallow physical earth relief away from flat facility corridors', () => {
+    const earthworks = CRATER_RIDGE.obstacles.filter((obstacle) => obstacle.id.includes('earth-'));
+    expect(earthworks.length).toBeGreaterThanOrEqual(12);
+    expect(earthworks.some((obstacle) => obstacle.id.includes('berm'))).toBe(true);
+    expect(earthworks.some((obstacle) => obstacle.id.includes('outcrop'))).toBe(true);
+
+    expect(earthworks.every((obstacle) => obstacle.max.x <= -41 || obstacle.min.x >= 41)).toBe(true);
+    for (const obstacle of earthworks.filter((candidate) => candidate.kind === 'platform')) {
+      expect(obstacle.max.y - obstacle.min.y, obstacle.id).toBeLessThanOrEqual(0.4);
     }
   });
 

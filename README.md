@@ -14,13 +14,13 @@ Las plazas vacías pueden llenarse con bots. El modo local significa **un humano
 El repositorio contiene una **primera vertical jugable completa**, no una versión terminada ni preparada todavía para partidas públicas. Actualmente incluye:
 
 - simulación determinista del combate, movimiento, colisiones, escudos, reapariciones, proyectiles, granadas, cuerpo a cuerpo, puntuación y objetivos;
-- un mapa inicial, **Cresta del Cráter**, de 104 × 84 m, con tres rutas, bases protegidas, torre central, galerías, observatorio, hidroponía, terrazas, coberturas y armas recogibles;
-- seis armas, bots con tres dificultades, controles de teclado/ratón y mando, y audio procedural;
-- una capa de presentación Three.js con terreno PBR húmedo de barro, musgo, raíces, piedras, hojarasca y charcos; bosque instanciado, niebla local, haces solares, arquitectura modular señalizada, sombras, bloom moderado, color grading, astronautas articulados de placas cerámicas, seis armas *hard-surface* y ADS interpolado por arma;
-- animación procedural compartida entre primera y tercera persona: locomoción direccional, respiración, salto, caída, aterrizaje, muerte/reaparición, retroceso, recarga, cambio de arma, cuerpo a cuerpo y lanzamiento de granada, con rodillas, pies, manos y piezas de arma móviles;
+- un mapa inicial, **Cresta del Cráter**, de 104 × 84 m, con tres rutas, dos edificios base con interiores, torre central, puestos logísticos, relay meteorológico, laboratorio hidropónico, terrazas, bermas físicas, coberturas y armas recogibles;
+- seis armas, bots con tres dificultades moderadas, controles de teclado/ratón y mando, hitboxes anatómicos ampliados y audio procedural multicapa por arma;
+- una capa de presentación Three.js con terreno PBR húmedo de barro, musgo, raíces, piedras, relieve, césped denso y charcos; bosque instanciado, niebla local, haces solares, puertas, cristales, rampas, barandillas, cajas, iluminación interior, sombras, bloom moderado, profundidad de campo, aberración cromática, astronautas articulados y seis armas *hard-surface* con fogonazo, trazadoras e impactos;
+- animación procedural compartida entre primera y tercera persona: locomoción ligada a la distancia recorrida y diferenciada por dirección, respiración, salto, caída, aterrizaje, muerte/reaparición, retroceso, recarga, cambio de arma, cuerpo a cuerpo y lanzamiento de granada, con rodillas, pies, manos y piezas de arma móviles;
 - menús, configuración 1v1/4v4, lobby manual P2P, HUD, marcador, kill feed, audio y pantalla de resultado integrados;
 - transporte WebRTC P2P nativo con señalización manual, mensajes tipados y un host con hasta siete invitados;
-- 92 pruebas automatizadas para combate, movimiento y deslizamiento por paredes, balance inicial, objetivos, bots, regresiones, navegación del mapa, pads de salto, acceso a la torre, puntuación, determinismo, curvas de animación, texturas procedurales y piezas móviles de armamento.
+- 125 pruebas automatizadas para combate, movimiento, auto-step de rampas y deslizamiento por paredes, hitboxes, perfiles de bots, balance inicial, objetivos, regresiones, navegación e interiores del mapa, pads de salto, acceso a la torre, puntuación, determinismo, audio, curvas de animación, texturas procedurales, arquitectura y piezas móviles de armamento.
 
 El proyecto pasa `typecheck`, tests y build de producción. Aun así, el flujo WebRTC debe probarse con varios navegadores y redes reales antes de declarar soporte público 4v4; tampoco hay matchmaking, persistencia, cuentas, backend, migración de host ni anti-cheat.
 
@@ -206,9 +206,11 @@ Para convertir la vertical en un lanzamiento público, el orden recomendado es: 
     ├── app
     │   └── AstralArenaApp.ts  # Menús, lobby, sesión, HUD y bucle principal
     ├── audio
-    │   └── GameAudio.ts       # Efectos procedurales mediante Web Audio
+    │   ├── GameAudio.ts       # Efectos procedurales mediante Web Audio
+    │   └── GameAudio.test.ts  # Perfiles por arma y contratos de audio
     ├── game
     │   ├── bots.ts            # Decisiones, puntería y objetivos de bots
+    │   ├── bots.test.ts       # Perfiles de dificultad y ritmo de combate
     │   ├── collision.ts       # Movimiento, colisiones y raycasts
     │   ├── collision.test.ts  # Deslizamiento, esquinas y límites del arena
     │   ├── map.ts             # Cresta del Cráter, spawns y pickups
@@ -229,6 +231,9 @@ Para convertir la vertical en un lanzamiento público, el orden recomendado es: 
     │   ├── animationMath.ts   # Curvas puras y pesos de acciones animadas
     │   ├── animationMath.test.ts # Continuidad y estabilidad de las curvas
     │   ├── ArenaRenderer.ts   # Escena Three.js, iluminación, cámara y efectos
+    │   ├── baseArchitecture.ts # Interiores y detalle funcional de la base
+    │   ├── baseArchitecture.test.ts # Arquitectura PBR y lifecycle
+    │   ├── DepthFocusPass.ts  # Profundidad de campo ligera por depth buffer
     │   ├── facilityEnvironment.test.ts # Contratos del entorno instanciado
     │   ├── facilityEnvironment.ts # Bosque y arquitectura modular procedural
     │   ├── landscapeGeometry.ts # Crestas y vegetación procedural

@@ -22,11 +22,15 @@ import type {
 } from '../game/types';
 import { WEAPONS } from '../game/weapons';
 import {
+  advanceLocomotionPhase,
   damp,
+  evaluateDirectionalGait,
   evaluateGrenade,
+  evaluateLocomotionCycle,
   evaluateMelee,
   evaluateReload,
   evaluateSwap,
+  evaluateWeaponBob,
   normalizedTimer,
   saturate,
   smootherstep01,
@@ -41,11 +45,14 @@ import {
   type FacilityEnvironmentBundle,
   type ScatterExclusion,
 } from './facilityEnvironment';
+import { createBaseArchitecture, type BaseArchitectureBundle } from './baseArchitecture';
+import { DepthFocusPass } from './DepthFocusPass';
 import {
   createColdEnvironmentTexture,
   createFacilityPanelTexture,
   createForestGroundTextures,
   createRadialTexture,
+  createTechnicalSurfaceTextures,
   VISUAL_SUN_DIRECTION,
 } from './visualTextures';
 import {
@@ -74,6 +81,26 @@ const WEAPON_AIM_FOV: Readonly<Record<WeaponId, number>> = {
   shotgun: 64,
   'rocket-launcher': 60,
 };
+
+const ARCHITECTURE_AUTHORED_SHELLS = new Set([
+  'west-base-front-n',
+  'west-base-front-s',
+  'west-base-wing-n',
+  'west-base-wing-s',
+  'east-base-front-n',
+  'east-base-front-s',
+  'east-base-wing-n',
+  'east-base-wing-s',
+  'north-relay-front-west',
+  'north-relay-front-east',
+  'north-relay-wall-west',
+  'north-relay-wall-east',
+  'south-greenhouse-front-west',
+  'south-greenhouse-front-east',
+  'south-greenhouse-west',
+  'south-greenhouse-east',
+  'south-greenhouse-roof',
+]);
 
 interface PlayerRig {
   root: THREE.Group;
@@ -194,11 +221,79 @@ const seededRandom = (seed: number): (() => number) => {
   };
 };
 
+const createEarthworkGeometry = (
+  size: THREE.Vector3,
+  seed: number,
+  rocky: boolean,
+): THREE.BufferGeometry => {
+  const bevel = Math.min(
+    rocky ? 0.46 : 0.32,
+    Math.max(0.08, Math.min(size.x, size.y, size.z) * (rocky ? 0.3 : 0.18)),
+  );
+  const geometry = new RoundedBoxGeometry(size.x, size.y, size.z, rocky ? 6 : 5, bevel);
+  const positions = geometry.getAttribute('position');
+  const seedPhase = (seed % 997) * 0.017;
+  const halfHeight = Math.max(0.001, size.y * 0.5);
+  const maximumSurfaceNoise = Math.min(rocky ? 0.16 : 0.09, size.y * (rocky ? 0.13 : 0.08));
+  for (let index = 0; index < positions.count; index += 1) {
+    const x = positions.getX(index);
+    const y = positions.getY(index);
+    const z = positions.getZ(index);
+    const upperWeight = THREE.MathUtils.smoothstep(y, -halfHeight * 0.2, halfHeight * 0.72);
+    const noise = (
+      Math.sin(x * 0.71 + z * 0.43 + seedPhase)
+      + Math.cos(z * 0.83 - x * 0.31 + seedPhase * 1.7)
+    ) * 0.5;
+    const sideNoise = rocky ? upperWeight * Math.min(0.08, Math.min(size.x, size.z) * 0.012) : 0;
+    positions.setXYZ(
+      index,
+      x + Math.sin(z * 0.92 + seedPhase) * sideNoise,
+      y + noise * maximumSurfaceNoise * upperWeight,
+      z + Math.cos(x * 0.79 - seedPhase) * sideNoise,
+    );
+  }
+  positions.needsUpdate = true;
+  geometry.computeVertexNormals();
+  geometry.computeBoundingBox();
+  geometry.computeBoundingSphere();
+  return geometry;
+};
+
+const sampleGroundRelief = (map: MapDefinition, worldX: number, worldZ: number): number => {
+  const depth = map.bounds.maxZ - map.bounds.minZ;
+  const centerX = (map.bounds.minX + map.bounds.maxX) * 0.5;
+  const centerZ = (map.bounds.minZ + map.bounds.maxZ) * 0.5;
+  const localX = worldX - centerX;
+  const localY = centerZ - worldZ;
+  const macro = Math.sin(localX * 0.19 + Math.cos(localY * 0.11) * 1.7) * 0.5 + 0.5;
+  const fine = Math.sin(localX * 0.73 - localY * 0.51) * Math.cos(localY * 0.37) * 0.5 + 0.5;
+  const horizontalPath = 1 - THREE.MathUtils.smoothstep(Math.abs(worldZ - centerZ), 3.2, 5.2);
+  const verticalPath = 1 - THREE.MathUtils.smoothstep(Math.abs(worldX - centerX), 3, 5);
+  const northSouthPath = 1 - THREE.MathUtils.smoothstep(
+    Math.abs(Math.abs(worldZ - centerZ) - depth * 0.32),
+    2,
+    4.2,
+  );
+  const basePath = Math.max(...Object.values(map.flagBases).map((base) => {
+    const alongX = 1 - THREE.MathUtils.smoothstep(Math.abs(worldX - base.x), 6.5, 8.5);
+    const alongZ = 1 - THREE.MathUtils.smoothstep(Math.abs(worldZ - base.z), 10, 12);
+    return alongX * alongZ;
+  }));
+  const artificialWeight = THREE.MathUtils.clamp(
+    Math.max(horizontalPath, verticalPath, northSouthPath, basePath),
+    0,
+    1,
+  );
+  const earthWeight = 1 - artificialWeight;
+  const relief = (macro - 0.5) * 0.17 + (fine - 0.5) * 0.055;
+  return relief * THREE.MathUtils.lerp(0.12, 1, earthWeight);
+};
+
 const disposeObject = (object: THREE.Object3D): void => {
   object.traverse((child) => {
-    if (!(child instanceof THREE.Mesh || child instanceof THREE.Line || child instanceof THREE.LineSegments)) return;
+    if (!(child instanceof THREE.Mesh || child instanceof THREE.Line || child instanceof THREE.LineSegments || child instanceof THREE.Points)) return;
     if (child.userData.sharedVisualTemplate) return;
-    child.geometry.dispose();
+    if (!child.userData.sharedEffectGeometry) child.geometry.dispose();
     const materials = Array.isArray(child.material) ? child.material : [child.material];
     for (const material of materials) material.dispose();
   });
@@ -214,6 +309,7 @@ export class ArenaRenderer {
   private readonly scene = new THREE.Scene();
   private readonly renderer: THREE.WebGLRenderer;
   private readonly composer: EffectComposer;
+  private readonly depthFocusPass: DepthFocusPass;
   private readonly bloomPass: UnrealBloomPass;
   private readonly gradePass: ShaderPass;
   private readonly camera = new THREE.PerspectiveCamera(74, 1, 0.035, 240);
@@ -225,15 +321,21 @@ export class ArenaRenderer {
   private readonly projectileVisuals = new Map<string, ProjectileVisual>();
   private readonly flagVisuals = new Map<FlagState['team'], THREE.Group>();
   private readonly effects: TransientEffect[] = [];
+  private readonly shotFlashGeometry = new THREE.IcosahedronGeometry(1, 1);
+  private readonly muzzleConeGeometry = new THREE.ConeGeometry(1, 1, 7, 1, true);
+  private readonly shotSmokeGeometry = new THREE.SphereGeometry(1, 8, 6);
   private readonly weaponTemplates = new Map<WeaponId, THREE.Group>();
   private readonly worldDecorations: THREE.Object3D[] = [];
   private readonly ownedTextures = new Set<THREE.Texture>();
   private environmentTarget: THREE.WebGLRenderTarget | null = null;
   private facilityEnvironment: FacilityEnvironmentBundle | null = null;
+  private baseArchitecture: BaseArchitectureBundle | null = null;
   private groundTexture: THREE.CanvasTexture | null = null;
   private groundNormalTexture: THREE.CanvasTexture | null = null;
   private groundRoughnessTexture: THREE.CanvasTexture | null = null;
   private facilityPanelTexture: THREE.CanvasTexture | null = null;
+  private technicalNormalTexture: THREE.CanvasTexture | null = null;
+  private technicalRoughnessTexture: THREE.CanvasTexture | null = null;
   private contactShadowTexture: THREE.CanvasTexture | null = null;
   private readonly viewModel = new THREE.Group();
   private readonly viewActionPivot = new THREE.Group();
@@ -261,6 +363,7 @@ export class ArenaRenderer {
   private skyDome: THREE.Mesh<THREE.SphereGeometry, THREE.ShaderMaterial> | null = null;
   private readonly skyMaterial: THREE.ShaderMaterial;
   private readonly damageUniform = { value: 0 };
+  private readonly fireUniform = { value: 0 };
   private readonly damageOverlay: THREE.Mesh<THREE.PlaneGeometry, THREE.ShaderMaterial>;
   private readonly resizeObserver: ResizeObserver | null;
   private localPlayerId: string | null = null;
@@ -332,9 +435,13 @@ export class ArenaRenderer {
       depthBuffer: true,
       stencilBuffer: false,
     });
+    composerTarget.depthTexture = new THREE.DepthTexture(1, 1, THREE.UnsignedIntType);
+    composerTarget.depthTexture.format = THREE.DepthFormat;
     composerTarget.samples = 0;
     this.composer = new EffectComposer(this.renderer, composerTarget);
     this.composer.addPass(new RenderPass(this.scene, this.camera));
+    this.depthFocusPass = new DepthFocusPass(this.camera);
+    this.composer.addPass(this.depthFocusPass);
     const viewModelPass = new RenderPass(this.viewScene, this.viewCamera);
     viewModelPass.clear = false;
     viewModelPass.clearDepth = true;
@@ -346,6 +453,7 @@ export class ArenaRenderer {
         tDiffuse: { value: null },
         uTime: { value: 0 },
         uDamage: this.damageUniform,
+        uFire: this.fireUniform,
       },
       vertexShader: /* glsl */ `
         varying vec2 vUv;
@@ -359,14 +467,36 @@ export class ArenaRenderer {
         uniform sampler2D tDiffuse;
         uniform float uTime;
         uniform float uDamage;
+        uniform float uFire;
 
         float hash(vec2 p) {
           return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
         }
 
         void main() {
+          vec2 centerVector = vUv - 0.5;
+          float radial = smoothstep(0.08, 0.72, length(centerVector));
+          float aberrationStrength = radial * (uDamage * 0.006 + uFire * 0.0018);
+          vec2 spectralOffset = normalize(centerVector + vec2(0.00001)) * aberrationStrength;
           vec4 source = texture2D(tDiffuse, vUv);
           vec3 color = source.rgb;
+          if (aberrationStrength > 0.00001) {
+            color = vec3(
+              texture2D(tDiffuse, vUv + spectralOffset).r,
+              source.g,
+              texture2D(tDiffuse, vUv - spectralOffset).b
+            );
+          }
+          float impactBlur = clamp(uDamage * 0.34 + uFire * 0.055, 0.0, 0.38);
+          if (impactBlur > 0.001) {
+            vec2 blurOffset = centerVector * (0.0025 + uDamage * 0.006);
+            vec3 radialBlur = (
+              texture2D(tDiffuse, vUv - blurOffset).rgb
+              + color * 2.0
+              + texture2D(tDiffuse, vUv + blurOffset).rgb
+            ) * 0.25;
+            color = mix(color, radialBlur, impactBlur);
+          }
           float luminance = dot(color, vec3(0.2126, 0.7152, 0.0722));
           color = mix(vec3(luminance), color, 1.075);
           color = (color - 0.5) * 1.045 + 0.5;
@@ -391,6 +521,8 @@ export class ArenaRenderer {
     this.createLighting();
     this.createLandscape();
     this.createMapGeometry();
+    this.baseArchitecture = createBaseArchitecture(this.map, { quality: 'high' });
+    this.scene.add(this.baseArchitecture.group);
     this.createEnvironmentDressing();
     this.createAtmosphereDetails();
     this.createObjectiveMarkers();
@@ -419,7 +551,14 @@ export class ArenaRenderer {
     if (this.disposed) return;
     const width = Math.max(1, this.container.clientWidth || window.innerWidth || 1);
     const height = Math.max(1, this.container.clientHeight || window.innerHeight || 1);
-    const pixelRatio = Math.min(window.devicePixelRatio || 1, 1.25);
+    // Bound the half-float post-processing targets on 4K/5K displays. SMAA
+    // recovers the small loss in edge quality without exhausting iGPU memory.
+    const renderTargetPixelBudget = 4_200_000;
+    const pixelRatio = Math.min(
+      window.devicePixelRatio || 1,
+      1.25,
+      Math.sqrt(renderTargetPixelBudget / (width * height)),
+    );
     this.renderer.setPixelRatio(pixelRatio);
     this.renderer.setSize(width, height, false);
     this.composer.setPixelRatio(pixelRatio);
@@ -471,7 +610,16 @@ export class ArenaRenderer {
     this.damagePulse = Math.max(0, this.damagePulse - delta * 2.65);
     this.weaponKick = Math.max(0, this.weaponKick - delta * 7.5);
     this.damageUniform.value = this.damagePulse * this.damagePulse * 0.78;
+    this.fireUniform.value = this.weaponKick * this.weaponKick;
     this.gradePass.uniforms.uDamage!.value = this.damageUniform.value;
+    this.gradePass.uniforms.uFire!.value = this.fireUniform.value;
+    this.depthFocusPass.focusDistance = firstPerson
+      ? THREE.MathUtils.lerp(21, 34, this.viewAimBlend)
+      : 42;
+    this.depthFocusPass.aperture = firstPerson
+      ? THREE.MathUtils.lerp(0.92, 0.58, this.viewAimBlend)
+      : 1.08;
+    this.depthFocusPass.maxBlurPixels = firstPerson ? 1.65 : 2.15;
     this.renderer.toneMappingExposure = 1.08 - this.damagePulse * 0.11;
     this.skyMaterial.uniforms.uTime!.value = worldTime;
     this.gradePass.uniforms.uTime!.value = worldTime;
@@ -489,21 +637,31 @@ export class ArenaRenderer {
     // those resources are released exactly once.
     this.facilityEnvironment?.dispose();
     this.facilityEnvironment = null;
+    this.baseArchitecture?.dispose();
+    this.baseArchitecture = null;
 
     const geometries = new Set<THREE.BufferGeometry>();
     const materials = new Set<THREE.Material>();
     const collect = (object: THREE.Object3D): void => {
       object.traverse((child) => {
-        if (!(child instanceof THREE.Mesh || child instanceof THREE.Line || child instanceof THREE.LineSegments)) return;
+        if (!(child instanceof THREE.Mesh || child instanceof THREE.Line || child instanceof THREE.LineSegments || child instanceof THREE.Points)) return;
         geometries.add(child.geometry);
         const childMaterials = Array.isArray(child.material) ? child.material : [child.material];
         for (const material of childMaterials) materials.add(material);
       });
     };
 
+    for (const effect of this.effects) {
+      collect(effect.object);
+      effect.object.removeFromParent();
+    }
+    this.effects.length = 0;
     collect(this.scene);
     collect(this.viewScene);
     for (const template of this.weaponTemplates.values()) collect(template);
+    geometries.add(this.shotFlashGeometry);
+    geometries.add(this.muzzleConeGeometry);
+    geometries.add(this.shotSmokeGeometry);
     for (const geometry of geometries) geometry.dispose();
     for (const material of materials) material.dispose();
     for (const texture of this.ownedTextures) texture.dispose();
@@ -675,16 +833,25 @@ export class ArenaRenderer {
     this.groundNormalTexture = forestGround.normal;
     this.groundRoughnessTexture = forestGround.roughness;
     this.facilityPanelTexture = createFacilityPanelTexture(512);
+    const technicalSurface = createTechnicalSurfaceTextures(256);
+    this.technicalNormalTexture = technicalSurface.normal;
+    this.technicalRoughnessTexture = technicalSurface.roughness;
     this.groundTexture.repeat.set(Math.max(7, width / 10), Math.max(7, depth / 10));
     this.groundNormalTexture.repeat.copy(this.groundTexture.repeat);
     this.groundRoughnessTexture.repeat.copy(this.groundTexture.repeat);
     this.facilityPanelTexture.repeat.set(4, 1);
+    this.technicalNormalTexture.repeat.set(3, 3);
+    this.technicalRoughnessTexture.repeat.copy(this.technicalNormalTexture.repeat);
     this.groundTexture.anisotropy = Math.min(8, this.renderer.capabilities.getMaxAnisotropy());
     this.groundNormalTexture.anisotropy = Math.min(4, this.renderer.capabilities.getMaxAnisotropy());
     this.ownedTextures.add(this.groundTexture);
     this.ownedTextures.add(this.groundNormalTexture);
     this.ownedTextures.add(this.groundRoughnessTexture);
     this.ownedTextures.add(this.facilityPanelTexture);
+    this.ownedTextures.add(this.technicalNormalTexture);
+    this.ownedTextures.add(this.technicalRoughnessTexture);
+    this.viewArmMaterial.normalMap = this.technicalNormalTexture;
+    this.viewArmMaterial.normalScale.set(0.16, 0.16);
 
     const outerGround = new THREE.Mesh(
       new THREE.CircleGeometry(Math.max(146, arenaRadius + 78), 96),
@@ -983,9 +1150,11 @@ export class ArenaRenderer {
       seed: 0xf0e57,
       bounds: playableBounds,
       materials: environment.materials,
-      fernCount: Math.min(280, Math.round(arenaArea * 0.0275)),
-      grassCount: Math.min(620, Math.round(arenaArea * 0.061)),
-      heightAt: () => floorY + 0.006,
+      fernCount: Math.min(340, Math.round(arenaArea * 0.034)),
+      // One instanced draw call can afford a genuinely lawn-like density in
+      // the earth pockets while paths, objectives and interiors stay clear.
+      grassCount: Math.min(4800, Math.round(arenaArea * 0.52)),
+      heightAt: (x, z) => floorY - 0.035 + sampleGroundRelief(this.map, x, z) + 0.006,
       exclusions,
       castShadow: false,
       densityAt: (x, z) => {
@@ -997,13 +1166,40 @@ export class ArenaRenderer {
         return THREE.MathUtils.clamp(0.22 + edge * 0.5 + islands * 0.25, 0.16, 0.92);
       },
     });
+    const raisedEarthworks = this.map.obstacles.filter((obstacle) =>
+      !obstacle.id.includes('outcrop')
+      && (
+        obstacle.id.includes('earth-')
+        || obstacle.id.includes('ridge')
+        || obstacle.id.includes('planter')
+      ));
+    const raisedEarthworkAt = (x: number, z: number) => raisedEarthworks.find((obstacle) =>
+      x > obstacle.min.x + 0.28
+      && x < obstacle.max.x - 0.28
+      && z > obstacle.min.z + 0.28
+      && z < obstacle.max.z - 0.28);
+    const raisedUnderstory = createUnderstoryField({
+      seed: 0xe47a1,
+      bounds: playableBounds,
+      materials: environment.materials,
+      fernCount: 64,
+      grassCount: 1_400,
+      heightAt: (x, z) => raisedEarthworkAt(x, z)?.max.y ?? Number.NaN,
+      densityAt: (x, z) => {
+        const obstacle = raisedEarthworkAt(x, z);
+        if (!obstacle) return 0;
+        if (obstacle.id.includes('approach') || obstacle.id.includes('step')) return 0.38;
+        return obstacle.id.includes('planter') ? 0.98 : 0.78;
+      },
+      castShadow: false,
+    });
     const groundRocks = createWetRockField({
       seed: 0x5a11d,
       bounds: playableBounds,
       materials: environment.materials,
       count: Math.min(54, Math.round(arenaArea * 0.0046)),
       radiusRange: [0.12, 0.42],
-      heightAt: () => floorY + 0.005,
+      heightAt: (x, z) => floorY - 0.035 + sampleGroundRelief(this.map, x, z) + 0.005,
       exclusions,
       castShadow: false,
       densityAt: (x, z) => {
@@ -1014,7 +1210,7 @@ export class ArenaRenderer {
         return THREE.MathUtils.clamp(0.18 + edge * 0.68, 0.15, 0.9);
       },
     });
-    environment.group.add(understory, groundRocks);
+    environment.group.add(understory, raisedUnderstory, groundRocks);
     this.facilityEnvironment = environment;
     this.scene.add(environment.group);
   }
@@ -1139,9 +1335,9 @@ export class ArenaRenderer {
     for (let vertex = 0; vertex < position.count; vertex += 1) {
       const x = position.getX(vertex);
       const y = position.getY(vertex);
-      const macro = Math.sin(x * 0.19 + Math.cos(y * 0.11) * 1.7) * 0.5 + 0.5;
-      const fine = Math.sin(x * 0.73 - y * 0.51) * Math.cos(y * 0.37) * 0.5 + 0.5;
-      position.setZ(vertex, (macro - 0.5) * 0.045 + (fine - 0.5) * 0.018);
+      const worldX = centerX + x;
+      const worldZ = centerZ - y;
+      position.setZ(vertex, sampleGroundRelief(this.map, worldX, worldZ));
     }
     floorGeometry.computeVertexNormals();
     const floor = new THREE.Mesh(
@@ -1205,7 +1401,11 @@ export class ArenaRenderer {
         Math.hypot(x - base.x, z - base.z) < 5.5);
       if (onMainPath || insideObstacle || nearObjective) continue;
       const radius = 0.55 + puddleRandom() * 1.75;
-      puddleTransform.position.set(x, this.map.bounds.floorY + 0.008, z);
+      puddleTransform.position.set(
+        x,
+        this.map.bounds.floorY - 0.035 + sampleGroundRelief(this.map, x, z) + 0.008,
+        z,
+      );
       puddleTransform.rotation.set(-Math.PI / 2, 0, puddleRandom() * Math.PI);
       puddleTransform.scale.set(radius * (0.65 + puddleRandom() * 0.75), radius, 1);
       puddleTransform.updateMatrix();
@@ -1326,6 +1526,10 @@ export class ArenaRenderer {
 
     const paintMaterial = new THREE.MeshPhysicalMaterial({
       color: 0xdce3df,
+      map: this.facilityPanelTexture,
+      normalMap: this.technicalNormalTexture,
+      normalScale: new THREE.Vector2(0.21, 0.21),
+      roughnessMap: this.technicalRoughnessTexture,
       roughness: 0.34,
       metalness: 0.06,
       clearcoat: 0.34,
@@ -1372,6 +1576,32 @@ export class ArenaRenderer {
         }
       `,
     });
+    const earthworkMaterial = new THREE.MeshPhysicalMaterial({
+      name: 'playable-earthwork-soil',
+      color: 0x8b9f7c,
+      map: this.groundTexture,
+      normalMap: this.groundNormalTexture,
+      normalScale: new THREE.Vector2(0.96, 0.96),
+      roughnessMap: this.groundRoughnessTexture,
+      roughness: 0.94,
+      metalness: 0,
+      clearcoat: 0.055,
+      clearcoatRoughness: 0.72,
+      envMapIntensity: 0.34,
+    });
+    const outcropMaterial = new THREE.MeshPhysicalMaterial({
+      name: 'playable-weathered-rock',
+      color: 0x53665b,
+      map: this.groundTexture,
+      normalMap: this.groundNormalTexture,
+      normalScale: new THREE.Vector2(1.18, 1.18),
+      roughnessMap: this.groundRoughnessTexture,
+      roughness: 0.76,
+      metalness: 0.035,
+      clearcoat: 0.24,
+      clearcoatRoughness: 0.52,
+      envMapIntensity: 0.48,
+    });
 
     for (const obstacle of this.map.obstacles) {
       const size = new THREE.Vector3(
@@ -1384,6 +1614,30 @@ export class ArenaRenderer {
         (obstacle.min.y + obstacle.max.y) * 0.5,
         (obstacle.min.z + obstacle.max.z) * 0.5,
       );
+      // These collision volumes are rendered as segmented walls/skylights by
+      // baseArchitecture so their glass reveals the playable interiors.
+      if (ARCHITECTURE_AUTHORED_SHELLS.has(obstacle.id)) continue;
+      const isRockyOutcrop = obstacle.id.includes('outcrop') || /^(north|south)-mid-cover/.test(obstacle.id);
+      const isEarthwork = isRockyOutcrop || obstacle.id.includes('earth-') || obstacle.id.includes('ridge') || obstacle.id.includes('planter');
+      if (isEarthwork) {
+        const terrain = new THREE.Mesh(
+          createEarthworkGeometry(size, hashString(obstacle.id), isRockyOutcrop),
+          isRockyOutcrop ? outcropMaterial : earthworkMaterial,
+        );
+        terrain.name = `${obstacle.id}-organic-visual`;
+        terrain.position.copy(center);
+        terrain.castShadow = isRockyOutcrop || size.y > 0.8;
+        terrain.receiveShadow = true;
+        this.scene.add(terrain);
+        continue;
+      }
+      const authoredPropDetail = /cover|crate|console|screen|slab/.test(obstacle.id);
+      const isCompactDetailedProp = authoredPropDetail
+        && obstacle.kind === 'cover'
+        && size.x <= 8.5
+        && size.y <= 4.5
+        && size.z <= 8.5
+        && !obstacle.id.includes('growbed');
       const baseColor = obstacle.kind === 'tower'
         ? new THREE.Color(0x172327)
         : obstacle.id.includes('base-back')
@@ -1432,23 +1686,25 @@ export class ArenaRenderer {
         rail.position.set(center.x, obstacle.min.y + visibleHeight + 0.025, center.z);
         this.scene.add(rail);
       }
-      mesh.castShadow = obstacle.kind !== 'wall' && (size.x < 18 || size.z < 18);
+      mesh.castShadow = obstacle.kind !== 'wall'
+        && size.y > 0.32
+        && (size.x < 18 || size.z < 18);
       mesh.receiveShadow = true;
       this.scene.add(mesh);
 
-      if (obstacle.kind !== 'wall') {
+      if (isCompactDetailedProp) {
         const plinthHeight = Math.min(0.16, size.y * 0.12);
         const plinth = new THREE.Mesh(
           new RoundedBoxGeometry(size.x * 0.96, plinthHeight, size.z * 0.96, 2, Math.min(0.06, plinthHeight * 0.3)),
           structureMaterial,
         );
         plinth.position.set(center.x, obstacle.min.y + plinthHeight * 0.5 + 0.012, center.z);
-        plinth.castShadow = true;
+        plinth.castShadow = false;
         plinth.receiveShadow = true;
         this.scene.add(plinth);
       }
 
-      if (obstacle.kind !== 'wall' && size.x > 1.4 && size.z > 1.4) {
+      if (isCompactDetailedProp && size.x > 1.4 && size.z > 1.4) {
         const topHeight = 0.075;
         const top = new THREE.Mesh(
           new RoundedBoxGeometry(size.x * 0.84, topHeight, size.z * 0.84, 2, 0.025),
@@ -1465,7 +1721,7 @@ export class ArenaRenderer {
         this.scene.add(top);
       }
 
-      if (obstacle.kind === 'cover' || obstacle.kind === 'platform') {
+      if (isCompactDetailedProp) {
         const horizontal = size.x >= size.z;
         const panel = new THREE.Mesh(
           horizontal
@@ -2015,19 +2271,21 @@ export class ArenaRenderer {
     const rightZ = -Math.sin(player.yaw);
     const forwardSpeed = player.velocity.x * forwardX + player.velocity.z * forwardZ;
     const strafeSpeed = player.velocity.x * rightX + player.velocity.z * rightZ;
-    const targetMove = smootherstep01((horizontalSpeed - 0.08) / 6.7);
-    rig.moveBlend = damp(rig.moveBlend, targetMove, 13, delta);
+    const locomotion = evaluateLocomotionCycle(horizontalSpeed, forwardSpeed, strafeSpeed, delta);
+    rig.moveBlend = damp(rig.moveBlend, locomotion.moveBlend, 13, delta);
     rig.groundBlend = damp(rig.groundBlend, player.grounded ? 1 : 0, player.grounded ? 19 : 13, delta);
-    rig.forwardBlend = damp(rig.forwardBlend, THREE.MathUtils.clamp(forwardSpeed / 7, -1, 1), 10, delta);
-    rig.strafeBlend = damp(rig.strafeBlend, THREE.MathUtils.clamp(strafeSpeed / 7, -1, 1), 10, delta);
+    rig.forwardBlend = damp(rig.forwardBlend, locomotion.forwardBlend, 10, delta);
+    rig.strafeBlend = damp(rig.strafeBlend, locomotion.strafeBlend, 10, delta);
 
-    const runBlend = smootherstep01((horizontalSpeed - 2.7) / 4.3);
-    const strideLength = THREE.MathUtils.lerp(1.05, 1.68, runBlend);
-    const phaseDirection = rig.forwardBlend < -0.12 ? -1 : 1;
-    rig.locomotionPhase += horizontalSpeed * delta / strideLength * Math.PI * 2 * phaseDirection;
+    const runBlend = locomotion.runBlend;
+    rig.locomotionPhase = advanceLocomotionPhase(rig.locomotionPhase, locomotion.phaseDelta);
     const cycle = Math.sin(rig.locomotionPhase);
-    const oppositeCycle = -cycle;
-    const strideAmplitude = THREE.MathUtils.lerp(0.28, 0.72, runBlend) * rig.moveBlend;
+    const gait = evaluateDirectionalGait(rig.locomotionPhase, {
+      moveBlend: rig.moveBlend,
+      runBlend,
+      forwardBlend: rig.forwardBlend,
+      strafeBlend: rig.strafeBlend,
+    });
     const groundedWeight = rig.groundBlend;
     const airborneWeight = 1 - groundedWeight;
     const rise = saturate(player.velocity.y / 6.3);
@@ -2040,21 +2298,26 @@ export class ArenaRenderer {
     const jumpWeight = trianglePulse(jumpProgress, 0, 0.18, 1);
     const hitWeight = trianglePulse(normalizedTimer(rig.hitTimer, 0.24), 0, 0.18, 1);
 
-    const leftHipX = cycle * strideAmplitude * groundedWeight + leftAirHip * airborneWeight - jumpWeight * 0.08;
-    const rightHipX = oppositeCycle * strideAmplitude * groundedWeight + rightAirHip * airborneWeight - jumpWeight * 0.02;
-    const leftRecovery = Math.max(0, -cycle) * (0.36 + runBlend * 0.42) * rig.moveBlend;
-    const rightRecovery = Math.max(0, cycle) * (0.36 + runBlend * 0.42) * rig.moveBlend;
+    const leftHipX = gait.leftHipPitch * groundedWeight + leftAirHip * airborneWeight - jumpWeight * 0.08;
+    const rightHipX = gait.rightHipPitch * groundedWeight + rightAirHip * airborneWeight - jumpWeight * 0.02;
     const airKnee = rise * 0.52 + fall * 0.12;
-    const leftKneeX = leftRecovery * groundedWeight + airKnee * airborneWeight + landingWeight * 0.72;
-    const rightKneeX = rightRecovery * groundedWeight + airKnee * airborneWeight + landingWeight * 0.72;
-    const strafeLean = rig.strafeBlend * 0.12 * rig.moveBlend;
+    const leftKneeX = gait.leftKnee * groundedWeight + airKnee * airborneWeight + landingWeight * 0.72;
+    const rightKneeX = gait.rightKnee * groundedWeight + airKnee * airborneWeight + landingWeight * 0.72;
 
-    rig.leftLeg.rotation.set(leftHipX, 0, strafeLean * 0.34);
-    rig.rightLeg.rotation.set(rightHipX, 0, strafeLean * 0.34);
+    rig.leftLeg.rotation.set(leftHipX, 0, gait.leftHipRoll * groundedWeight);
+    rig.rightLeg.rotation.set(rightHipX, 0, gait.rightHipRoll * groundedWeight);
     rig.leftKnee.rotation.set(-leftKneeX, 0, 0);
     rig.rightKnee.rotation.set(-rightKneeX, 0, 0);
-    rig.leftFoot.rotation.set(-leftHipX + leftKneeX * 0.78, 0, -strafeLean * 0.24);
-    rig.rightFoot.rotation.set(-rightHipX + rightKneeX * 0.78, 0, -strafeLean * 0.24);
+    rig.leftFoot.rotation.set(
+      THREE.MathUtils.lerp(gait.leftFootPitch, -leftHipX + leftKneeX * 0.78, airborneWeight),
+      0,
+      -gait.leftHipRoll * 0.34 * groundedWeight,
+    );
+    rig.rightFoot.rotation.set(
+      THREE.MathUtils.lerp(gait.rightFootPitch, -rightHipX + rightKneeX * 0.78, airborneWeight),
+      0,
+      -gait.rightHipRoll * 0.34 * groundedWeight,
+    );
 
     const visualTime = this.elapsedRenderTime + (hashString(player.id) % 100) * 0.017;
     const breathing = Math.sin(visualTime * 1.75) * 0.0065 * (1 - rig.moveBlend * 0.72);
@@ -2069,10 +2332,13 @@ export class ArenaRenderer {
       0,
     );
     rig.torso.rotation.set(
-      player.pitch * 0.075 - rig.forwardBlend * 0.065 * rig.moveBlend + landingWeight * 0.1 + fall * airborneWeight * 0.055,
+      player.pitch * 0.075
+        + gait.torsoPitch * groundedWeight
+        + landingWeight * 0.1
+        + fall * airborneWeight * 0.055,
       0,
-      -rig.strafeBlend * 0.1 * rig.moveBlend
-        - cycle * 0.018 * rig.moveBlend * groundedWeight
+      (gait.torsoRoll + gait.pelvisRoll * 0.42) * groundedWeight
+        - cycle * 0.012 * rig.moveBlend * groundedWeight
         + rig.hitDirection * hitWeight * 0.085,
     );
     rig.upperBodyAim.rotation.set(
@@ -2291,6 +2557,24 @@ export class ArenaRenderer {
       clearcoatRoughness: 0.045,
       envMapIntensity: 2.1,
     });
+    if (this.technicalNormalTexture) {
+      armorMaterial.normalMap = this.technicalNormalTexture;
+      armorMaterial.normalScale.set(0.13, 0.13);
+      accentMaterial.normalMap = this.technicalNormalTexture;
+      accentMaterial.normalScale.set(0.1, 0.1);
+      jointMaterial.normalMap = this.technicalNormalTexture;
+      jointMaterial.normalScale.set(0.07, 0.07);
+      technicalMaterial.normalMap = this.technicalNormalTexture;
+      technicalMaterial.normalScale.set(0.15, 0.15);
+    }
+    if (this.technicalRoughnessTexture) {
+      armorMaterial.roughness = 0.58;
+      armorMaterial.roughnessMap = this.technicalRoughnessTexture;
+      accentMaterial.roughness = 0.62;
+      accentMaterial.roughnessMap = this.technicalRoughnessTexture;
+      technicalMaterial.roughness = 0.5;
+      technicalMaterial.roughnessMap = this.technicalRoughnessTexture;
+    }
 
     if (!this.contactShadowTexture) {
       this.contactShadowTexture = createRadialTexture({ size: 128, profile: 'shadow' });
@@ -2791,6 +3075,16 @@ export class ArenaRenderer {
     const group = createWeaponModel(id);
     group.traverse((object) => {
       object.userData.sharedVisualTemplate = true;
+      if (!(object instanceof THREE.Mesh)) return;
+      const materials = Array.isArray(object.material) ? object.material : [object.material];
+      for (const material of materials) {
+        if (!(material instanceof THREE.MeshStandardMaterial) || material.transparent) continue;
+        if (!material.normalMap && this.technicalNormalTexture) {
+          material.normalMap = this.technicalNormalTexture;
+          material.normalScale.set(0.11, 0.11);
+          material.needsUpdate = true;
+        }
+      }
     });
     this.weaponTemplates.set(id, group);
     return group;
@@ -3079,8 +3373,6 @@ export class ArenaRenderer {
     this.towerRingMaterial.opacity = state.tower.controllingTeam === 'neutral'
       ? 0.32 + Math.sin(worldTime * 2) * 0.06
       : 0.58 + Math.sin(worldTime * 4) * 0.1;
-    const owner = state.tower.turretOwnerId ? state.players[state.tower.turretOwnerId] : undefined;
-    if (owner) this.towerTurret.rotation.y = owner.yaw;
   }
 
   private consumeEvents(state: MatchState): void {
@@ -3128,24 +3420,36 @@ export class ArenaRenderer {
     if (event.type === 'shot' && event.actorId) {
       const actor = state.players[event.actorId];
       if (!actor) return;
+      const turretShot = event.message === 'Torreta';
       const origin = new THREE.Vector3(actor.position.x, actor.position.y + actor.height * 0.76, actor.position.z);
       const actorRig = this.playerRigs.get(event.actorId);
       const modelMuzzle = actorRig?.weaponModel
         ? getWeaponAnchor(actorRig.weaponModel, 'muzzle')
         : null;
-      if (actorRig?.weaponModel && modelMuzzle) {
+      if (turretShot) {
+        if (event.position) {
+          const deltaX = event.position.x - this.towerTurret.position.x;
+          const deltaZ = event.position.z - this.towerTurret.position.z;
+          this.towerTurret.rotation.y = Math.atan2(-deltaX, -deltaZ);
+        }
+        this.towerTurret.updateWorldMatrix(true, false);
+        origin.copy(this.towerTurret.localToWorld(new THREE.Vector3(0, 0.92, -1.97)));
+      } else if (actorRig?.weaponModel && modelMuzzle) {
         actorRig.weaponModel.updateWorldMatrix(true, false);
         origin.copy(actorRig.weaponModel.localToWorld(modelMuzzle));
       }
-      const direction = new THREE.Vector3(
+      const actorDirection = new THREE.Vector3(
         -Math.sin(actor.yaw) * Math.cos(actor.pitch),
         Math.sin(actor.pitch),
         -Math.cos(actor.yaw) * Math.cos(actor.pitch),
       );
-      const candidateEnd = event.position ? vectorFrom(event.position) : origin.clone().addScaledVector(direction, 18);
+      const candidateEnd = event.position ? vectorFrom(event.position) : origin.clone().addScaledVector(actorDirection, 18);
       const end = candidateEnd.distanceToSquared(origin) < 0.8
-        ? origin.clone().addScaledVector(direction, 18)
+        ? origin.clone().addScaledVector(actorDirection, 18)
         : candidateEnd;
+      const direction = turretShot
+        ? end.clone().sub(origin).normalize()
+        : actorDirection;
       const geometry = new THREE.BufferGeometry().setFromPoints([origin, end]);
       const tint = event.weaponId ? WEAPONS[event.weaponId].tint : TEAM_COLORS[actor.team].glow;
       const material = new THREE.LineBasicMaterial({
@@ -3175,25 +3479,149 @@ export class ArenaRenderer {
         blending: THREE.AdditiveBlending,
         depthWrite: false,
       });
-      const flash = new THREE.Mesh(new THREE.IcosahedronGeometry(0.115, 1), flashMaterial);
+      const flash = new THREE.Mesh(this.shotFlashGeometry, flashMaterial);
+      flash.userData.sharedEffectGeometry = true;
       flash.position.copy(origin).addScaledVector(direction, 0.48);
-      flash.scale.set(0.72, 0.72, 1.9);
+      flash.scale.set(0.115 * 0.72, 0.115 * 0.72, 0.115 * 1.9);
       flash.quaternion.setFromUnitVectors(FORWARD, direction);
       effect.add(flash);
-      const flashLight = new THREE.PointLight(tint, 9, 4.2, 2);
-      flashLight.position.copy(flash.position);
-      effect.add(flashLight);
+      const heavyShot = event.weaponId === 'shotgun'
+        || event.weaponId === 'sniper'
+        || event.weaponId === 'rocket-launcher';
+      const flameLength = heavyShot ? 0.92 : event.weaponId === 'sidearm' ? 0.48 : 0.62;
+      const outerFlameMaterial = new THREE.MeshBasicMaterial({
+        color: 0xff793d,
+        transparent: true,
+        opacity: 0.82,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+      });
+      const outerFlame = new THREE.Mesh(
+        this.muzzleConeGeometry,
+        outerFlameMaterial,
+      );
+      outerFlame.userData.sharedEffectGeometry = true;
+      const outerFlameRadius = heavyShot ? 0.19 : 0.13;
+      outerFlame.scale.set(outerFlameRadius, flameLength, outerFlameRadius);
+      outerFlame.quaternion.setFromUnitVectors(UP, direction);
+      outerFlame.position.copy(origin).addScaledVector(direction, flameLength * 0.52 + 0.14);
+      effect.add(outerFlame);
+      const innerFlameMaterial = new THREE.MeshBasicMaterial({
+        color: 0xfff2c4,
+        transparent: true,
+        opacity: 1,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      });
+      const innerFlame = new THREE.Mesh(
+        this.muzzleConeGeometry,
+        innerFlameMaterial,
+      );
+      innerFlame.userData.sharedEffectGeometry = true;
+      const innerFlameRadius = heavyShot ? 0.09 : 0.065;
+      const innerFlameLength = flameLength * 0.68;
+      innerFlame.scale.set(innerFlameRadius, innerFlameLength, innerFlameRadius);
+      innerFlame.quaternion.copy(outerFlame.quaternion);
+      innerFlame.position.copy(origin).addScaledVector(direction, flameLength * 0.37 + 0.1);
+      effect.add(innerFlame);
+      const smokeMaterial = new THREE.MeshBasicMaterial({
+        color: 0x8ea1a0,
+        transparent: true,
+        opacity: heavyShot ? 0.2 : 0.11,
+        depthWrite: false,
+      });
+      const muzzleSmoke = new THREE.Mesh(this.shotSmokeGeometry, smokeMaterial);
+      muzzleSmoke.userData.sharedEffectGeometry = true;
+      muzzleSmoke.scale.setScalar(0.1);
+      muzzleSmoke.position.copy(origin).addScaledVector(direction, 0.34);
+      effect.add(muzzleSmoke);
+
+      const reachedSurface = event.impact === true;
+      let impactMaterial: THREE.PointsMaterial | null = null;
+      let impactPositions: THREE.BufferAttribute | null = null;
+      let impactVelocities: THREE.Vector3[] = [];
+      let impactGlowMaterial: THREE.MeshBasicMaterial | null = null;
+      if (reachedSurface && event.weaponId !== 'rocket-launcher') {
+        const sparkRandom = seededRandom(event.id * 0x9e3779b1);
+        const sparkCount = event.weaponId === 'shotgun' ? 15 : 9;
+        const sparkValues = new Float32Array(sparkCount * 3);
+        impactVelocities = [];
+        for (let index = 0; index < sparkCount; index += 1) {
+          sparkValues[index * 3] = end.x;
+          sparkValues[index * 3 + 1] = end.y;
+          sparkValues[index * 3 + 2] = end.z;
+          impactVelocities.push(new THREE.Vector3(
+            (sparkRandom() - 0.5) * 4.2 - direction.x * 1.6,
+            0.8 + sparkRandom() * 3.2 - direction.y,
+            (sparkRandom() - 0.5) * 4.2 - direction.z * 1.6,
+          ));
+        }
+        const sparkGeometry = new THREE.BufferGeometry();
+        impactPositions = new THREE.BufferAttribute(sparkValues, 3);
+        sparkGeometry.setAttribute('position', impactPositions);
+        impactMaterial = new THREE.PointsMaterial({
+          color: 0xffd08a,
+          size: event.weaponId === 'shotgun' ? 0.075 : 0.055,
+          transparent: true,
+          opacity: 0.95,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+          sizeAttenuation: true,
+        });
+        effect.add(new THREE.Points(sparkGeometry, impactMaterial));
+        impactGlowMaterial = new THREE.MeshBasicMaterial({
+          color: 0xffb56d,
+          transparent: true,
+          opacity: 0.76,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+        });
+        const impactGlow = new THREE.Mesh(this.shotSmokeGeometry, impactGlowMaterial);
+        impactGlow.userData.sharedEffectGeometry = true;
+        impactGlow.scale.setScalar(0.08);
+        impactGlow.position.copy(end);
+        effect.add(impactGlow);
+      }
       this.scene.add(effect);
       this.effects.push({
         object: effect,
         age: 0,
-        duration: 0.085,
+        duration: heavyShot ? 0.16 : 0.115,
         update: (progress) => {
           material.opacity = (1 - progress) * 0.32;
           coreMaterial.opacity = (1 - progress) * 0.96;
           flashMaterial.opacity = (1 - progress) * 0.95;
-          flashLight.intensity = (1 - progress) * (1 - progress) * 9;
+          outerFlameMaterial.opacity = (1 - progress) * 0.82;
+          innerFlameMaterial.opacity = (1 - progress) * (1 - progress);
+          smokeMaterial.opacity = (1 - progress) * (heavyShot ? 0.2 : 0.11);
           flash.scale.multiplyScalar(0.93);
+          outerFlame.scale.set(
+            outerFlameRadius * (1 - progress * 0.42),
+            flameLength * (1 - progress * 0.72),
+            outerFlameRadius * (1 - progress * 0.42),
+          );
+          innerFlame.scale.set(
+            innerFlameRadius * (1 - progress * 0.58),
+            innerFlameLength * (1 - progress * 0.58),
+            innerFlameRadius * (1 - progress * 0.58),
+          );
+          muzzleSmoke.scale.setScalar(0.1 * (0.7 + progress * (heavyShot ? 5.2 : 3.2)));
+          muzzleSmoke.position.y += 0.0035;
+          if (impactMaterial && impactPositions) {
+            impactMaterial.opacity = (1 - progress) * 0.95;
+            for (let index = 0; index < impactVelocities.length; index += 1) {
+              const velocity = impactVelocities[index]!;
+              impactPositions.setXYZ(
+                index,
+                end.x + velocity.x * progress * 0.18,
+                end.y + velocity.y * progress * 0.18 - progress * progress * 0.22,
+                end.z + velocity.z * progress * 0.18,
+              );
+            }
+            impactPositions.needsUpdate = true;
+          }
+          if (impactGlowMaterial) impactGlowMaterial.opacity = (1 - progress) * 0.76;
         },
       });
       if (event.message !== 'Torreta') {
@@ -3224,11 +3652,40 @@ export class ArenaRenderer {
               blending: THREE.AdditiveBlending,
               depthWrite: false,
             });
-            const localCore = new THREE.Mesh(new THREE.IcosahedronGeometry(0.13, 1), localFlashMaterial);
-            localCore.scale.set(0.9, 0.9, 2.3);
+            const localCore = new THREE.Mesh(this.shotFlashGeometry, localFlashMaterial);
+            localCore.userData.sharedEffectGeometry = true;
+            localCore.scale.set(0.13 * 0.9, 0.13 * 0.9, 0.13 * 2.3);
             localFlash.add(localCore);
-            const localLight = new THREE.PointLight(tint, 8, 2.6, 2);
-            localFlash.add(localLight);
+            const localFlameMaterial = new THREE.MeshBasicMaterial({
+              color: 0xff8a45,
+              transparent: true,
+              opacity: 0.95,
+              blending: THREE.AdditiveBlending,
+              depthWrite: false,
+              side: THREE.DoubleSide,
+            });
+            const localFlame = new THREE.Mesh(
+              this.muzzleConeGeometry,
+              localFlameMaterial,
+            );
+            localFlame.userData.sharedEffectGeometry = true;
+            const localFlameRadius = heavyShot ? 0.12 : 0.085;
+            const localFlameLength = flameLength * 0.82;
+            localFlame.scale.set(localFlameRadius, localFlameLength, localFlameRadius);
+            localFlame.quaternion.setFromUnitVectors(UP, FORWARD);
+            localFlame.position.z = -flameLength * 0.38;
+            localFlash.add(localFlame);
+            const localSmokeMaterial = new THREE.MeshBasicMaterial({
+              color: 0xa7b3af,
+              transparent: true,
+              opacity: heavyShot ? 0.18 : 0.08,
+              depthWrite: false,
+            });
+            const localSmoke = new THREE.Mesh(this.shotSmokeGeometry, localSmokeMaterial);
+            localSmoke.userData.sharedEffectGeometry = true;
+            localSmoke.scale.setScalar(0.07);
+            localSmoke.position.z = -0.16;
+            localFlash.add(localSmoke);
             this.viewWeaponModel.add(localFlash);
             this.effects.push({
               object: localFlash,
@@ -3236,8 +3693,16 @@ export class ArenaRenderer {
               duration: 0.072,
               update: (progress) => {
                 localFlashMaterial.opacity = 1 - progress;
+                localFlameMaterial.opacity = (1 - progress) * 0.95;
+                localSmokeMaterial.opacity = (1 - progress) * (heavyShot ? 0.18 : 0.08);
                 localCore.scale.multiplyScalar(0.92);
-                localLight.intensity = (1 - progress) * (1 - progress) * 8;
+                localFlame.scale.set(
+                  localFlameRadius * (1 - progress * 0.45),
+                  localFlameLength * (1 - progress * 0.7),
+                  localFlameRadius * (1 - progress * 0.45),
+                );
+                localSmoke.scale.setScalar(0.07 * (0.75 + progress * (heavyShot ? 4.8 : 2.8)));
+                localSmoke.position.y += 0.0025;
               },
             });
           }
@@ -3416,6 +3881,18 @@ export class ArenaRenderer {
       const speed = Math.hypot(localPlayer.velocity.x, localPlayer.velocity.z);
       const bobAmount = localRig.moveBlend * localRig.groundBlend;
       const bobPhase = localRig.locomotionPhase;
+      const viewLocomotion = {
+        moveBlend: localRig.moveBlend,
+        runBlend: smootherstep01((speed - 2.35) / 3.05),
+        forwardBlend: localRig.forwardBlend,
+        strafeBlend: localRig.strafeBlend,
+      };
+      const weaponBob = evaluateWeaponBob(
+        bobPhase,
+        viewLocomotion,
+        localRig.groundBlend,
+        this.viewAimBlend,
+      );
       const landingWeight = trianglePulse(
         normalizedTimer(localRig.landingTimer, 0.34),
         0,
@@ -3427,15 +3904,16 @@ export class ArenaRenderer {
       const eyeHeight = localPlayer.height * 0.86;
       this.camera.position.copy(localRig.root.position);
       this.camera.position.y += eyeHeight
-        + Math.abs(Math.cos(bobPhase)) * 0.018 * bobAmount
+        + weaponBob.y * 0.62
         - landingWeight * 0.085
         + jumpWeight * 0.024;
-      this.camera.position.x += Math.sin(bobPhase) * 0.011 * bobAmount;
+      this.camera.position.x += Math.cos(localPlayer.yaw) * weaponBob.x * 0.5;
+      this.camera.position.z -= Math.sin(localPlayer.yaw) * weaponBob.x * 0.5;
       this.camera.rotation.set(
         localPlayer.pitch + Math.sin(worldTime * 58) * damageShake,
         localPlayer.yaw + Math.cos(worldTime * 47) * damageShake,
-        Math.sin(bobPhase) * 0.0055 * bobAmount
-          - localRig.strafeBlend * 0.006 * bobAmount
+        weaponBob.roll * 0.45
+          - localRig.strafeBlend * 0.0035 * bobAmount
           + Math.sin(worldTime * 69) * damageShake * 0.35,
         'YXZ',
       );
@@ -3496,8 +3974,8 @@ export class ArenaRenderer {
 
       const recoil = Math.max(localRig.recoil, this.weaponKick);
       const steadying = 1 - this.viewAimBlend * 0.88;
-      const bobX = Math.sin(bobPhase) * 0.021 * bobAmount * steadying;
-      const bobY = Math.abs(Math.cos(bobPhase)) * 0.016 * bobAmount * steadying;
+      const bobX = weaponBob.x;
+      const bobY = weaponBob.y;
       const airDrift = (1 - localRig.groundBlend) * THREE.MathUtils.clamp(localPlayer.velocity.y / 8, -1, 1);
       const aimedX = activeWeapon?.id === 'rocket-launcher' ? 0.13 : activeWeapon?.id === 'sidearm' ? 0.075 : 0.035;
       const aimedY = activeWeapon?.id === 'sniper' ? -0.2 : -0.225;
@@ -3511,10 +3989,12 @@ export class ArenaRenderer {
         THREE.MathUtils.lerp(-0.62, aimedZ, this.viewAimBlend),
       );
       this.viewModel.rotation.set(
-        THREE.MathUtils.lerp(-0.03, 0, this.viewAimBlend) + landingWeight * 0.045 * steadying,
+        THREE.MathUtils.lerp(-0.03, 0, this.viewAimBlend)
+          + landingWeight * 0.045 * steadying
+          + weaponBob.pitch,
         THREE.MathUtils.lerp(-0.045, 0, this.viewAimBlend),
         THREE.MathUtils.lerp(0.012, 0, this.viewAimBlend)
-          - bobX * 0.32
+          + weaponBob.roll
           - localRig.strafeBlend * 0.012 * bobAmount * steadying,
       );
 

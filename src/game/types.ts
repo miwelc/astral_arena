@@ -148,6 +148,8 @@ export interface GameEvent {
   targetId?: string;
   weaponId?: WeaponId;
   position?: Vec3;
+  /** True when a shot endpoint is an actual world/player impact, not max range. */
+  impact?: boolean;
   message?: string;
   amount?: number;
 }
