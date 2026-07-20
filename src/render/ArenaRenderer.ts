@@ -5069,7 +5069,7 @@ export class ArenaRenderer {
         pickup.position.z,
       );
       if (visual.temporary) {
-        // Equipment dropped on death stays where it fell instead of presenting
+        // Dropped equipment stays where it fell instead of presenting
         // itself like a pristine rack spawn. A small authored yaw keeps piles
         // readable without the arcade-like hover and continuous rotation.
         visual.display.position.y = 0;
@@ -5082,7 +5082,7 @@ export class ArenaRenderer {
     if (this.pickupVisuals.size !== pickups.length) {
       for (const [id, visual] of this.pickupVisuals) {
         if (visual.seenGeneration === this.renderGeneration) continue;
-        // Weapon/grenade death drops are intentionally short-lived. Their
+        // Weapon/grenade equipment drops are intentionally short-lived. Their
         // weapon meshes clone shared templates while rings/grenade shells are
         // owned per pickup. disposeObject skips the former and releases the
         // latter, avoiding both broken templates and a long-session GPU leak.

@@ -109,6 +109,9 @@ interface PendingMeleeHit {
   options: DamageOptions;
 }
 
+type TemporaryPickupDrop = Pick<PickupState, 'kind' | 'position' | 'amount'>
+  & Pick<Partial<PickupState>, 'weaponId' | 'weaponState'>;
+
 const noButtons = (): ButtonState => ({
   fire: false,
   jump: false,
@@ -1172,32 +1175,29 @@ export class GameSimulation {
   }
 
   private dropDeathEquipment(victim: PlayerState): void {
-    const activeWeapon = victim.inventory[victim.activeWeapon];
     const right = { x: Math.cos(victim.yaw), y: 0, z: -Math.sin(victim.yaw) };
-    if (activeWeapon) {
-      const droppedWeapon = {
-        ...activeWeapon,
-        cooldown: 0,
-        reloadTimer: 0,
-        bloom: 0,
-        burstRemaining: 0,
-        burstRoundIndex: 0,
-        burstTimer: 0,
-      };
-      this.addDeathPickup({
+    const forward = directionFromAngles(victim.yaw, 0);
+    const weaponCount = victim.inventory.length;
+    victim.inventory.forEach((weapon, index) => {
+      const lateralOffset = weaponCount === 1 ? -0.34 : (index - (weaponCount - 1) * 0.5) * 0.82;
+      const forwardOffset = index % 2 === 0 ? 0.18 : -0.18;
+      this.addTemporaryPickup({
         kind: 'weapon',
-        position: add(victim.position, add(scale(right, -0.38), vec3(0, 0.28, 0))),
-        weaponId: activeWeapon.id,
-        weaponState: droppedWeapon,
+        position: add(
+          victim.position,
+          add(add(scale(right, lateralOffset), scale(forward, forwardOffset)), vec3(0, 0.28, 0)),
+        ),
+        weaponId: weapon.id,
+        weaponState: this.droppedWeaponState(weapon),
         amount: 1,
       });
       // The authoritative copy now lives in the pickup. Clearing the corpse
       // prevents a later system from duplicating its ammunition before respawn.
-      activeWeapon.magazine = 0;
-      activeWeapon.reserve = 0;
-    }
+      weapon.magazine = 0;
+      weapon.reserve = 0;
+    });
     if (victim.grenades > 0) {
-      this.addDeathPickup({
+      this.addTemporaryPickup({
         kind: 'grenade',
         position: add(victim.position, add(scale(right, 0.38), vec3(0, 0.24, 0))),
         amount: victim.grenades,
@@ -1206,10 +1206,19 @@ export class GameSimulation {
     }
   }
 
-  private addDeathPickup(
-    drop: Pick<PickupState, 'kind' | 'position' | 'amount'>
-      & Pick<Partial<PickupState>, 'weaponId' | 'weaponState'>,
-  ): void {
+  private droppedWeaponState(weapon: PlayerState['inventory'][number]): PlayerState['inventory'][number] {
+    return {
+      ...weapon,
+      cooldown: 0,
+      reloadTimer: 0,
+      bloom: 0,
+      burstRemaining: 0,
+      burstRoundIndex: 0,
+      burstTimer: 0,
+    };
+  }
+
+  private addTemporaryPickup(drop: TemporaryPickupDrop): void {
     // Bound temporary state so an unusually long or highly lethal session can
     // never exceed the P2P snapshot budget.
     if (this.state.pickups.length >= 112) {
@@ -1471,6 +1480,7 @@ export class GameSimulation {
 
   private updatePickups(dt: number): void {
     const remainingPickups: PickupState[] = [];
+    const pendingEquipmentDrops: TemporaryPickupDrop[] = [];
     let players: PlayerState[] | null = null;
     for (const pickup of this.state.pickups) {
       if (pickup.temporary) {
@@ -1522,6 +1532,15 @@ export class GameSimulation {
             player.inventory.push(this.weaponFromPickup(pickup));
             consumed = true;
           } else {
+            const replacedWeapon = player.inventory[player.activeWeapon]!;
+            const right = { x: Math.cos(player.yaw), y: 0, z: -Math.sin(player.yaw) };
+            pendingEquipmentDrops.push({
+              kind: 'weapon',
+              position: add(player.position, add(scale(right, 0.58), vec3(0, 0.24, 0))),
+              weaponId: replacedWeapon.id,
+              weaponState: this.droppedWeaponState(replacedWeapon),
+              amount: 1,
+            });
             player.inventory[player.activeWeapon] = this.weaponFromPickup(pickup);
             player.equipTimer = WEAPON_EQUIP_SECONDS;
             consumed = true;
@@ -1552,6 +1571,9 @@ export class GameSimulation {
       if (!removeTemporaryPickup) remainingPickups.push(pickup);
     }
     this.state.pickups = remainingPickups;
+    // Defer swap drops until traversal is complete. Appending while iterating
+    // could make the same held E action see the freshly dropped weapon.
+    for (const drop of pendingEquipmentDrops) this.addTemporaryPickup(drop);
   }
 
   private weaponFromPickup(pickup: PickupState): PlayerState['inventory'][number] {

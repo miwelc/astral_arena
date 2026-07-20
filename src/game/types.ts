@@ -172,11 +172,11 @@ export interface PickupState {
   kind: PickupKind;
   position: Vec3;
   weaponId?: WeaponId;
-  /** Exact ammunition retained by a weapon dropped on death. */
+  /** Exact ammunition retained by a weapon dropped on death or during a swap. */
   weaponState?: WeaponState;
   /** Number of grenades granted; fixed grenade racks carry a pair. */
   amount: number;
-  /** Temporary death drops are removed instead of entering a respawn cycle. */
+  /** Temporary equipment drops are removed instead of entering a respawn cycle. */
   temporary: boolean;
   despawnTimer: number;
   available: boolean;

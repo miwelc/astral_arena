@@ -58,35 +58,80 @@ beforeEach(() => vi.spyOn(Date, 'now').mockReturnValue(TEST_NOW));
 afterEach(() => vi.restoreAllMocks());
 
 describe('equipment dropped on death', () => {
-  it('drops the active weapon with exact remaining ammunition and all grenades', () => {
+  it('drops every carried weapon with exact remaining ammunition and all grenades', () => {
     const simulation = createSimulation();
     const attacker = player(simulation, 'alpha');
     const victim = player(simulation, 'bravo');
     attacker.position = { x: -20, y: 0, z: -20 };
     victim.position = { x: 20, y: 0, z: 20 };
-    victim.inventory = [createWeaponState('sniper')];
-    victim.activeWeapon = 0;
+    victim.inventory = [createWeaponState('sniper'), createWeaponState('shotgun')];
+    victim.activeWeapon = 1;
     victim.inventory[0]!.magazine = 3;
     victim.inventory[0]!.reserve = 7;
+    victim.inventory[1]!.magazine = 4;
+    victim.inventory[1]!.reserve = 9;
     victim.grenades = 2;
 
     killWithRocket(simulation, attacker, victim);
 
     const drops = simulation.state.pickups.filter((pickup) => pickup.temporary);
-    expect(drops).toHaveLength(2);
-    const weaponDrop = drops.find((pickup) => pickup.kind === 'weapon');
-    expect(weaponDrop).toMatchObject({
+    expect(drops).toHaveLength(3);
+    const weaponDrops = drops.filter((pickup) => pickup.kind === 'weapon');
+    expect(weaponDrops).toHaveLength(2);
+    expect(weaponDrops.find((pickup) => pickup.weaponId === 'sniper')).toMatchObject({
       weaponId: 'sniper',
       weaponState: { id: 'sniper', magazine: 3, reserve: 7 },
       respawnTimer: 0,
     });
-    expect(weaponDrop?.despawnTimer).toBeCloseTo(DROPPED_PICKUP_LIFETIME_SECONDS - 0.01, 6);
+    expect(weaponDrops.find((pickup) => pickup.weaponId === 'shotgun')).toMatchObject({
+      weaponId: 'shotgun',
+      weaponState: { id: 'shotgun', magazine: 4, reserve: 9 },
+      respawnTimer: 0,
+    });
+    expect(new Set(weaponDrops.map((pickup) => `${pickup.position.x}:${pickup.position.z}`)).size).toBe(2);
+    expect(weaponDrops[0]?.despawnTimer).toBeCloseTo(DROPPED_PICKUP_LIFETIME_SECONDS - 0.01, 6);
     expect(drops.find((pickup) => pickup.kind === 'grenade')).toMatchObject({
       amount: 2,
       temporary: true,
     });
     expect(victim.inventory[0]).toMatchObject({ magazine: 0, reserve: 0 });
+    expect(victim.inventory[1]).toMatchObject({ magazine: 0, reserve: 0 });
     expect(victim.grenades).toBe(0);
+  });
+
+  it('leaves the replaced weapon on the ground for the configured lifetime', () => {
+    const simulation = createSimulation();
+    const local = player(simulation, 'alpha');
+    const sourcePickup = simulation.state.pickups.find((pickup) =>
+      pickup.kind === 'weapon'
+      && pickup.weaponId !== undefined
+      && !local.inventory.some((weapon) => weapon.id === pickup.weaponId));
+    expect(sourcePickup?.weaponId).toBeDefined();
+    const replaced = local.inventory[local.activeWeapon]!;
+    replaced.magazine = 5;
+    replaced.reserve = 13;
+    local.position = { ...sourcePickup!.position };
+
+    simulation.setInput(local.id, { ...emptyInput(), sequence: 1, use: true });
+    simulation.step(0);
+
+    expect(local.inventory[local.activeWeapon]?.id).toBe(sourcePickup?.weaponId);
+    const swapDrop = simulation.state.pickups.find((pickup) =>
+      pickup.temporary && pickup.kind === 'weapon' && pickup.weaponId === replaced.id);
+    expect(swapDrop).toMatchObject({
+      available: true,
+      weaponState: { id: replaced.id, magazine: 5, reserve: 13 },
+      despawnTimer: DROPPED_PICKUP_LIFETIME_SECONDS,
+      respawnTimer: 0,
+    });
+    expect(swapDrop?.position).not.toEqual(sourcePickup?.position);
+
+    for (let elapsed = 0; elapsed < DROPPED_PICKUP_LIFETIME_SECONDS - 0.1; elapsed += STEP) {
+      simulation.step(STEP);
+    }
+    expect(simulation.state.pickups.some((pickup) => pickup.id === swapDrop?.id)).toBe(true);
+    for (let elapsed = 0; elapsed < 0.2; elapsed += STEP) simulation.step(STEP);
+    expect(simulation.state.pickups.some((pickup) => pickup.id === swapDrop?.id)).toBe(false);
   });
 
   it('requires E for a dropped weapon and equips its retained ammunition', () => {
