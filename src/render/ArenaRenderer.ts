@@ -697,20 +697,36 @@ export class ArenaRenderer {
     this.createEnvironmentMap();
     this.viewScene.environment = this.scene.environment;
     const alpineViewLighting = this.visualProfile.environmentKind === 'alpine-forest';
+    const orbitalViewLighting = this.visualProfile.environmentKind === 'orbital-station';
     this.viewScene.environmentIntensity = alpineViewLighting
       ? 0.72
-      : Math.max(0.92, this.visualProfile.environmentIntensity + 0.16);
+      : orbitalViewLighting
+        ? 1.34
+        : Math.max(0.92, this.visualProfile.environmentIntensity + 0.16);
     this.viewScene.add(this.viewCamera);
     const viewHemisphere = new THREE.HemisphereLight(
-      0xd8ebe6,
-      0x071011,
-      alpineViewLighting ? 0.34 : 0.56,
+      orbitalViewLighting ? 0xd8ecff : 0xd8ebe6,
+      orbitalViewLighting ? 0x263a52 : 0x071011,
+      alpineViewLighting ? 0.34 : orbitalViewLighting ? 0.88 : 0.56,
     );
-    const viewKey = new THREE.DirectionalLight(0xffedcd, alpineViewLighting ? 2.3 : 3.25);
+    const viewKey = new THREE.DirectionalLight(
+      orbitalViewLighting ? 0xd7eaff : 0xffedcd,
+      alpineViewLighting ? 2.3 : orbitalViewLighting ? 2.75 : 3.25,
+    );
     viewKey.position.set(-2.2, 3.4, 2.6);
-    const viewRim = new THREE.PointLight(0x56eddb, alpineViewLighting ? 3.2 : 5.4, 4.5, 2);
+    const viewRim = new THREE.PointLight(
+      orbitalViewLighting ? 0x5be8ff : 0x56eddb,
+      alpineViewLighting ? 3.2 : orbitalViewLighting ? 6.2 : 5.4,
+      4.5,
+      2,
+    );
     viewRim.position.set(1.4, 0.8, -0.4);
-    this.viewScene.add(viewHemisphere, viewKey, viewRim);
+    const viewFill = new THREE.DirectionalLight(
+      orbitalViewLighting ? 0x9b8fff : 0x8fb5ad,
+      orbitalViewLighting ? 1.15 : 0.32,
+    );
+    viewFill.position.set(2.6, 1.2, 3.8);
+    this.viewScene.add(viewHemisphere, viewKey, viewRim, viewFill);
 
     const composerTarget = new THREE.WebGLRenderTarget(1, 1, {
       type: THREE.HalfFloatType,
@@ -793,13 +809,19 @@ export class ArenaRenderer {
             color = mix(color, radialBlur, impactBlur);
           }
           float luminance = dot(color, vec3(0.2126, 0.7152, 0.0722));
-          float saturation = mix(mix(1.09, 1.13, uOrbital), 1.29, uAlpine);
+          float saturation = mix(mix(1.09, 1.16, uOrbital), 1.29, uAlpine);
           color = mix(vec3(luminance), color, saturation);
           // Titan is graded in linear HDR before OutputPass/AgX. A contrast
           // pivot at 0.5 subtracted 0.0275 from every shaded channel and
           // irreversibly clipped natural rock and foliage to black. Preserve
           // the toe and build contrast upward from zero for the outdoor map.
-          vec3 pivotContrast = (color - 0.5) * mix(1.055, 1.085, uOrbital) + 0.5;
+          vec3 pivotContrast = (color - 0.5) * mix(1.055, 1.025, uOrbital) + 0.5;
+          vec3 orbitalColor = max(color, vec3(0.0));
+          float orbitalLuminance = dot(orbitalColor, vec3(0.2126, 0.7152, 0.0722));
+          float orbitalToe = 1.0 - smoothstep(0.035, 0.48, orbitalLuminance);
+          orbitalColor = orbitalColor * (1.025 + min(orbitalColor, vec3(1.2)) * 0.035);
+          orbitalColor += vec3(0.022, 0.030, 0.044) * orbitalToe;
+          color = mix(pivotContrast, orbitalColor, uOrbital);
           vec3 alpineColor = max(color, vec3(0.0));
           // Outdoor grading needs a shaped tonal curve, not a blanket lift.
           // This deepens midtones while letting HDR sun glints and emissive
@@ -809,15 +831,17 @@ export class ArenaRenderer {
           luminance = dot(color, vec3(0.2126, 0.7152, 0.0722));
           float shadows = 1.0 - smoothstep(0.04, 0.42, luminance);
           float highlights = smoothstep(0.58, 1.15, luminance);
-          float shadowTintAmount = mix(mix(0.085, 0.09, uOrbital), 0.055, uAlpine);
-          color = mix(color, color * (uShadowTint * 1.75 + 0.12), shadows * shadowTintAmount);
+          float shadowTintAmount = mix(mix(0.085, 0.026, uOrbital), 0.055, uAlpine);
+          color = mix(color, color * (uShadowTint * 1.75 + 0.12), shadows * shadowTintAmount * (1.0 - uOrbital));
+          color += uShadowTint * shadows * uOrbital * 0.05;
           float alpineLift = uAlpine * (1.0 - smoothstep(0.025, 0.34, luminance));
           color += vec3(0.008, 0.014, 0.015) * alpineLift;
           color += highlights * uHighlightTint * mix(0.024, 0.032, uOrbital);
           float edge = smoothstep(0.34, 1.02, length((vUv - 0.5) * vec2(1.15, 1.0)) * 1.42);
-          color *= 1.0 - edge * (mix(0.125, 0.072, uAlpine) + uDamage * 0.065);
+          float vignetteStrength = mix(mix(0.125, 0.068, uOrbital), 0.072, uAlpine);
+          color *= 1.0 - edge * (vignetteStrength + uDamage * 0.065);
           float grain = hash(vUv * vec2(1493.0, 877.0) + floor(uTime * 24.0)) - 0.5;
-          color += grain * mix(0.0045, 0.0028, uAlpine);
+          color += grain * mix(mix(0.0045, 0.0032, uOrbital), 0.0028, uAlpine);
           color = mix(color, color * mix(vec3(0.985, 1.008, 1.0), vec3(0.965, 0.99, 1.045), uOrbital), 0.18);
           gl_FragColor = vec4(color, source.a);
         }
@@ -1146,8 +1170,8 @@ export class ArenaRenderer {
 
         vec3 sunDir = normalize(vec3(-0.42, 0.70, -0.58));
         float sunAlignment = max(dot(direction, sunDir), 0.0);
-        color += vec3(0.64, 0.81, 1.0) * pow(sunAlignment, 12.0) * 0.28;
-        color += vec3(0.86, 0.94, 1.0) * pow(sunAlignment, 420.0) * 6.0;
+        color += vec3(0.64, 0.81, 1.0) * pow(sunAlignment, 18.0) * 0.12;
+        color += vec3(0.86, 0.94, 1.0) * pow(sunAlignment, 420.0) * 5.2;
 
         vec3 planetDir = normalize(vec3(0.58, 0.13, 0.80));
         float planetDot = dot(direction, planetDir);
@@ -1438,6 +1462,32 @@ export class ArenaRenderer {
       practical.userData.purpose = specification.purpose;
       this.scene.add(practical, practical.target);
     }
+
+    if (this.visualProfile.environmentKind === 'orbital-station') {
+      // Recessed overhead luminaires bridge the tonal gap between the star
+      // field and Umbra's graphite pressure hull. The stellar key still owns
+      // form shadows; these inexpensive fixtures reveal route depth.
+      let fixtureIndex = 0;
+      for (const x of [-22, 0, 22]) {
+        for (const z of [-10.5, 10.5]) {
+          const fixture = new THREE.SpotLight(
+            z < 0 ? 0xb8e7ff : 0xb8c7ff,
+            8.2,
+            15,
+            0.66,
+            0.78,
+            2,
+          );
+          fixture.name = `umbra-deck-luminaire-${fixtureIndex}`;
+          fixture.position.set(x, 8.55, z);
+          fixture.target.position.set(x * 0.94, 0, z * 0.92);
+          fixture.userData.zone = z < 0 ? 'north-signal-array' : 'south-power-annex';
+          fixture.userData.purpose = 'route-readability';
+          this.scene.add(fixture, fixture.target);
+          fixtureIndex += 1;
+        }
+      }
+    }
   }
 
   private createLandscape(): void {
@@ -1471,7 +1521,7 @@ export class ArenaRenderer {
       this.groundNormalTexture = forestGround.normal;
       this.groundRoughnessTexture = forestGround.roughness;
     }
-    this.facilityPanelTexture = createFacilityPanelTexture(512);
+    this.facilityPanelTexture = createFacilityPanelTexture(512, orbital ? 'orbital' : 'ceramic');
     const technicalSurface = createTechnicalSurfaceTextures(256);
     this.technicalNormalTexture = technicalSurface.normal;
     this.technicalRoughnessTexture = technicalSurface.roughness;
@@ -2159,6 +2209,15 @@ export class ArenaRenderer {
       metalness: 0.22,
       toneMapped: false,
     });
+    const violetSignal = new THREE.MeshStandardMaterial({
+      name: 'umbra-violet-navigation-signal',
+      color: 0xb6a8ff,
+      emissive: 0x6658dd,
+      emissiveIntensity: 2.15,
+      roughness: 0.18,
+      metalness: 0.24,
+      toneMapped: false,
+    });
 
     const addDockModule = (
       id: string,
@@ -2177,9 +2236,11 @@ export class ArenaRenderer {
       spine.position.set(0, 2.6, 3.58);
       module.add(body, spine);
       for (const x of [-9.2, -4.6, 0, 4.6, 9.2]) {
+        const rib = new THREE.Mesh(new RoundedBoxGeometry(0.22, 5.15, 0.34, 2, 0.07), steel);
+        rib.position.set(x, 0, 3.55);
         const viewport = new THREE.Mesh(new RoundedBoxGeometry(2.6, 0.16, 0.08, 2, 0.035), colorMaterial);
         viewport.position.set(x, 0.5, 3.78);
-        module.add(viewport);
+        module.add(rib, viewport);
       }
       group.add(module);
     };
@@ -2251,6 +2312,134 @@ export class ArenaRenderer {
       tip.position.set(side * 7.75, 3.02, 0);
       claw.add(upright, arm, tip);
       group.add(claw);
+    }
+
+    // Recessed service panels break up the broad collision shells into
+    // believable pressure-hull modules. Instancing keeps the extra detail
+    // cheap even though both sides of every major cover receive treatment.
+    const panelCandidates = this.map.obstacles.filter((obstacle) => {
+      const obstacleWidth = obstacle.max.x - obstacle.min.x;
+      const obstacleHeight = obstacle.max.y - obstacle.min.y;
+      const obstacleDepth = obstacle.max.z - obstacle.min.z;
+      return obstacle.kind !== 'wall'
+        && obstacle.kind !== 'platform'
+        && obstacleHeight >= 1.35
+        && Math.max(obstacleWidth, obstacleDepth) >= 2.4;
+    });
+    const insetMaterial = new THREE.MeshPhysicalMaterial({
+      name: 'umbra-recessed-service-panel',
+      color: 0x263d52,
+      roughness: 0.3,
+      metalness: 0.67,
+      clearcoat: 0.3,
+      clearcoatRoughness: 0.22,
+      envMapIntensity: 1.5,
+    });
+    const insetGeometry = new RoundedBoxGeometry(1, 1, 0.065, 2, 0.055);
+    const servicePanels = new THREE.InstancedMesh(insetGeometry, insetMaterial, panelCandidates.length * 2);
+    servicePanels.name = 'umbra-modular-service-panel-insets';
+    const statusBars = new THREE.InstancedMesh(
+      new RoundedBoxGeometry(1, 1, 0.075, 2, 0.025),
+      cyanSignal,
+      panelCandidates.length * 2,
+    );
+    statusBars.name = 'umbra-modular-service-status-bars';
+    const panelTransform = new THREE.Object3D();
+    const statusTransform = new THREE.Object3D();
+    let servicePanelIndex = 0;
+    for (const obstacle of panelCandidates) {
+      const obstacleWidth = obstacle.max.x - obstacle.min.x;
+      const obstacleHeight = obstacle.max.y - obstacle.min.y;
+      const obstacleDepth = obstacle.max.z - obstacle.min.z;
+      const center = new THREE.Vector3(
+        (obstacle.min.x + obstacle.max.x) * 0.5,
+        (obstacle.min.y + obstacle.max.y) * 0.5,
+        (obstacle.min.z + obstacle.max.z) * 0.5,
+      );
+      const horizontalFace = obstacleWidth >= obstacleDepth;
+      for (const face of [-1, 1]) {
+        panelTransform.position.copy(center);
+        panelTransform.rotation.set(0, horizontalFace ? 0 : Math.PI * 0.5, 0);
+        panelTransform.scale.set(
+          Math.max(0.72, (horizontalFace ? obstacleWidth : obstacleDepth) * 0.58),
+          Math.max(0.42, obstacleHeight * 0.44),
+          1,
+        );
+        if (horizontalFace) panelTransform.position.z += face * (obstacleDepth * 0.5 + 0.045);
+        else panelTransform.position.x += face * (obstacleWidth * 0.5 + 0.045);
+        panelTransform.updateMatrix();
+        servicePanels.setMatrixAt(servicePanelIndex, panelTransform.matrix);
+
+        statusTransform.position.copy(panelTransform.position);
+        statusTransform.rotation.copy(panelTransform.rotation);
+        statusTransform.scale.set(
+          Math.max(0.4, (horizontalFace ? obstacleWidth : obstacleDepth) * 0.22),
+          0.05,
+          1,
+        );
+        statusTransform.position.y += Math.max(0.16, obstacleHeight * 0.11);
+        if (horizontalFace) statusTransform.position.z += face * 0.046;
+        else statusTransform.position.x += face * 0.046;
+        statusTransform.updateMatrix();
+        statusBars.setMatrixAt(servicePanelIndex, statusTransform.matrix);
+        servicePanelIndex += 1;
+      }
+    }
+    servicePanels.count = servicePanelIndex;
+    statusBars.count = servicePanelIndex;
+    servicePanels.instanceMatrix.needsUpdate = true;
+    statusBars.instanceMatrix.needsUpdate = true;
+    group.add(servicePanels, statusBars);
+
+    // Alternating cyan/violet runway beacons create a strong perspective grid
+    // through the central combat lane without adding gameplay collision.
+    const beaconGeometry = new RoundedBoxGeometry(0.34, 0.045, 0.11, 2, 0.02);
+    const cyanBeacons = new THREE.InstancedMesh(beaconGeometry, cyanSignal, 24);
+    const violetBeacons = new THREE.InstancedMesh(beaconGeometry, violetSignal, 24);
+    cyanBeacons.name = 'umbra-cyan-runway-beacons';
+    violetBeacons.name = 'umbra-violet-runway-beacons';
+    const beaconTransform = new THREE.Object3D();
+    let cyanIndex = 0;
+    let violetIndex = 0;
+    for (let index = 0; index < 22; index += 1) {
+      const x = THREE.MathUtils.lerp(this.map.bounds.minX + 3.2, this.map.bounds.maxX - 3.2, index / 21);
+      for (const zOffset of [-3.02, 3.02]) {
+        beaconTransform.position.set(x, floorY + 0.065, centerZ + zOffset);
+        beaconTransform.rotation.set(0, 0, 0);
+        beaconTransform.updateMatrix();
+        if (index % 2 === 0) {
+          cyanBeacons.setMatrixAt(cyanIndex, beaconTransform.matrix);
+          cyanIndex += 1;
+        } else {
+          violetBeacons.setMatrixAt(violetIndex, beaconTransform.matrix);
+          violetIndex += 1;
+        }
+      }
+    }
+    cyanBeacons.count = cyanIndex;
+    violetBeacons.count = violetIndex;
+    cyanBeacons.instanceMatrix.needsUpdate = true;
+    violetBeacons.instanceMatrix.needsUpdate = true;
+    group.add(cyanBeacons, violetBeacons);
+
+    // Visible housings justify the six deck spotlights added to the lighting
+    // rig and give the upper silhouette more manufactured detail.
+    for (const x of [-22, 0, 22]) {
+      for (const z of [-10.5, 10.5]) {
+        const housing = new THREE.Mesh(
+          new RoundedBoxGeometry(2.8, 0.34, 1.15, 3, 0.16),
+          steel,
+        );
+        housing.name = `umbra-suspended-luminaire-${x}-${z}`;
+        housing.position.set(x, floorY + 8.6, z);
+        const emitter = new THREE.Mesh(
+          new RoundedBoxGeometry(2.15, 0.055, 0.62, 2, 0.025),
+          z < 0 ? cyanSignal : violetSignal,
+        );
+        emitter.position.set(x, floorY + 8.405, z);
+        emitter.castShadow = false;
+        group.add(housing, emitter);
+      }
     }
 
     this.scene.add(group);
@@ -2616,7 +2805,7 @@ export class ArenaRenderer {
     }
 
     const facilitySurfaceTemplate = new THREE.MeshPhysicalMaterial({
-      color: orbital ? palette.panelMid : palette.panelLight,
+      color: orbital ? palette.panelLight : palette.panelLight,
       map: this.facilityPanelTexture,
       roughness: orbital ? 0.32 : 0.38,
       metalness: orbital ? 0.48 : 0.16,
@@ -2816,7 +3005,7 @@ export class ArenaRenderer {
       envMapIntensity: 1.05,
     });
     const jointMaterial = new THREE.MeshStandardMaterial({
-      color: 0x121b1e,
+      color: orbital ? 0x203247 : 0x121b1e,
       roughness: 0.68,
       metalness: 0.22,
     });
@@ -2977,13 +3166,17 @@ export class ArenaRenderer {
         && !obstacle.id.includes('growbed');
       const baseColor = new THREE.Color(artificialSurfaceColor(obstacle));
       if (orbital) {
-        const orbitalTarget = new THREE.Color(palette.panelMid);
-        baseColor.lerp(orbitalTarget, obstacle.kind === 'tower' ? 0.32 : 0.52);
+        const orbitalTarget = new THREE.Color(palette.panelLight);
+        baseColor.lerp(orbitalTarget, obstacle.kind === 'tower' ? 0.58 : 0.72);
       }
       const material = paintMaterial.clone();
       material.color.copy(baseColor);
-      material.roughness = obstacle.kind === 'tower' ? 0.32 : 0.38;
-      material.metalness = obstacle.kind === 'tower' ? 0.48 : 0.08;
+      material.roughness = orbital
+        ? obstacle.kind === 'tower' ? 0.28 : 0.34
+        : obstacle.kind === 'tower' ? 0.32 : 0.38;
+      material.metalness = orbital
+        ? obstacle.kind === 'tower' ? 0.58 : 0.46
+        : obstacle.kind === 'tower' ? 0.48 : 0.08;
       const minimum = Math.min(size.x, size.y, size.z);
       const bevel = Math.min(0.16, Math.max(0.035, minimum * 0.12));
       const isCargoPod = /^cover-(?:nw|ne|sw|se)-(?:a|b)$/.test(obstacle.id);
@@ -3025,9 +3218,9 @@ export class ArenaRenderer {
             ? new RoundedBoxGeometry(size.x * 0.985, 0.075, 0.12, 2, 0.025)
             : new RoundedBoxGeometry(0.12, 0.075, size.z * 0.985, 2, 0.025),
           new THREE.MeshStandardMaterial({
-            color: 0xc0f04d,
-            emissive: 0x6f9e28,
-            emissiveIntensity: 0.72,
+            color: orbital ? palette.neutralAccent : 0xc0f04d,
+            emissive: orbital ? 0x2b91b5 : 0x6f9e28,
+            emissiveIntensity: orbital ? 1.05 : 0.72,
             roughness: 0.26,
             metalness: 0.52,
           }),

@@ -101,11 +101,11 @@ describe('human base architecture', () => {
     expect(craterPanel?.name).toBe('architecture-white-panel');
     expect(umbraPanel?.name).toBe('architecture-white-panel');
     expect(craterPanel?.color.getHex()).toBe(0xf7f4ec);
-    expect(umbraPanel?.color.getHex()).toBe(0x263342);
+    expect(umbraPanel?.color.getHex()).toBe(0x465d70);
     expect(umbraPanel?.metalness).toBeGreaterThan(craterPanel?.metalness ?? 1);
     expect(umbraPanel?.envMapIntensity).toBeGreaterThan(craterPanel?.envMapIntensity ?? 2);
     expect(craterScreen?.emissive.getHex()).toBe(0x37cfc5);
-    expect(umbraScreen?.emissive.getHex()).toBe(0x2a67d8);
+    expect(umbraScreen?.emissive.getHex()).toBe(0x357de8);
   });
 
   it('only makes intentional glazing and painted floor overlays transparent', () => {

@@ -145,11 +145,11 @@ export const createOrbitalEnvironmentTexture = (width = 1024, height = 512): THR
   const context = getContext(canvas);
 
   const voidGradient = context.createLinearGradient(0, 0, 0, safeHeight);
-  voidGradient.addColorStop(0, '#02040c');
-  voidGradient.addColorStop(0.38, '#071326');
-  voidGradient.addColorStop(0.56, '#152642');
-  voidGradient.addColorStop(0.72, '#080d1c');
-  voidGradient.addColorStop(1, '#02030a');
+  voidGradient.addColorStop(0, '#050914');
+  voidGradient.addColorStop(0.38, '#10243b');
+  voidGradient.addColorStop(0.56, '#29455f');
+  voidGradient.addColorStop(0.72, '#121f34');
+  voidGradient.addColorStop(1, '#040711');
   context.fillStyle = voidGradient;
   context.fillRect(0, 0, safeWidth, safeHeight);
 
@@ -168,7 +168,7 @@ export const createOrbitalEnvironmentTexture = (width = 1024, height = 512): THR
     );
     halo.addColorStop(0, 'rgba(255, 247, 221, 1)');
     halo.addColorStop(0.035, 'rgba(176, 225, 255, 0.82)');
-    halo.addColorStop(0.19, 'rgba(66, 134, 214, 0.24)');
+    halo.addColorStop(0.19, 'rgba(66, 134, 214, 0.34)');
     halo.addColorStop(1, 'rgba(22, 52, 115, 0)');
     context.fillStyle = halo;
     context.fillRect(
@@ -187,8 +187,8 @@ export const createOrbitalEnvironmentTexture = (width = 1024, height = 512): THR
     safeHeight * 0.72,
     safeHeight * 0.42,
   );
-  stationBounce.addColorStop(0, 'rgba(255, 150, 74, 0.18)');
-  stationBounce.addColorStop(0.34, 'rgba(109, 71, 112, 0.09)');
+  stationBounce.addColorStop(0, 'rgba(255, 166, 94, 0.25)');
+  stationBounce.addColorStop(0.34, 'rgba(126, 91, 144, 0.14)');
   stationBounce.addColorStop(1, 'rgba(13, 21, 48, 0)');
   context.fillStyle = stationBounce;
   context.fillRect(0, 0, safeWidth, safeHeight);
@@ -654,32 +654,61 @@ export const createForestGroundTextures = (size = 512): ForestGroundTextures => 
   };
 };
 
-/** White ceramic/black composite/lime stripe surface used by facility paths. */
-export const createFacilityPanelTexture = (size = 512): THREE.CanvasTexture => {
+/**
+ * Manufactured deck albedo used by facility paths. Umbra receives its own
+ * graphite pressure-deck treatment instead of inheriting Crater's white
+ * ceramic and lime safety paint.
+ */
+export const createFacilityPanelTexture = (
+  size = 512,
+  style: 'ceramic' | 'orbital' = 'ceramic',
+): THREE.CanvasTexture => {
   const safeSize = Math.max(128, Math.round(size));
   const canvas = createCanvas(safeSize, safeSize);
   const context = getContext(canvas);
-  context.fillStyle = '#dce3df';
+  const orbital = style === 'orbital';
+  context.fillStyle = orbital ? '#354b60' : '#dce3df';
   context.fillRect(0, 0, safeSize, safeSize);
 
   const half = safeSize * 0.5;
-  context.fillStyle = '#11191d';
-  context.fillRect(half - safeSize * 0.012, 0, safeSize * 0.024, safeSize);
-  context.fillRect(0, half - safeSize * 0.012, safeSize, safeSize * 0.024);
-  context.fillStyle = '#a8e63a';
-  context.fillRect(0, safeSize * 0.09, safeSize, safeSize * 0.035);
-  context.fillRect(safeSize * 0.875, 0, safeSize * 0.032, safeSize);
+  context.fillStyle = orbital ? '#142334' : '#11191d';
+  context.fillRect(half - safeSize * (orbital ? 0.018 : 0.012), 0, safeSize * (orbital ? 0.036 : 0.024), safeSize);
+  context.fillRect(0, half - safeSize * (orbital ? 0.018 : 0.012), safeSize, safeSize * (orbital ? 0.036 : 0.024));
+  context.fillStyle = orbital ? '#5ddff2' : '#a8e63a';
+  context.fillRect(0, safeSize * 0.09, safeSize, safeSize * (orbital ? 0.018 : 0.035));
+  context.fillRect(safeSize * 0.875, 0, safeSize * (orbital ? 0.016 : 0.032), safeSize);
+  if (orbital) {
+    context.fillStyle = '#d88856';
+    context.fillRect(0, safeSize * 0.895, safeSize, safeSize * 0.012);
+    context.fillStyle = 'rgba(116, 149, 180, 0.34)';
+    context.fillRect(safeSize * 0.055, safeSize * 0.56, safeSize * 0.39, safeSize * 0.37);
+    context.fillStyle = 'rgba(30, 48, 67, 0.42)';
+    context.fillRect(safeSize * 0.555, safeSize * 0.055, safeSize * 0.39, safeSize * 0.37);
+  }
 
-  context.strokeStyle = 'rgba(8, 16, 18, 0.32)';
+  context.strokeStyle = orbital ? 'rgba(4, 12, 22, 0.72)' : 'rgba(8, 16, 18, 0.32)';
   context.lineWidth = Math.max(1, safeSize / 256);
   context.strokeRect(safeSize * 0.025, safeSize * 0.025, safeSize * 0.95, safeSize * 0.95);
   context.strokeRect(safeSize * 0.055, safeSize * 0.055, safeSize * 0.39, safeSize * 0.37);
   context.strokeRect(safeSize * 0.555, safeSize * 0.555, safeSize * 0.39, safeSize * 0.37);
 
+  if (orbital) {
+    context.strokeStyle = 'rgba(166, 205, 229, 0.2)';
+    context.lineWidth = Math.max(0.6, safeSize / 620);
+    for (const inset of [0.065, 0.435, 0.565, 0.935]) {
+      context.beginPath();
+      context.moveTo(safeSize * inset, safeSize * 0.14);
+      context.lineTo(safeSize * inset, safeSize * 0.86);
+      context.stroke();
+    }
+  }
+
   const random = seededRandom(0xface71);
   for (let mark = 0; mark < Math.round(safeSize * 0.42); mark += 1) {
-    const alpha = 0.025 + random() * 0.07;
-    context.fillStyle = `rgba(13, 26, 27, ${alpha})`;
+    const alpha = (orbital ? 0.035 : 0.025) + random() * (orbital ? 0.09 : 0.07);
+    context.fillStyle = orbital
+      ? `rgba(${random() > 0.82 ? '145,174,195' : '7,17,27'}, ${alpha})`
+      : `rgba(13, 26, 27, ${alpha})`;
     const radius = 0.3 + random() * 1.8;
     context.beginPath();
     context.arc(random() * safeSize, random() * safeSize, radius, 0, TWO_PI);
@@ -687,7 +716,7 @@ export const createFacilityPanelTexture = (size = 512): THREE.CanvasTexture => {
   }
 
   const texture = new THREE.CanvasTexture(canvas);
-  texture.name = 'facility-panel-albedo';
+  texture.name = orbital ? 'umbra-pressure-deck-albedo' : 'facility-panel-albedo';
   texture.colorSpace = THREE.SRGBColorSpace;
   texture.wrapS = THREE.RepeatWrapping;
   texture.wrapT = THREE.RepeatWrapping;
