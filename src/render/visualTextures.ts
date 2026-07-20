@@ -132,6 +132,88 @@ export const createColdEnvironmentTexture = (width = 1024, height = 512): THREE.
   return texture;
 };
 
+/**
+ * Dark orbital PMREM source for Umbra Station. The visible stars live in the
+ * sky shader; this texture supplies broad blue-violet reflections, a hard
+ * stellar key and a warm station bounce without washing the scene in a
+ * terrestrial horizon colour.
+ */
+export const createOrbitalEnvironmentTexture = (width = 1024, height = 512): THREE.CanvasTexture => {
+  const safeWidth = Math.max(64, Math.round(width));
+  const safeHeight = Math.max(32, Math.round(height));
+  const canvas = createCanvas(safeWidth, safeHeight);
+  const context = getContext(canvas);
+
+  const voidGradient = context.createLinearGradient(0, 0, 0, safeHeight);
+  voidGradient.addColorStop(0, '#02040c');
+  voidGradient.addColorStop(0.38, '#071326');
+  voidGradient.addColorStop(0.56, '#152642');
+  voidGradient.addColorStop(0.72, '#080d1c');
+  voidGradient.addColorStop(1, '#02030a');
+  context.fillStyle = voidGradient;
+  context.fillRect(0, 0, safeWidth, safeHeight);
+
+  const stellarU = 0.18;
+  const stellarX = stellarU * safeWidth;
+  const stellarY = safeHeight * 0.3;
+  const haloRadius = safeHeight * 0.3;
+  for (const wrappedX of [stellarX - safeWidth, stellarX, stellarX + safeWidth]) {
+    const halo = context.createRadialGradient(
+      wrappedX,
+      stellarY,
+      0,
+      wrappedX,
+      stellarY,
+      haloRadius,
+    );
+    halo.addColorStop(0, 'rgba(255, 247, 221, 1)');
+    halo.addColorStop(0.035, 'rgba(176, 225, 255, 0.82)');
+    halo.addColorStop(0.19, 'rgba(66, 134, 214, 0.24)');
+    halo.addColorStop(1, 'rgba(22, 52, 115, 0)');
+    context.fillStyle = halo;
+    context.fillRect(
+      wrappedX - haloRadius,
+      stellarY - haloRadius,
+      haloRadius * 2,
+      haloRadius * 2,
+    );
+  }
+
+  const stationBounce = context.createRadialGradient(
+    safeWidth * 0.68,
+    safeHeight * 0.72,
+    0,
+    safeWidth * 0.68,
+    safeHeight * 0.72,
+    safeHeight * 0.42,
+  );
+  stationBounce.addColorStop(0, 'rgba(255, 150, 74, 0.18)');
+  stationBounce.addColorStop(0.34, 'rgba(109, 71, 112, 0.09)');
+  stationBounce.addColorStop(1, 'rgba(13, 21, 48, 0)');
+  context.fillStyle = stationBounce;
+  context.fillRect(0, 0, safeWidth, safeHeight);
+
+  const random = seededRandom(0x0b17a1);
+  const starCount = Math.max(90, Math.round((safeWidth * safeHeight) / 2_900));
+  for (let index = 0; index < starCount; index += 1) {
+    const alpha = 0.18 + random() * 0.62;
+    const size = random() > 0.94 ? 1.5 : 0.65;
+    context.fillStyle = `rgba(${random() > 0.76 ? '186,220,255' : '238,242,255'},${alpha})`;
+    context.fillRect(random() * safeWidth, random() * safeHeight * 0.82, size, size);
+  }
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.name = 'umbra-orbital-equirectangular-environment';
+  texture.mapping = THREE.EquirectangularReflectionMapping;
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.wrapS = THREE.RepeatWrapping;
+  texture.wrapT = THREE.ClampToEdgeWrapping;
+  texture.minFilter = THREE.LinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+  texture.generateMipmaps = false;
+  return texture;
+};
+
 /** Creates a deterministic, tileable mineral/industrial ground albedo. */
 export const createStylizedGroundTexture = (size = 512): THREE.CanvasTexture => {
   const safeSize = Math.max(64, Math.round(size));

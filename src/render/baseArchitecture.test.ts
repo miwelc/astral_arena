@@ -78,22 +78,49 @@ describe('human base architecture', () => {
     expect(findAuthoredMesh(group, 'cover-se-b-cargo-id-back')).toBeInstanceOf(THREE.Mesh);
   });
 
-  it('only makes intentional glazing and painted floor overlays transparent', () => {
-    const { group } = createBundle();
-    const transparentMaterials = new Set<string>();
-    group.traverse((object) => {
-      if (!(object instanceof THREE.Mesh)) return;
-      const materials = Array.isArray(object.material) ? object.material : [object.material];
-      for (const material of materials) {
-        if (material.transparent) transparentMaterials.add(material.name);
-      }
-    });
+  it('keeps Crater ceramic-bright while Umbra uses dark reflective orbital panels', () => {
+    const crater = createBundle();
+    const umbra = createUmbraBundle();
+    const craterPanel = findAuthoredMesh(crater.group, 'relay-antenna-fin-1')
+      ?.material as THREE.MeshPhysicalMaterial | undefined;
+    const umbraPanel = findAuthoredMesh(umbra.group, 'umbra-relay-deep-space-dish')
+      ?.material as THREE.MeshPhysicalMaterial | undefined;
+    const craterScreen = findAuthoredMesh(crater.group, 'relay-west-console-screen')
+      ?.material as THREE.MeshStandardMaterial | undefined;
+    const umbraScreen = findAuthoredMesh(umbra.group, 'umbra-relay-telemetry-panel-west')
+      ?.material as THREE.MeshStandardMaterial | undefined;
 
-    expect([...transparentMaterials].sort()).toEqual([
-      'architecture-floor-marking',
-      'architecture-laminated-glass',
-    ]);
-    const routeLine = findAuthoredMesh(group, 'aurora-interior-navigation-lane');
+    expect(craterPanel).toBeInstanceOf(THREE.MeshPhysicalMaterial);
+    expect(umbraPanel).toBeInstanceOf(THREE.MeshPhysicalMaterial);
+    expect(craterPanel?.name).toBe('architecture-white-panel');
+    expect(umbraPanel?.name).toBe('architecture-white-panel');
+    expect(craterPanel?.color.getHex()).toBe(0xf7f4ec);
+    expect(umbraPanel?.color.getHex()).toBe(0x263342);
+    expect(umbraPanel?.metalness).toBeGreaterThan(craterPanel?.metalness ?? 1);
+    expect(umbraPanel?.envMapIntensity).toBeGreaterThan(craterPanel?.envMapIntensity ?? 2);
+    expect(craterScreen?.emissive.getHex()).toBe(0x37cfc5);
+    expect(umbraScreen?.emissive.getHex()).toBe(0x2a67d8);
+  });
+
+  it('only makes intentional glazing and painted floor overlays transparent', () => {
+    const craterGroup = createBundle().group;
+    const groups = [craterGroup, createUmbraBundle().group];
+    for (const group of groups) {
+      const transparentMaterials = new Set<string>();
+      group.traverse((object) => {
+        if (!(object instanceof THREE.Mesh)) return;
+        const materials = Array.isArray(object.material) ? object.material : [object.material];
+        for (const material of materials) {
+          if (material.transparent) transparentMaterials.add(material.name);
+        }
+      });
+
+      expect([...transparentMaterials].sort()).toEqual([
+        'architecture-floor-marking',
+        'architecture-laminated-glass',
+      ]);
+    }
+    const routeLine = findAuthoredMesh(craterGroup, 'aurora-interior-navigation-lane');
     const routeMaterial = routeLine?.material as THREE.Material | undefined;
     expect(routeMaterial?.polygonOffset).toBe(true);
     expect(routeMaterial?.polygonOffsetFactor).toBeLessThan(0);
@@ -108,12 +135,14 @@ describe('human base architecture', () => {
   });
 
   it('batches static detail into a browser-friendly render budget', () => {
-    const { group } = createBundle();
-    let renderables = 0;
-    group.traverse((object) => {
-      if (object instanceof THREE.Mesh) renderables += 1;
-    });
-    expect(renderables).toBeLessThanOrEqual(60);
+    const groups = [createBundle().group, createUmbraBundle().group];
+    for (const group of groups) {
+      let renderables = 0;
+      group.traverse((object) => {
+        if (object instanceof THREE.Mesh) renderables += 1;
+      });
+      expect(renderables).toBeLessThanOrEqual(60);
+    }
   });
 
   it('dispatches Umbra to its own orbital-station architecture without Crater-only dependencies', () => {

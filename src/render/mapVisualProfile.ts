@@ -1,0 +1,363 @@
+import type { MapDefinition } from '../game/types';
+
+export type MapEnvironmentKind = 'alien-forest' | 'orbital-station';
+
+export type VisualVector3 = readonly [x: number, y: number, z: number];
+
+export interface FogVisualProfile {
+  readonly color: number;
+  readonly density: number;
+}
+
+export interface DirectionalLightVisualProfile {
+  readonly color: number;
+  /** Direction from the map origin toward the light source. */
+  readonly direction: VisualVector3;
+  readonly intensity: number;
+}
+
+export interface HemisphereLightVisualProfile {
+  readonly skyColor: number;
+  readonly groundColor: number;
+  readonly intensity: number;
+}
+
+export interface LocalLightVisualProfile {
+  readonly color: number;
+  readonly intensity: number;
+  readonly distance: number;
+  readonly decay: number;
+}
+
+export interface MapLightingProfile {
+  readonly hemisphere: HemisphereLightVisualProfile;
+  readonly sun: DirectionalLightVisualProfile;
+  readonly fill: DirectionalLightVisualProfile;
+  readonly centralTower: LocalLightVisualProfile;
+  readonly teamBases: {
+    readonly aurora: LocalLightVisualProfile;
+    readonly nova: LocalLightVisualProfile;
+  };
+}
+
+export interface BloomVisualProfile {
+  readonly strength: number;
+  readonly radius: number;
+  readonly threshold: number;
+}
+
+/**
+ * Shared material roles rather than map-specific object names. Keeping the
+ * roles stable lets terrain, authored architecture and modular dressing use a
+ * single coherent response without coupling this pure profile to Three.js.
+ */
+export interface MapSurfacePalette {
+  readonly ground: number;
+  readonly outerGround: number;
+  readonly earthwork: number;
+  readonly outcrop: number;
+  readonly wetSurface: number;
+  readonly panelLight: number;
+  readonly panelMid: number;
+  readonly panelDark: number;
+  readonly structure: number;
+  readonly glass: number;
+  readonly neutralAccent: number;
+  readonly auroraAccent: number;
+  readonly novaAccent: number;
+}
+
+export interface MapAtmospherePalette {
+  readonly haze: number;
+  readonly motes: number;
+  readonly boundaryField: number;
+  readonly horizonGlow: number;
+  readonly shadowTint: number;
+  readonly highlightTint: number;
+}
+
+export type PracticalLightZone =
+  | 'aurora-base'
+  | 'nova-base'
+  | 'central-tower'
+  | 'north-observatory'
+  | 'south-hydroponics'
+  | 'north-signal-array'
+  | 'south-power-annex'
+  | 'upper-catwalk-ring';
+
+export type PracticalLightPurpose = 'interior' | 'orientation' | 'landmark';
+
+interface PracticalLightBase {
+  readonly id: string;
+  readonly zone: PracticalLightZone;
+  readonly purpose: PracticalLightPurpose;
+  readonly position: VisualVector3;
+  readonly color: number;
+  readonly intensity: number;
+  readonly distance: number;
+  readonly decay: number;
+  /** The sun remains the only shadow-casting world light. */
+  readonly castShadow: false;
+}
+
+export interface PointPracticalLight extends PracticalLightBase {
+  readonly kind: 'point';
+}
+
+export interface SpotPracticalLight extends PracticalLightBase {
+  readonly kind: 'spot';
+  readonly target: VisualVector3;
+  readonly angle: number;
+  readonly penumbra: number;
+}
+
+export type PracticalLightProfile = PointPracticalLight | SpotPracticalLight;
+
+export interface MapVisualProfile {
+  readonly mapId: MapDefinition['id'];
+  readonly environmentKind: MapEnvironmentKind;
+  readonly backgroundColor: number;
+  readonly fog: FogVisualProfile;
+  readonly exposure: number;
+  readonly environmentIntensity: number;
+  readonly lighting: MapLightingProfile;
+  readonly bloom: BloomVisualProfile;
+  readonly surfacePalette: MapSurfacePalette;
+  readonly atmospherePalette: MapAtmospherePalette;
+  readonly practicalLights: readonly PracticalLightProfile[];
+}
+
+const deepFreeze = <Value extends object>(value: Value): Value => {
+  for (const child of Object.values(value)) {
+    if (child !== null && typeof child === 'object' && !Object.isFrozen(child)) {
+      deepFreeze(child);
+    }
+  }
+  return Object.freeze(value);
+};
+
+const MAP_VISUAL_PROFILES = deepFreeze({
+  'crater-ridge': {
+    mapId: 'crater-ridge',
+    environmentKind: 'alien-forest',
+    backgroundColor: 0x102832,
+    fog: { color: 0x496c6b, density: 0.0065 },
+    exposure: 1,
+    environmentIntensity: 0.88,
+    lighting: {
+      hemisphere: { skyColor: 0x91c6c2, groundColor: 0x07110e, intensity: 0.42 },
+      sun: {
+        color: 0xffd49a,
+        direction: [-0.52, 0.64, -0.56],
+        intensity: 4.35,
+      },
+      fill: {
+        color: 0x65a9bf,
+        direction: [0.58, 0.42, 0.7],
+        intensity: 0.24,
+      },
+      centralTower: { color: 0x68f2df, intensity: 19, distance: 18, decay: 2 },
+      teamBases: {
+        aurora: { color: 0x54edff, intensity: 13, distance: 14, decay: 2 },
+        nova: { color: 0xff7186, intensity: 13, distance: 14, decay: 2 },
+      },
+    },
+    bloom: { strength: 0.42, radius: 0.56, threshold: 0.92 },
+    surfacePalette: {
+      ground: 0x8ea77b,
+      outerGround: 0x758c70,
+      earthwork: 0x78906b,
+      outcrop: 0x455b53,
+      wetSurface: 0x143a36,
+      panelLight: 0xf1eee5,
+      panelMid: 0xaec5c1,
+      panelDark: 0x101d22,
+      structure: 0x081114,
+      glass: 0x4d8290,
+      neutralAccent: 0xb4ef3f,
+      auroraAccent: 0x4fd9ed,
+      novaAccent: 0xf45f7c,
+    },
+    atmospherePalette: {
+      haze: 0x9fc8bd,
+      motes: 0xffe5b8,
+      boundaryField: 0x77d8d3,
+      horizonGlow: 0xb5d9c8,
+      shadowTint: 0x163238,
+      highlightTint: 0xffd6a5,
+    },
+    practicalLights: [
+      {
+        id: 'crater-aurora-operations',
+        kind: 'point',
+        zone: 'aurora-base',
+        purpose: 'interior',
+        position: [-44.5, 3.35, 0],
+        color: 0x6fe9ff,
+        intensity: 7.5,
+        distance: 11,
+        decay: 2,
+        castShadow: false,
+      },
+      {
+        id: 'crater-nova-operations',
+        kind: 'point',
+        zone: 'nova-base',
+        purpose: 'interior',
+        position: [44.5, 3.35, 0],
+        color: 0xff7891,
+        intensity: 7.5,
+        distance: 11,
+        decay: 2,
+        castShadow: false,
+      },
+      {
+        id: 'crater-observatory-relay',
+        kind: 'spot',
+        zone: 'north-observatory',
+        purpose: 'landmark',
+        position: [0, 7.9, -33.4],
+        target: [0, 0.2, -25],
+        color: 0x79ddff,
+        intensity: 10,
+        distance: 22,
+        decay: 2,
+        angle: 0.62,
+        penumbra: 0.72,
+        castShadow: false,
+      },
+      {
+        id: 'crater-hydroponics-lab',
+        kind: 'point',
+        zone: 'south-hydroponics',
+        purpose: 'landmark',
+        position: [0, 3.2, 32.4],
+        color: 0xb7ff74,
+        intensity: 8.5,
+        distance: 14,
+        decay: 2,
+        castShadow: false,
+      },
+    ],
+  },
+  'umbra-station': {
+    mapId: 'umbra-station',
+    environmentKind: 'orbital-station',
+    backgroundColor: 0x030712,
+    fog: { color: 0x10192d, density: 0.0026 },
+    exposure: 1.02,
+    environmentIntensity: 0.84,
+    lighting: {
+      hemisphere: { skyColor: 0x789bc4, groundColor: 0x030711, intensity: 0.34 },
+      sun: {
+        color: 0xabcfff,
+        direction: [-0.42, 0.7, -0.58],
+        intensity: 3.1,
+      },
+      fill: {
+        color: 0x7759b8,
+        direction: [0.64, 0.28, 0.72],
+        intensity: 0.42,
+      },
+      centralTower: { color: 0x63eaff, intensity: 23, distance: 17, decay: 2 },
+      teamBases: {
+        aurora: { color: 0x43dcff, intensity: 16, distance: 13, decay: 2 },
+        nova: { color: 0xff527e, intensity: 16, distance: 13, decay: 2 },
+      },
+    },
+    bloom: { strength: 0.55, radius: 0.64, threshold: 0.82 },
+    surfacePalette: {
+      ground: 0x1c2b3c,
+      outerGround: 0x070d18,
+      earthwork: 0x495e59,
+      outcrop: 0x34474a,
+      wetSurface: 0x14243b,
+      panelLight: 0xe8edf3,
+      panelMid: 0x7892a7,
+      panelDark: 0x0b1422,
+      structure: 0x050a11,
+      glass: 0x467e9f,
+      neutralAccent: 0xbaff54,
+      auroraAccent: 0x3ddcff,
+      novaAccent: 0xff4d7b,
+    },
+    atmospherePalette: {
+      haze: 0x5278a6,
+      motes: 0xa7dfff,
+      boundaryField: 0x5bcfff,
+      horizonGlow: 0x614d92,
+      shadowTint: 0x090d1e,
+      highlightTint: 0x9fd6ff,
+    },
+    practicalLights: [
+      {
+        id: 'umbra-aurora-habitat',
+        kind: 'point',
+        zone: 'aurora-base',
+        purpose: 'interior',
+        position: [-31.2, 3.3, 0],
+        color: 0x5ce5ff,
+        intensity: 9.5,
+        distance: 10,
+        decay: 2,
+        castShadow: false,
+      },
+      {
+        id: 'umbra-nova-habitat',
+        kind: 'point',
+        zone: 'nova-base',
+        purpose: 'interior',
+        position: [31.2, 3.3, 0],
+        color: 0xff6589,
+        intensity: 9.5,
+        distance: 10,
+        decay: 2,
+        castShadow: false,
+      },
+      {
+        id: 'umbra-signal-array',
+        kind: 'spot',
+        zone: 'north-signal-array',
+        purpose: 'landmark',
+        position: [0, 12.2, -22.8],
+        target: [0, 2.8, -14],
+        color: 0x6eeeff,
+        intensity: 13,
+        distance: 25,
+        decay: 2,
+        angle: 0.5,
+        penumbra: 0.68,
+        castShadow: false,
+      },
+      {
+        id: 'umbra-power-annex',
+        kind: 'point',
+        zone: 'south-power-annex',
+        purpose: 'landmark',
+        position: [0, 3.9, 19.2],
+        color: 0xffa14f,
+        intensity: 12,
+        distance: 15,
+        decay: 2,
+        castShadow: false,
+      },
+      {
+        id: 'umbra-upper-ring',
+        kind: 'point',
+        zone: 'upper-catwalk-ring',
+        purpose: 'orientation',
+        position: [0, 6.7, 0],
+        color: 0x8d72ff,
+        intensity: 5.5,
+        distance: 19,
+        decay: 2,
+        castShadow: false,
+      },
+    ],
+  },
+} satisfies Record<MapDefinition['id'], MapVisualProfile>);
+
+/** Returns the shared, deeply frozen visual contract for an authored map. */
+export const getMapVisualProfile = (mapId: MapDefinition['id']): MapVisualProfile =>
+  MAP_VISUAL_PROFILES[mapId];

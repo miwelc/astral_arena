@@ -64,7 +64,9 @@ import {
   createColdEnvironmentTexture,
   createFacilityPanelTexture,
   createForestGroundTextures,
+  createOrbitalEnvironmentTexture,
   createRadialTexture,
+  createStylizedGroundTexture,
   createTechnicalSurfaceTextures,
 } from './visualTextures';
 import {
@@ -94,6 +96,7 @@ import {
   preloadExternalWeaponModels,
 } from './externalWeaponModels';
 import { applyFallbackWeaponNormalDetail } from './weaponSurfaceDetail';
+import { getMapVisualProfile, type MapVisualProfile } from './mapVisualProfile';
 
 const UP = new THREE.Vector3(0, 1, 0);
 const DOWN = new THREE.Vector3(0, -1, 0);
@@ -394,6 +397,10 @@ const applyGeometrySurfaceTint = (
 };
 
 const sampleGroundRelief = (map: MapDefinition, worldX: number, worldZ: number): number => {
+  // Umbra's lowest combat band is a pressure-rated station deck. Even subtle
+  // terrain noise makes its flush airlocks and plate seams look broken, while
+  // Crater Ridge benefits from the same relief in its exposed soil pockets.
+  if (map.id === 'umbra-station') return 0;
   const depth = map.bounds.maxZ - map.bounds.minZ;
   const centerX = (map.bounds.minX + map.bounds.maxX) * 0.5;
   const centerZ = (map.bounds.minZ + map.bounds.maxZ) * 0.5;
@@ -440,6 +447,7 @@ const disposeObject = (object: THREE.Object3D): void => {
 export class ArenaRenderer {
   private readonly container: HTMLElement;
   private readonly map: MapDefinition;
+  private readonly visualProfile: MapVisualProfile;
   private readonly scene = new THREE.Scene();
   private readonly renderer: THREE.WebGLRenderer;
   private readonly composer: EffectComposer;
@@ -611,6 +619,7 @@ export class ArenaRenderer {
   public constructor(container: HTMLElement, map: MapDefinition) {
     this.container = container;
     this.map = map;
+    this.visualProfile = getMapVisualProfile(map.id);
 
     this.renderer = new THREE.WebGLRenderer({
       antialias: false,
@@ -619,7 +628,7 @@ export class ArenaRenderer {
     });
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.AgXToneMapping;
-    this.renderer.toneMappingExposure = 1.08;
+    this.renderer.toneMappingExposure = this.visualProfile.exposure;
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.domElement.style.width = '100%';
@@ -628,9 +637,12 @@ export class ArenaRenderer {
     this.renderer.domElement.style.touchAction = 'none';
     this.container.append(this.renderer.domElement);
 
-    this.scene.background = new THREE.Color(0x9dbdb8);
-    this.scene.fog = new THREE.FogExp2(0x9dbdb8, 0.0086);
-    this.scene.environmentIntensity = 0.92;
+    this.scene.background = new THREE.Color(this.visualProfile.backgroundColor);
+    this.scene.fog = new THREE.FogExp2(
+      this.visualProfile.fog.color,
+      this.visualProfile.fog.density,
+    );
+    this.scene.environmentIntensity = this.visualProfile.environmentIntensity;
     this.camera.rotation.order = 'YXZ';
     const mapWidth = this.map.bounds.maxX - this.map.bounds.minX;
     const mapDepth = this.map.bounds.maxZ - this.map.bounds.minZ;
@@ -646,7 +658,7 @@ export class ArenaRenderer {
 
     this.createEnvironmentMap();
     this.viewScene.environment = this.scene.environment;
-    this.viewScene.environmentIntensity = 1.08;
+    this.viewScene.environmentIntensity = Math.max(0.92, this.visualProfile.environmentIntensity + 0.16);
     this.viewScene.add(this.viewCamera);
     const viewHemisphere = new THREE.HemisphereLight(0xd8ebe6, 0x071011, 0.56);
     const viewKey = new THREE.DirectionalLight(0xffedcd, 3.25);
@@ -671,7 +683,12 @@ export class ArenaRenderer {
     viewModelPass.clear = false;
     viewModelPass.clearDepth = true;
     this.composer.addPass(viewModelPass);
-    const bloomPass = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.38, 0.52, 0.98);
+    const bloomPass = new UnrealBloomPass(
+      new THREE.Vector2(1, 1),
+      this.visualProfile.bloom.strength,
+      this.visualProfile.bloom.radius,
+      this.visualProfile.bloom.threshold,
+    );
     this.composer.addPass(bloomPass);
     this.gradePass = new ShaderPass({
       uniforms: {
@@ -679,6 +696,9 @@ export class ArenaRenderer {
         uTime: { value: 0 },
         uDamage: this.damageUniform,
         uFire: this.fireUniform,
+        uShadowTint: { value: new THREE.Color(this.visualProfile.atmospherePalette.shadowTint) },
+        uHighlightTint: { value: new THREE.Color(this.visualProfile.atmospherePalette.highlightTint) },
+        uOrbital: { value: this.visualProfile.environmentKind === 'orbital-station' ? 1 : 0 },
       },
       vertexShader: /* glsl */ `
         varying vec2 vUv;
@@ -693,6 +713,9 @@ export class ArenaRenderer {
         uniform float uTime;
         uniform float uDamage;
         uniform float uFire;
+        uniform vec3 uShadowTint;
+        uniform vec3 uHighlightTint;
+        uniform float uOrbital;
 
         float hash(vec2 p) {
           return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
@@ -723,17 +746,17 @@ export class ArenaRenderer {
             color = mix(color, radialBlur, impactBlur);
           }
           float luminance = dot(color, vec3(0.2126, 0.7152, 0.0722));
-          color = mix(vec3(luminance), color, 1.075);
-          color = (color - 0.5) * 1.045 + 0.5;
+          color = mix(vec3(luminance), color, mix(1.09, 1.13, uOrbital));
+          color = (color - 0.5) * mix(1.055, 1.085, uOrbital) + 0.5;
           float shadows = 1.0 - smoothstep(0.04, 0.42, luminance);
           float highlights = smoothstep(0.58, 1.15, luminance);
-          color += shadows * vec3(-0.012, 0.006, 0.009);
-          color += highlights * vec3(0.018, 0.008, -0.006);
+          color = mix(color, color * (uShadowTint * 1.75 + 0.12), shadows * mix(0.085, 0.09, uOrbital));
+          color += highlights * uHighlightTint * mix(0.024, 0.032, uOrbital);
           float edge = smoothstep(0.34, 1.02, length((vUv - 0.5) * vec2(1.15, 1.0)) * 1.42);
           color *= 1.0 - edge * (0.125 + uDamage * 0.065);
           float grain = hash(vUv * vec2(1493.0, 877.0) + floor(uTime * 24.0)) - 0.5;
           color += grain * 0.0045;
-          color = mix(color, color * vec3(0.985, 1.008, 1.0), 0.18);
+          color = mix(color, color * mix(vec3(0.985, 1.008, 1.0), vec3(0.965, 0.99, 1.045), uOrbital), 0.18);
           gl_FragColor = vec4(color, source.a);
         }
       `,
@@ -893,7 +916,7 @@ export class ArenaRenderer {
       ? THREE.MathUtils.lerp(0.92, 0.58, this.viewAimBlend)
       : 1.08;
     this.depthFocusPass.maxBlurPixels = firstPerson ? 1.65 : 2.15;
-    this.renderer.toneMappingExposure = 1.08 - this.damagePulse * 0.11;
+    this.renderer.toneMappingExposure = this.visualProfile.exposure - this.damagePulse * 0.11;
     this.skyMaterial.uniforms.uTime!.value = worldTime;
     this.gradePass.uniforms.uTime!.value = worldTime;
 
@@ -967,7 +990,9 @@ export class ArenaRenderer {
   }
 
   private createEnvironmentMap(): void {
-    const environment = createColdEnvironmentTexture(768, 384);
+    const environment = this.visualProfile.environmentKind === 'orbital-station'
+      ? createOrbitalEnvironmentTexture(768, 384)
+      : createColdEnvironmentTexture(768, 384);
     const generator = new THREE.PMREMGenerator(this.renderer);
     generator.compileEquirectangularShader();
     this.environmentTarget = generator.fromEquirectangular(environment);
@@ -977,6 +1002,156 @@ export class ArenaRenderer {
   }
 
   private createSky(): THREE.ShaderMaterial {
+    const orbitalFragmentShader = /* glsl */ `
+      varying vec3 vDirection;
+      uniform float uTime;
+
+      float hash21(vec2 p) {
+        return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+      }
+
+      float noise(vec2 p) {
+        vec2 i = floor(p);
+        vec2 f = fract(p);
+        f = f * f * (3.0 - 2.0 * f);
+        return mix(mix(hash21(i), hash21(i + vec2(1.0, 0.0)), f.x),
+                   mix(hash21(i + vec2(0.0, 1.0)), hash21(i + vec2(1.0, 1.0)), f.x), f.y);
+      }
+
+      float fbm(vec2 p) {
+        float value = 0.0;
+        float amplitude = 0.5;
+        for (int i = 0; i < 5; i++) {
+          value += noise(p) * amplitude;
+          p = p * 2.07 + vec2(13.7, 9.2);
+          amplitude *= 0.5;
+        }
+        return value;
+      }
+
+      void main() {
+        vec3 direction = normalize(vDirection);
+        float h = clamp(direction.y * 0.5 + 0.5, 0.0, 1.0);
+        vec3 color = mix(vec3(0.002, 0.004, 0.012), vec3(0.012, 0.028, 0.062), h);
+
+        vec2 nebulaUv = direction.xz * 3.4 + direction.y * vec2(0.8, -1.1);
+        float nebulaNoise = fbm(nebulaUv + vec2(uTime * 0.00035, 0.0));
+        float nebulaBand = exp(-pow(direction.y + direction.x * 0.22 - 0.08, 2.0) * 22.0);
+        color += mix(vec3(0.025, 0.055, 0.12), vec3(0.15, 0.045, 0.22), nebulaNoise)
+          * nebulaBand * (0.18 + nebulaNoise * 0.34);
+
+        vec2 skyUv = vec2(
+          atan(direction.z, direction.x) / 6.2831853 + 0.5,
+          asin(clamp(direction.y, -1.0, 1.0)) / 3.14159265 + 0.5
+        );
+        vec2 fineGrid = vec2(420.0, 210.0);
+        vec2 fineCell = floor(skyUv * fineGrid);
+        vec2 fineLocal = fract(skyUv * fineGrid) - 0.5;
+        float fineSeed = hash21(fineCell);
+        float starsA = step(0.9945, fineSeed) * smoothstep(0.13, 0.0, length(fineLocal));
+        vec2 brightGrid = vec2(180.0, 90.0);
+        vec2 brightCell = floor(skyUv * brightGrid);
+        vec2 brightLocal = fract(skyUv * brightGrid) - 0.5;
+        float brightSeed = hash21(brightCell + 41.0);
+        float starsB = step(0.997, brightSeed) * smoothstep(0.11, 0.0, length(brightLocal));
+        float twinkle = 0.82 + sin(uTime * 0.72 + fineSeed * 24.0) * 0.18;
+        color += vec3(0.68, 0.83, 1.0) * starsA * 2.4 * twinkle;
+        color += vec3(1.0, 0.75, 0.54) * starsB * 1.7;
+
+        vec3 sunDir = normalize(vec3(-0.42, 0.70, -0.58));
+        float sunAlignment = max(dot(direction, sunDir), 0.0);
+        color += vec3(0.64, 0.81, 1.0) * pow(sunAlignment, 12.0) * 0.28;
+        color += vec3(0.86, 0.94, 1.0) * pow(sunAlignment, 420.0) * 6.0;
+
+        vec3 planetDir = normalize(vec3(0.58, 0.13, 0.80));
+        float planetDot = dot(direction, planetDir);
+        float planet = smoothstep(0.918, 0.924, planetDot);
+        float planetCore = smoothstep(0.927, 0.935, planetDot);
+        vec3 planetNormal = normalize(direction - planetDir * 0.918 + vec3(0.0, 0.0001, 0.0));
+        float planetLight = smoothstep(-0.38, 0.48, dot(planetNormal, sunDir));
+        float cloud = fbm(planetNormal.xy * 8.0 + planetNormal.z * 2.2);
+        vec3 daySide = mix(vec3(0.10, 0.22, 0.38), vec3(0.31, 0.23, 0.43), cloud);
+        vec3 planetColor = daySide * (0.08 + planetLight * 0.74);
+        color = mix(color, planetColor, planetCore * 0.96);
+        float atmosphere = planet * (1.0 - planetCore);
+        float eclipseRim = pow(max(dot(planetNormal, -sunDir), 0.0), 4.0);
+        color += atmosphere * mix(vec3(0.20, 0.42, 0.9), vec3(0.74, 0.26, 0.92), eclipseRim) * 2.2;
+
+        float orbitalRing = 1.0 - smoothstep(
+          0.0,
+          0.0032,
+          abs(dot(direction - planetDir, normalize(vec3(0.12, 0.98, -0.16))))
+        );
+        orbitalRing *= smoothstep(0.84, 0.922, planetDot) * (1.0 - planetCore * 0.72);
+        color += orbitalRing * vec3(0.40, 0.55, 0.82) * 0.38;
+        gl_FragColor = vec4(color, 1.0);
+      }
+    `;
+    const craterFragmentShader = /* glsl */ `
+      varying vec3 vDirection;
+      uniform float uTime;
+
+      float hash(vec2 p) {
+        return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+      }
+
+      float noise(vec2 p) {
+        vec2 i = floor(p);
+        vec2 f = fract(p);
+        f = f * f * (3.0 - 2.0 * f);
+        return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x),
+                   mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y);
+      }
+
+      float fbm(vec2 p) {
+        float value = 0.0;
+        float amplitude = 0.5;
+        for (int i = 0; i < 5; i++) {
+          value += noise(p) * amplitude;
+          p = p * 2.03 + 19.1;
+          amplitude *= 0.5;
+        }
+        return value;
+      }
+
+      void main() {
+        float h = clamp(vDirection.y * 0.5 + 0.5, 0.0, 1.0);
+        vec3 horizon = vec3(0.13, 0.26, 0.28);
+        vec3 middle = vec3(0.045, 0.135, 0.20);
+        vec3 zenith = vec3(0.009, 0.038, 0.086);
+        vec3 color = mix(horizon, middle, smoothstep(0.43, 0.68, h));
+        color = mix(color, zenith, smoothstep(0.66, 1.0, h));
+
+        vec3 sunDir = normalize(vec3(-0.52, 0.64, -0.56));
+        float alignment = max(dot(vDirection, sunDir), 0.0);
+        color += vec3(1.0, 0.79, 0.48) * pow(alignment, 520.0) * 7.2;
+        color += vec3(1.0, 0.55, 0.22) * pow(alignment, 42.0) * 0.34;
+        color += vec3(0.24, 0.48, 0.48) * pow(alignment, 7.0) * 0.22;
+
+        vec2 cloudUv = vDirection.xz * 4.5 + vDirection.y * vec2(1.9, -1.2);
+        float cloudNoise = fbm(cloudUv + vec2(uTime * 0.0035, 0.0));
+        float cloudBand = smoothstep(0.45, 0.68, cloudNoise);
+        cloudBand *= smoothstep(0.34, 0.51, h) * (1.0 - smoothstep(0.78, 0.91, h));
+        vec3 stormCloud = mix(vec3(0.065, 0.12, 0.15), vec3(0.28, 0.35, 0.33), alignment);
+        color = mix(color, stormCloud, cloudBand * 0.56);
+
+        float aurora = exp(-pow(h - 0.64, 2.0) * 180.0);
+        aurora *= smoothstep(0.48, 0.76, fbm(vDirection.xz * 2.1 + vec2(uTime * 0.0012, 8.0)));
+        color += vec3(0.10, 0.42, 0.38) * aurora * 0.16;
+
+        vec3 planetDir = normalize(vec3(0.61, 0.34, 0.72));
+        float planetDot = dot(vDirection, planetDir);
+        float planet = smoothstep(0.984, 0.988, planetDot);
+        vec3 planetSurface = normalize(vDirection - planetDir * 0.984 + vec3(0.0, 0.0001, 0.0));
+        float planetShade = smoothstep(-0.12, 0.52, dot(planetSurface, sunDir));
+        vec3 planetColor = mix(vec3(0.19, 0.30, 0.42), vec3(0.60, 0.35, 0.48), planetShade);
+        color = mix(color, planetColor * (0.34 + planetShade * 0.58), planet * 0.62);
+        float ring = 1.0 - smoothstep(0.0, 0.0045, abs(dot(vDirection - planetDir, normalize(vec3(0.18, 0.94, -0.28)))));
+        ring *= smoothstep(0.91, 0.984, planetDot) * (1.0 - planet * 0.74);
+        color += ring * vec3(0.51, 0.65, 0.79) * 0.26;
+        gl_FragColor = vec4(color, 1.0);
+      }
+    `;
     const material = new THREE.ShaderMaterial({
       side: THREE.BackSide,
       depthWrite: false,
@@ -989,69 +1164,9 @@ export class ArenaRenderer {
           gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
         }
       `,
-      fragmentShader: /* glsl */ `
-        varying vec3 vDirection;
-        uniform float uTime;
-
-        float hash(vec2 p) {
-          return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
-        }
-
-        float noise(vec2 p) {
-          vec2 i = floor(p);
-          vec2 f = fract(p);
-          f = f * f * (3.0 - 2.0 * f);
-          return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x),
-                     mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y);
-        }
-
-        float fbm(vec2 p) {
-          float value = 0.0;
-          float amplitude = 0.5;
-          for (int i = 0; i < 4; i++) {
-            value += noise(p) * amplitude;
-            p = p * 2.03 + 19.1;
-            amplitude *= 0.5;
-          }
-          return value;
-        }
-
-        void main() {
-          float h = clamp(vDirection.y * 0.5 + 0.5, 0.0, 1.0);
-          vec3 horizon = vec3(0.63, 0.76, 0.72);
-          vec3 middle = vec3(0.19, 0.37, 0.46);
-          vec3 zenith = vec3(0.035, 0.105, 0.18);
-          vec3 color = mix(horizon, middle, smoothstep(0.47, 0.74, h));
-          color = mix(color, zenith, smoothstep(0.70, 1.0, h));
-
-          vec3 sunDir = normalize(vec3(-0.52, 0.64, -0.56));
-          float alignment = max(dot(vDirection, sunDir), 0.0);
-          float sun = pow(alignment, 520.0);
-          float innerHalo = pow(alignment, 48.0);
-          float outerHalo = pow(alignment, 7.0);
-          color += vec3(1.0, 0.92, 0.72) * sun * 4.6;
-          color += vec3(0.78, 0.91, 0.78) * innerHalo * 0.43;
-          color += vec3(0.32, 0.51, 0.48) * outerHalo * 0.25;
-
-          vec2 cloudUv = vDirection.xz * 4.2 + vDirection.y * vec2(1.7, -1.3);
-          float cloudNoise = fbm(cloudUv + vec2(uTime * 0.004, 0.0));
-          float cloudBand = smoothstep(0.54, 0.72, cloudNoise);
-          cloudBand *= smoothstep(0.39, 0.58, h) * (1.0 - smoothstep(0.75, 0.89, h));
-          color = mix(color, vec3(0.66, 0.78, 0.74), cloudBand * 0.25);
-
-          vec3 planetDir = normalize(vec3(0.58, 0.32, 0.72));
-          float planetDot = dot(vDirection, planetDir);
-          float planet = smoothstep(0.9865, 0.9892, planetDot);
-          vec3 planetSurface = normalize(vDirection - planetDir * 0.9865 + vec3(0.0, 0.0001, 0.0));
-          float planetShade = smoothstep(-0.08, 0.5, dot(planetSurface, sunDir));
-          vec3 planetColor = mix(vec3(0.43, 0.58, 0.72), vec3(0.74, 0.53, 0.72), planetShade);
-          color = mix(color, planetColor * (0.48 + planetShade * 0.52), planet * 0.54);
-          float ring = 1.0 - smoothstep(0.0, 0.0048, abs(dot(vDirection - planetDir, normalize(vec3(0.18, 0.94, -0.28)))));
-          ring *= smoothstep(0.91, 0.986, planetDot) * (1.0 - planet * 0.74);
-          color += ring * vec3(0.61, 0.72, 0.82) * 0.25;
-          gl_FragColor = vec4(color, 1.0);
-        }
-      `,
+      fragmentShader: this.visualProfile.environmentKind === 'orbital-station'
+        ? orbitalFragmentShader
+        : craterFragmentShader,
     });
 
     const sky = new THREE.Mesh(new THREE.SphereGeometry(185, 32, 18), material);
@@ -1065,14 +1180,26 @@ export class ArenaRenderer {
   private createLighting(): void {
     const width = this.map.bounds.maxX - this.map.bounds.minX;
     const depth = this.map.bounds.maxZ - this.map.bounds.minZ;
+    const lighting = this.visualProfile.lighting;
     // Cover the full arena diagonal so the sun's rotated shadow camera cannot
     // clip casters in the outer corners of the expanded map.
     const shadowExtent = Math.hypot(width * 0.5, depth * 0.5) + 5;
-    const hemisphere = new THREE.HemisphereLight(0xb9ded5, 0x07110e, 0.58);
+    const hemisphere = new THREE.HemisphereLight(
+      lighting.hemisphere.skyColor,
+      lighting.hemisphere.groundColor,
+      lighting.hemisphere.intensity,
+    );
     this.scene.add(hemisphere);
+    const ambient = new THREE.AmbientLight(
+      this.visualProfile.environmentKind === 'orbital-station' ? 0x58769d : 0x304a43,
+      this.visualProfile.environmentKind === 'orbital-station' ? 0.38 : 0.1,
+    );
+    ambient.name = `${this.map.id}-readability-ambient`;
+    this.scene.add(ambient);
 
-    const sun = new THREE.DirectionalLight(0xffe5b2, 4.35);
-    sun.position.set(-46, 48, -52);
+    const sun = new THREE.DirectionalLight(lighting.sun.color, lighting.sun.intensity);
+    sun.name = `${this.map.id}-stellar-key`;
+    sun.position.fromArray(lighting.sun.direction).multiplyScalar(76);
     sun.castShadow = true;
     sun.shadow.mapSize.set(2048, 2048);
     sun.shadow.camera.left = -shadowExtent;
@@ -1085,15 +1212,29 @@ export class ArenaRenderer {
     sun.shadow.normalBias = 0.032;
     this.scene.add(sun);
 
-    const fill = new THREE.DirectionalLight(0x79aebe, 0.34);
-    fill.position.set(34, 22, 38);
+    const fill = new THREE.DirectionalLight(lighting.fill.color, lighting.fill.intensity);
+    fill.name = `${this.map.id}-atmospheric-fill`;
+    fill.position.fromArray(lighting.fill.direction).multiplyScalar(54);
     this.scene.add(fill);
 
-    const towerKey = new THREE.PointLight(0x74f4df, 24, 18, 2);
+    const towerKey = new THREE.PointLight(
+      lighting.centralTower.color,
+      lighting.centralTower.intensity,
+      lighting.centralTower.distance,
+      lighting.centralTower.decay,
+    );
+    towerKey.name = `${this.map.id}-tower-practical`;
     towerKey.position.set(0, 7.8, 0);
     this.scene.add(towerKey);
 
-    const auroraBase = new THREE.PointLight(TEAM_COLORS.aurora.glow, 15, 14, 2);
+    const auroraBaseProfile = lighting.teamBases.aurora;
+    const auroraBase = new THREE.PointLight(
+      auroraBaseProfile.color,
+      auroraBaseProfile.intensity,
+      auroraBaseProfile.distance,
+      auroraBaseProfile.decay,
+    );
+    auroraBase.name = `${this.map.id}-aurora-objective-light`;
     auroraBase.position.set(
       this.map.flagBases.aurora.x,
       this.map.flagBases.aurora.y + 2.25,
@@ -1101,13 +1242,56 @@ export class ArenaRenderer {
     );
     this.scene.add(auroraBase);
 
-    const novaBase = new THREE.PointLight(TEAM_COLORS.nova.glow, 15, 14, 2);
+    const novaBaseProfile = lighting.teamBases.nova;
+    const novaBase = new THREE.PointLight(
+      novaBaseProfile.color,
+      novaBaseProfile.intensity,
+      novaBaseProfile.distance,
+      novaBaseProfile.decay,
+    );
+    novaBase.name = `${this.map.id}-nova-objective-light`;
     novaBase.position.set(
       this.map.flagBases.nova.x,
       this.map.flagBases.nova.y + 2.25,
       this.map.flagBases.nova.z,
     );
     this.scene.add(novaBase);
+
+    // A small number of curated, shadowless practicals makes authored rooms
+    // and vertical landmarks legible. The sun remains the only shadow caster,
+    // keeping the added depth inexpensive on integrated GPUs.
+    for (const specification of this.visualProfile.practicalLights) {
+      if (specification.kind === 'point') {
+        const practical = new THREE.PointLight(
+          specification.color,
+          specification.intensity,
+          specification.distance,
+          specification.decay,
+        );
+        practical.name = specification.id;
+        practical.castShadow = specification.castShadow;
+        practical.position.fromArray(specification.position);
+        practical.userData.zone = specification.zone;
+        practical.userData.purpose = specification.purpose;
+        this.scene.add(practical);
+        continue;
+      }
+      const practical = new THREE.SpotLight(
+        specification.color,
+        specification.intensity,
+        specification.distance,
+        specification.angle,
+        specification.penumbra,
+        specification.decay,
+      );
+      practical.name = specification.id;
+      practical.castShadow = specification.castShadow;
+      practical.position.fromArray(specification.position);
+      practical.target.position.fromArray(specification.target);
+      practical.userData.zone = specification.zone;
+      practical.userData.purpose = specification.purpose;
+      this.scene.add(practical, practical.target);
+    }
   }
 
   private createLandscape(): void {
@@ -1118,10 +1302,18 @@ export class ArenaRenderer {
     const arenaRadius = Math.hypot(halfWidth, halfDepth);
     const centerX = (this.map.bounds.minX + this.map.bounds.maxX) * 0.5;
     const centerZ = (this.map.bounds.minZ + this.map.bounds.maxZ) * 0.5;
-    const forestGround = createForestGroundTextures(512);
-    this.groundTexture = forestGround.albedo;
-    this.groundNormalTexture = forestGround.normal;
-    this.groundRoughnessTexture = forestGround.roughness;
+    const orbital = this.visualProfile.environmentKind === 'orbital-station';
+    if (orbital) {
+      const stationDeck = createTechnicalSurfaceTextures(512);
+      this.groundTexture = createStylizedGroundTexture(512);
+      this.groundNormalTexture = stationDeck.normal;
+      this.groundRoughnessTexture = stationDeck.roughness;
+    } else {
+      const forestGround = createForestGroundTextures(512);
+      this.groundTexture = forestGround.albedo;
+      this.groundNormalTexture = forestGround.normal;
+      this.groundRoughnessTexture = forestGround.roughness;
+    }
     this.facilityPanelTexture = createFacilityPanelTexture(512);
     const technicalSurface = createTechnicalSurfaceTextures(256);
     this.technicalNormalTexture = technicalSurface.normal;
@@ -1144,12 +1336,17 @@ export class ArenaRenderer {
     this.viewArmMaterial.normalMap = this.technicalNormalTexture;
     this.viewArmMaterial.normalScale.set(0.16, 0.16);
 
+    if (orbital) {
+      this.createOrbitalLandscape(width, depth, centerX, centerZ);
+      return;
+    }
+
     const outerGroundGeometry = new THREE.CircleGeometry(Math.max(146, arenaRadius + 78), 96);
     applyGeometrySurfaceTint(outerGroundGeometry, 0x51f1e, centerX, centerZ, true);
     const outerGround = new THREE.Mesh(
       outerGroundGeometry,
       new THREE.MeshPhysicalMaterial({
-        color: 0xaab69a,
+        color: this.visualProfile.surfacePalette.outerGround,
         map: this.groundTexture,
         normalMap: this.groundNormalTexture,
         normalScale: new THREE.Vector2(0.72, 0.72),
@@ -1171,9 +1368,9 @@ export class ArenaRenderer {
 
     const random = seededRandom(0x51f1e);
     const ridgeMaterials = [
-      new THREE.MeshStandardMaterial({ color: 0x263d34, roughness: 0.96, flatShading: true }),
-      new THREE.MeshStandardMaterial({ color: 0x385347, roughness: 0.98, flatShading: true }),
-      new THREE.MeshStandardMaterial({ color: 0x597064, roughness: 1, flatShading: true }),
+      new THREE.MeshStandardMaterial({ color: 0x101c1c, roughness: 0.91, metalness: 0.03, flatShading: true }),
+      new THREE.MeshStandardMaterial({ color: 0x1e3230, roughness: 0.94, flatShading: true }),
+      new THREE.MeshStandardMaterial({ color: 0x344943, roughness: 0.97, flatShading: true }),
     ];
 
     const ridgeBands = [
@@ -1243,16 +1440,16 @@ export class ArenaRenderer {
     }
 
     const plantMaterials = {
-      stem: new THREE.MeshStandardMaterial({ color: 0x182b20, roughness: 0.94, flatShading: true }),
+      stem: new THREE.MeshStandardMaterial({ color: 0x0e211d, roughness: 0.94, flatShading: true }),
       leaf: new THREE.MeshStandardMaterial({
-        color: 0x547c45,
+        color: 0x416e56,
         roughness: 0.82,
         flatShading: true,
       }),
       glow: new THREE.MeshStandardMaterial({
-        color: 0xb8e85e,
-        emissive: 0x5da63d,
-        emissiveIntensity: 0.72,
+        color: 0xc7ff72,
+        emissive: 0x68d14b,
+        emissiveIntensity: 1.45,
         roughness: 0.28,
       }),
     };
@@ -1276,6 +1473,205 @@ export class ArenaRenderer {
       this.registerWorldDecoration(plant);
       this.scene.add(plant);
     }
+
+    const basaltMaterial = new THREE.MeshPhysicalMaterial({
+      name: 'crater-rim-obsidian',
+      color: 0x111c1c,
+      roughness: 0.58,
+      metalness: 0.08,
+      clearcoat: 0.36,
+      clearcoatRoughness: 0.42,
+      envMapIntensity: 0.72,
+      flatShading: true,
+    });
+    const spireCount = 18;
+    const basaltSpires = new THREE.InstancedMesh(
+      new THREE.ConeGeometry(1, 1, 5, 1),
+      basaltMaterial,
+      spireCount,
+    );
+    basaltSpires.name = 'crater-rim-obsidian-spires';
+    const spireTransform = new THREE.Object3D();
+    for (let index = 0; index < spireCount; index += 1) {
+      const angle = (index / spireCount) * Math.PI * 2 + (random() - 0.5) * 0.18;
+      const distance = arenaRadius + 4 + random() * 11;
+      const height = 7 + random() * 17;
+      const radius = 1.5 + random() * 2.8;
+      spireTransform.position.set(
+        centerX + Math.cos(angle) * distance,
+        this.map.bounds.floorY + height * 0.5 - 0.45,
+        centerZ + Math.sin(angle) * distance,
+      );
+      spireTransform.rotation.set((random() - 0.5) * 0.12, -angle, (random() - 0.5) * 0.1);
+      spireTransform.scale.set(radius, height, radius * (0.7 + random() * 0.42));
+      spireTransform.updateMatrix();
+      basaltSpires.setMatrixAt(index, spireTransform.matrix);
+    }
+    basaltSpires.instanceMatrix.needsUpdate = true;
+    basaltSpires.castShadow = false;
+    basaltSpires.receiveShadow = true;
+    this.scene.add(basaltSpires);
+  }
+
+  private createOrbitalLandscape(
+    width: number,
+    depth: number,
+    centerX: number,
+    centerZ: number,
+  ): void {
+    const floorY = this.map.bounds.floorY;
+    const palette = this.visualProfile.surfacePalette;
+    const group = new THREE.Group();
+    group.name = 'umbra-orbital-superstructure';
+    group.userData.environmentKind = 'orbital-station';
+
+    const hullMaterial = new THREE.MeshPhysicalMaterial({
+      name: 'umbra-pressure-hull',
+      color: palette.outerGround,
+      normalMap: this.technicalNormalTexture,
+      normalScale: new THREE.Vector2(0.38, 0.38),
+      roughnessMap: this.technicalRoughnessTexture,
+      roughness: 0.38,
+      metalness: 0.74,
+      clearcoat: 0.2,
+      clearcoatRoughness: 0.3,
+      envMapIntensity: 1.25,
+    });
+    const structureMaterial = new THREE.MeshStandardMaterial({
+      name: 'umbra-external-truss',
+      color: palette.structure,
+      roughness: 0.34,
+      metalness: 0.82,
+      envMapIntensity: 1.3,
+    });
+    const rimMaterial = new THREE.MeshBasicMaterial({
+      name: 'umbra-navigation-rim',
+      color: this.visualProfile.atmospherePalette.boundaryField,
+      transparent: true,
+      opacity: 0.72,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      toneMapped: false,
+    });
+
+    const pressureHull = new THREE.Mesh(
+      new RoundedBoxGeometry(width + 24, 0.82, depth + 21, 4, 0.95),
+      hullMaterial,
+    );
+    pressureHull.name = 'umbra-continuous-pressure-hull';
+    pressureHull.position.set(centerX, floorY - 0.72, centerZ);
+    pressureHull.receiveShadow = true;
+    group.add(pressureHull);
+
+    // The dark orbiting ring and underslung radial ribs sell a much larger
+    // station beyond the collision boundary without cluttering combat lanes.
+    const orbitalRing = new THREE.Mesh(
+      new THREE.TorusGeometry(Math.max(width, depth) * 0.79, 0.48, 8, 96),
+      structureMaterial,
+    );
+    orbitalRing.name = 'umbra-external-orbital-ring';
+    orbitalRing.rotation.x = Math.PI / 2;
+    orbitalRing.rotation.z = 0.11;
+    orbitalRing.position.set(centerX, floorY - 1.4, centerZ);
+    group.add(orbitalRing);
+
+    const luminousRing = new THREE.Mesh(
+      new THREE.TorusGeometry(Math.max(width, depth) * 0.79, 0.055, 4, 128),
+      rimMaterial,
+    );
+    luminousRing.name = 'umbra-orbital-ring-navigation-light';
+    luminousRing.rotation.copy(orbitalRing.rotation);
+    luminousRing.position.copy(orbitalRing.position);
+    luminousRing.position.y += 0.46;
+    group.add(luminousRing);
+
+    const ribGeometry = new RoundedBoxGeometry(0.24, 0.28, depth + 14, 2, 0.06);
+    const ribs = new THREE.InstancedMesh(ribGeometry, structureMaterial, 11);
+    ribs.name = 'umbra-radial-pressure-ribs';
+    const ribTransform = new THREE.Object3D();
+    for (let index = 0; index < 11; index += 1) {
+      ribTransform.position.set(
+        centerX + THREE.MathUtils.lerp(-width * 0.57, width * 0.57, index / 10),
+        floorY - 1.2,
+        centerZ,
+      );
+      ribTransform.rotation.set(0, (index % 2 === 0 ? 1 : -1) * 0.025, 0);
+      ribTransform.updateMatrix();
+      ribs.setMatrixAt(index, ribTransform.matrix);
+    }
+    ribs.instanceMatrix.needsUpdate = true;
+    group.add(ribs);
+
+    const panelMaterial = new THREE.MeshPhysicalMaterial({
+      name: 'umbra-solar-cell',
+      color: 0x0d2242,
+      emissive: 0x081a39,
+      emissiveIntensity: 0.48,
+      roughness: 0.2,
+      metalness: 0.76,
+      clearcoat: 0.82,
+      clearcoatRoughness: 0.12,
+      envMapIntensity: 1.7,
+    });
+    const panelFrameMaterial = new THREE.MeshStandardMaterial({
+      name: 'umbra-solar-frame',
+      color: 0x526779,
+      roughness: 0.28,
+      metalness: 0.82,
+    });
+    const panelGeometry = new RoundedBoxGeometry(5.4, 0.12, 7.4, 2, 0.08);
+    const solarPanels = new THREE.InstancedMesh(panelGeometry, panelMaterial, 12);
+    solarPanels.name = 'umbra-twin-solar-wings';
+    const panelTransform = new THREE.Object3D();
+    let panelIndex = 0;
+    for (const side of [-1, 1]) {
+      const wingX = centerX + side * (width * 0.5 + 14.5);
+      const boom = new THREE.Mesh(
+        new RoundedBoxGeometry(16, 0.22, 0.26, 2, 0.06),
+        panelFrameMaterial,
+      );
+      boom.name = `umbra-${side < 0 ? 'port' : 'starboard'}-solar-boom`;
+      boom.position.set(centerX + side * (width * 0.5 + 6.8), floorY + 1.35, centerZ);
+      group.add(boom);
+      for (let row = -1; row <= 1; row += 1) {
+        for (let column = 0; column < 2; column += 1) {
+          panelTransform.position.set(
+            wingX + side * column * 5.9,
+            floorY + 1.25 + row * 0.11,
+            centerZ + row * 7.9,
+          );
+          panelTransform.rotation.set(0.055 * row, 0, side * -0.09);
+          panelTransform.updateMatrix();
+          solarPanels.setMatrixAt(panelIndex, panelTransform.matrix);
+          panelIndex += 1;
+        }
+      }
+    }
+    solarPanels.instanceMatrix.needsUpdate = true;
+    group.add(solarPanels);
+
+    const mastMaterial = new THREE.MeshStandardMaterial({
+      name: 'umbra-deep-space-antenna',
+      color: 0x71879b,
+      roughness: 0.31,
+      metalness: 0.78,
+      envMapIntensity: 1.35,
+    });
+    for (const x of [-24, -12, 12, 24]) {
+      const mast = new THREE.Group();
+      mast.name = `umbra-external-antenna-${x}`;
+      mast.position.set(centerX + x, floorY, this.map.bounds.minZ - 7.5);
+      const spine = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.16, 8.5, 8), mastMaterial);
+      spine.position.y = 4.1;
+      const crown = new THREE.Mesh(new THREE.OctahedronGeometry(0.38, 0), rimMaterial);
+      crown.position.y = 8.45;
+      crown.userData.spin = x < 0 ? -0.12 : 0.12;
+      this.registerWorldDecoration(crown);
+      mast.add(spine, crown);
+      group.add(mast);
+    }
+
+    this.scene.add(group);
   }
 
   private createEnvironmentDressing(): void {
@@ -1287,6 +1683,10 @@ export class ArenaRenderer {
     const centerX = (this.map.bounds.minX + this.map.bounds.maxX) * 0.5;
     const centerZ = (this.map.bounds.minZ + this.map.bounds.maxZ) * 0.5;
     const arenaArea = width * depth;
+    if (this.visualProfile.environmentKind === 'orbital-station') {
+      this.createOrbitalEnvironmentDressing(width, depth, centerX, centerZ, floorY);
+      return;
+    }
     const towerDeck = this.map.obstacles.find((obstacle) => obstacle.id === 'tower-deck');
     const deckMinX = towerDeck?.min.x ?? centerX - 7;
     const deckMaxX = towerDeck?.max.x ?? centerX + 7;
@@ -1510,18 +1910,167 @@ export class ArenaRenderer {
     this.scene.add(environment.group);
   }
 
+  private createOrbitalEnvironmentDressing(
+    width: number,
+    depth: number,
+    centerX: number,
+    centerZ: number,
+    floorY: number,
+  ): void {
+    const palette = this.visualProfile.surfacePalette;
+    const group = new THREE.Group();
+    group.name = 'umbra-orbital-environment-dressing';
+
+    const armor = new THREE.MeshPhysicalMaterial({
+      name: 'umbra-exterior-armor',
+      color: palette.panelDark,
+      normalMap: this.technicalNormalTexture,
+      normalScale: new THREE.Vector2(0.26, 0.26),
+      roughnessMap: this.technicalRoughnessTexture,
+      roughness: 0.34,
+      metalness: 0.69,
+      clearcoat: 0.26,
+      clearcoatRoughness: 0.28,
+      envMapIntensity: 1.25,
+    });
+    const steel = new THREE.MeshStandardMaterial({
+      name: 'umbra-docking-steel',
+      color: 0x111d2a,
+      roughness: 0.33,
+      metalness: 0.78,
+      envMapIntensity: 1.25,
+    });
+    const cyanSignal = new THREE.MeshStandardMaterial({
+      name: 'umbra-cyan-signal',
+      color: 0x63eaff,
+      emissive: 0x2dcfea,
+      emissiveIntensity: 2.4,
+      roughness: 0.18,
+      metalness: 0.25,
+      toneMapped: false,
+    });
+    const reactorSignal = new THREE.MeshStandardMaterial({
+      name: 'umbra-reactor-amber',
+      color: 0xffb05c,
+      emissive: 0xf06b24,
+      emissiveIntensity: 2.15,
+      roughness: 0.2,
+      metalness: 0.22,
+      toneMapped: false,
+    });
+
+    const addDockModule = (
+      id: string,
+      z: number,
+      colorMaterial: THREE.Material,
+      rotationY: number,
+    ): void => {
+      const module = new THREE.Group();
+      module.name = id;
+      module.position.set(centerX, floorY + 2.1, z);
+      module.rotation.y = rotationY;
+      const body = new THREE.Mesh(new RoundedBoxGeometry(27, 5.6, 7.5, 4, 0.7), armor);
+      body.castShadow = true;
+      body.receiveShadow = true;
+      const spine = new THREE.Mesh(new RoundedBoxGeometry(22, 0.34, 0.4, 2, 0.08), steel);
+      spine.position.set(0, 2.6, 3.58);
+      module.add(body, spine);
+      for (const x of [-9.2, -4.6, 0, 4.6, 9.2]) {
+        const viewport = new THREE.Mesh(new RoundedBoxGeometry(2.6, 0.16, 0.08, 2, 0.035), colorMaterial);
+        viewport.position.set(x, 0.5, 3.78);
+        module.add(viewport);
+      }
+      group.add(module);
+    };
+    addDockModule(
+      'umbra-north-signal-dock',
+      this.map.bounds.minZ - 7.8,
+      cyanSignal,
+      0,
+    );
+    addDockModule(
+      'umbra-south-reactor-dock',
+      this.map.bounds.maxZ + 7.8,
+      reactorSignal,
+      Math.PI,
+    );
+
+    const postGeometry = new RoundedBoxGeometry(0.18, 4.8, 0.18, 2, 0.05);
+    const posts = new THREE.InstancedMesh(postGeometry, steel, 12);
+    posts.name = 'umbra-perimeter-light-pylons';
+    const postTransform = new THREE.Object3D();
+    const lampGeometry = new THREE.OctahedronGeometry(0.22, 0);
+    const lamps = new THREE.InstancedMesh(lampGeometry, cyanSignal, 12);
+    lamps.name = 'umbra-perimeter-navigation-beacons';
+    let pylonIndex = 0;
+    for (const x of [-width * 0.46, 0, width * 0.46]) {
+      for (const z of [-depth * 0.54, depth * 0.54]) {
+        for (const xMirror of x === 0 ? [0] : [x]) {
+          postTransform.position.set(centerX + xMirror, floorY + 2.2, centerZ + z);
+          postTransform.rotation.set(0, 0, 0);
+          postTransform.scale.set(1, 1, 1);
+          postTransform.updateMatrix();
+          posts.setMatrixAt(pylonIndex, postTransform.matrix);
+          postTransform.position.y = floorY + 4.75;
+          postTransform.scale.set(1, 1, 1);
+          postTransform.updateMatrix();
+          lamps.setMatrixAt(pylonIndex, postTransform.matrix);
+          pylonIndex += 1;
+        }
+      }
+    }
+    for (const z of [-depth * 0.28, depth * 0.28]) {
+      for (const x of [-width * 0.54, width * 0.54]) {
+        postTransform.position.set(centerX + x, floorY + 2.2, centerZ + z);
+        postTransform.updateMatrix();
+        posts.setMatrixAt(pylonIndex, postTransform.matrix);
+        postTransform.position.y = floorY + 4.75;
+        postTransform.updateMatrix();
+        lamps.setMatrixAt(pylonIndex, postTransform.matrix);
+        pylonIndex += 1;
+      }
+    }
+    posts.count = pylonIndex;
+    lamps.count = pylonIndex;
+    posts.instanceMatrix.needsUpdate = true;
+    lamps.instanceMatrix.needsUpdate = true;
+    group.add(posts, lamps);
+
+    // Docking claws frame the horizon at the east/west extremes and give the
+    // compact playable map the silhouette of a much larger carrier platform.
+    for (const side of [-1, 1]) {
+      const claw = new THREE.Group();
+      claw.name = `umbra-${side < 0 ? 'port' : 'starboard'}-docking-claw`;
+      claw.position.set(centerX + side * (width * 0.5 + 8.5), floorY + 3.2, centerZ);
+      const upright = new THREE.Mesh(new RoundedBoxGeometry(0.7, 8.2, 1, 3, 0.18), steel);
+      const arm = new THREE.Mesh(new RoundedBoxGeometry(8.5, 0.68, 1, 3, 0.18), steel);
+      arm.position.set(side * 3.9, 3.72, 0);
+      arm.rotation.z = side * -0.18;
+      const tip = new THREE.Mesh(new RoundedBoxGeometry(0.22, 1.5, 0.3, 2, 0.06), reactorSignal);
+      tip.position.set(side * 7.75, 3.02, 0);
+      claw.add(upright, arm, tip);
+      group.add(claw);
+    }
+
+    this.scene.add(group);
+  }
+
   private createAtmosphereDetails(): void {
     const width = this.map.bounds.maxX - this.map.bounds.minX;
     const depth = this.map.bounds.maxZ - this.map.bounds.minZ;
     const centerX = (this.map.bounds.minX + this.map.bounds.maxX) * 0.5;
     const centerZ = (this.map.bounds.minZ + this.map.bounds.maxZ) * 0.5;
+    if (this.visualProfile.environmentKind === 'orbital-station') {
+      this.createOrbitalAtmosphereDetails(width, depth, centerX, centerZ);
+      return;
+    }
     const random = seededRandom(0xa7f05);
     const fogTexture = createRadialTexture({ size: 192, profile: 'glow' });
     fogTexture.name = 'local-ground-haze';
     this.ownedTextures.add(fogTexture);
 
     const hazeMaterial = new THREE.MeshBasicMaterial({
-      color: 0xb4d4ca,
+      color: this.visualProfile.atmospherePalette.haze,
       map: fogTexture,
       transparent: true,
       opacity: 0.075,
@@ -1563,7 +2112,7 @@ export class ArenaRenderer {
     const motes = new THREE.Points(
       moteGeometry,
       new THREE.PointsMaterial({
-        color: 0xfff2cf,
+        color: this.visualProfile.atmospherePalette.motes,
         map: fogTexture,
         size: 0.075,
         sizeAttenuation: true,
@@ -1582,11 +2131,93 @@ export class ArenaRenderer {
     this.scene.add(moteGroup);
   }
 
+  private createOrbitalAtmosphereDetails(
+    width: number,
+    depth: number,
+    centerX: number,
+    centerZ: number,
+  ): void {
+    const random = seededRandom(0x0b17a5);
+    const particleTexture = createRadialTexture({ size: 128, profile: 'glow' });
+    particleTexture.name = 'umbra-ion-particle';
+    this.ownedTextures.add(particleTexture);
+
+    const moteCount = Math.max(130, Math.round((width * depth) * 0.034));
+    const positions = new Float32Array(moteCount * 3);
+    const colors = new Float32Array(moteCount * 3);
+    const cold = new THREE.Color(this.visualProfile.atmospherePalette.motes);
+    const warm = new THREE.Color(0xff9b57);
+    for (let index = 0; index < moteCount; index += 1) {
+      const z = centerZ + (random() - 0.5) * (depth + 10);
+      positions[index * 3] = centerX + (random() - 0.5) * (width + 10);
+      positions[index * 3 + 1] = 0.4 + random() * 11;
+      positions[index * 3 + 2] = z;
+      const color = z > centerZ + depth * 0.2 ? warm : cold;
+      colors[index * 3] = color.r;
+      colors[index * 3 + 1] = color.g;
+      colors[index * 3 + 2] = color.b;
+    }
+    const moteGeometry = new THREE.BufferGeometry();
+    moteGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    moteGeometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    const ionMotes = new THREE.Points(
+      moteGeometry,
+      new THREE.PointsMaterial({
+        color: 0xffffff,
+        vertexColors: true,
+        map: particleTexture,
+        size: 0.055,
+        sizeAttenuation: true,
+        transparent: true,
+        opacity: 0.42,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        fog: true,
+      }),
+    );
+    const moteGroup = new THREE.Group();
+    moteGroup.name = 'umbra-suspended-ion-particulates';
+    moteGroup.userData.ambientMotes = true;
+    moteGroup.add(ionMotes);
+    this.registerWorldDecoration(moteGroup);
+    this.scene.add(moteGroup);
+
+    const vaporMaterial = new THREE.MeshBasicMaterial({
+      name: 'umbra-coolant-vapor',
+      color: 0x87b8d4,
+      map: particleTexture,
+      transparent: true,
+      opacity: 0.055,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      fog: true,
+    });
+    const vaporGroup = new THREE.Group();
+    vaporGroup.name = 'umbra-coolant-vent-plumes';
+    vaporGroup.userData.mistLayer = true;
+    vaporGroup.userData.baseY = this.map.bounds.floorY + 0.9;
+    for (const x of [-6.4, 6.4]) {
+      for (const z of [this.map.bounds.minZ + 10, this.map.bounds.maxZ - 10]) {
+        const vapor = new THREE.Mesh(new THREE.PlaneGeometry(5.8, 3.4), vaporMaterial);
+        vapor.position.set(x, (random() - 0.5) * 0.4, z);
+        vapor.rotation.set(0, random() * Math.PI, (random() - 0.5) * 0.18);
+        vapor.renderOrder = -3;
+        vaporGroup.add(vapor);
+      }
+    }
+    vaporGroup.position.y = Number(vaporGroup.userData.baseY);
+    this.registerWorldDecoration(vaporGroup);
+    this.scene.add(vaporGroup);
+  }
+
   private createMapGeometry(): void {
     const width = this.map.bounds.maxX - this.map.bounds.minX;
     const depth = this.map.bounds.maxZ - this.map.bounds.minZ;
     const centerX = (this.map.bounds.minX + this.map.bounds.maxX) * 0.5;
     const centerZ = (this.map.bounds.minZ + this.map.bounds.maxZ) * 0.5;
+    const orbital = this.visualProfile.environmentKind === 'orbital-station';
+    const palette = this.visualProfile.surfacePalette;
     const floorGeometry = new THREE.PlaneGeometry(
       width,
       depth,
@@ -1606,16 +2237,16 @@ export class ArenaRenderer {
     const floor = new THREE.Mesh(
       floorGeometry,
       new THREE.MeshPhysicalMaterial({
-        color: 0xaebc9d,
+        color: palette.ground,
         map: this.groundTexture,
         normalMap: this.groundNormalTexture,
-        normalScale: new THREE.Vector2(0.85, 0.85),
+        normalScale: new THREE.Vector2(orbital ? 0.42 : 0.85, orbital ? 0.42 : 0.85),
         roughnessMap: this.groundRoughnessTexture,
-        roughness: 0.9,
-        metalness: 0,
-        clearcoat: 0.07,
-        clearcoatRoughness: 0.7,
-        envMapIntensity: 0.38,
+        roughness: orbital ? 0.42 : 0.9,
+        metalness: orbital ? 0.48 : 0,
+        clearcoat: orbital ? 0.26 : 0.07,
+        clearcoatRoughness: orbital ? 0.32 : 0.7,
+        envMapIntensity: orbital ? 1.12 : 0.38,
         vertexColors: true,
       }),
     );
@@ -1628,71 +2259,73 @@ export class ArenaRenderer {
     floor.receiveShadow = true;
     this.scene.add(floor);
 
-    const puddleMaterial = new THREE.MeshPhysicalMaterial({
-      color: 0x173a36,
-      roughness: 0.16,
-      metalness: 0.02,
-      clearcoat: 1,
-      clearcoatRoughness: 0.08,
-      envMapIntensity: 1.55,
-      transparent: true,
-      opacity: 0.72,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-    });
-    const puddleCount = Math.min(42, Math.max(22, Math.round((width * depth) / 245)));
-    const puddles = new THREE.InstancedMesh(
-      new THREE.CircleGeometry(1, 24),
-      puddleMaterial,
-      puddleCount,
-    );
-    puddles.name = 'forest-floor-puddles';
-    puddles.receiveShadow = true;
-    const puddleRandom = seededRandom(0x7e771e);
-    const puddleTransform = new THREE.Object3D();
-    let puddleIndex = 0;
-    for (let attempt = 0; attempt < puddleCount * 24 && puddleIndex < puddleCount; attempt += 1) {
-      const x = THREE.MathUtils.lerp(this.map.bounds.minX + 2, this.map.bounds.maxX - 2, puddleRandom());
-      const z = THREE.MathUtils.lerp(this.map.bounds.minZ + 2, this.map.bounds.maxZ - 2, puddleRandom());
-      const onMainPath = Math.abs(z - centerZ) < 4.2 || Math.abs(x - centerX) < 4;
-      const insideObstacle = this.map.obstacles.some((obstacle) =>
-        obstacle.kind !== 'wall'
-        && x > obstacle.min.x - 0.8
-        && x < obstacle.max.x + 0.8
-        && z > obstacle.min.z - 0.8
-        && z < obstacle.max.z + 0.8);
-      const nearObjective = Object.values(this.map.flagBases).some((base) =>
-        Math.hypot(x - base.x, z - base.z) < 5.5);
-      if (onMainPath || insideObstacle || nearObjective) continue;
-      const radius = 0.55 + puddleRandom() * 1.75;
-      puddleTransform.position.set(
-        x,
-        this.map.bounds.floorY - 0.035 + sampleGroundRelief(this.map, x, z) + 0.008,
-        z,
+    if (!orbital) {
+      const puddleMaterial = new THREE.MeshPhysicalMaterial({
+        color: palette.wetSurface,
+        roughness: 0.16,
+        metalness: 0.02,
+        clearcoat: 1,
+        clearcoatRoughness: 0.08,
+        envMapIntensity: 1.55,
+        transparent: true,
+        opacity: 0.72,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+      });
+      const puddleCount = Math.min(42, Math.max(22, Math.round((width * depth) / 245)));
+      const puddles = new THREE.InstancedMesh(
+        new THREE.CircleGeometry(1, 24),
+        puddleMaterial,
+        puddleCount,
       );
-      puddleTransform.rotation.set(-Math.PI / 2, 0, puddleRandom() * Math.PI);
-      puddleTransform.scale.set(radius * (0.65 + puddleRandom() * 0.75), radius, 1);
-      puddleTransform.updateMatrix();
-      puddles.setMatrixAt(puddleIndex, puddleTransform.matrix);
-      puddleIndex += 1;
+      puddles.name = 'forest-floor-puddles';
+      puddles.receiveShadow = true;
+      const puddleRandom = seededRandom(0x7e771e);
+      const puddleTransform = new THREE.Object3D();
+      let puddleIndex = 0;
+      for (let attempt = 0; attempt < puddleCount * 24 && puddleIndex < puddleCount; attempt += 1) {
+        const x = THREE.MathUtils.lerp(this.map.bounds.minX + 2, this.map.bounds.maxX - 2, puddleRandom());
+        const z = THREE.MathUtils.lerp(this.map.bounds.minZ + 2, this.map.bounds.maxZ - 2, puddleRandom());
+        const onMainPath = Math.abs(z - centerZ) < 4.2 || Math.abs(x - centerX) < 4;
+        const insideObstacle = this.map.obstacles.some((obstacle) =>
+          obstacle.kind !== 'wall'
+          && x > obstacle.min.x - 0.8
+          && x < obstacle.max.x + 0.8
+          && z > obstacle.min.z - 0.8
+          && z < obstacle.max.z + 0.8);
+        const nearObjective = Object.values(this.map.flagBases).some((base) =>
+          Math.hypot(x - base.x, z - base.z) < 5.5);
+        if (onMainPath || insideObstacle || nearObjective) continue;
+        const radius = 0.55 + puddleRandom() * 1.75;
+        puddleTransform.position.set(
+          x,
+          this.map.bounds.floorY - 0.035 + sampleGroundRelief(this.map, x, z) + 0.008,
+          z,
+        );
+        puddleTransform.rotation.set(-Math.PI / 2, 0, puddleRandom() * Math.PI);
+        puddleTransform.scale.set(radius * (0.65 + puddleRandom() * 0.75), radius, 1);
+        puddleTransform.updateMatrix();
+        puddles.setMatrixAt(puddleIndex, puddleTransform.matrix);
+        puddleIndex += 1;
+      }
+      puddles.count = puddleIndex;
+      puddles.instanceMatrix.needsUpdate = true;
+      puddles.computeBoundingBox();
+      puddles.computeBoundingSphere();
+      this.scene.add(puddles);
     }
-    puddles.count = puddleIndex;
-    puddles.instanceMatrix.needsUpdate = true;
-    puddles.computeBoundingBox();
-    puddles.computeBoundingSphere();
-    this.scene.add(puddles);
 
     const facilitySurfaceTemplate = new THREE.MeshPhysicalMaterial({
-      color: 0xf1f0e9,
+      color: orbital ? palette.panelMid : palette.panelLight,
       map: this.facilityPanelTexture,
-      roughness: 0.38,
-      metalness: 0.16,
-      clearcoat: 0.28,
-      clearcoatRoughness: 0.36,
-      envMapIntensity: 0.86,
+      roughness: orbital ? 0.32 : 0.38,
+      metalness: orbital ? 0.48 : 0.16,
+      clearcoat: orbital ? 0.36 : 0.28,
+      clearcoatRoughness: orbital ? 0.26 : 0.36,
+      envMapIntensity: orbital ? 1.22 : 0.86,
     });
     const facilityUnderlayTemplate = new THREE.MeshStandardMaterial({
-      color: 0x091216,
+      color: palette.structure,
       roughness: 0.5,
       metalness: 0.58,
       envMapIntensity: 0.82,
@@ -1745,10 +2378,75 @@ export class ArenaRenderer {
     facilitySurfaceTemplate.dispose();
     facilityUnderlayTemplate.dispose();
 
+    if (orbital) {
+      const seamMaterial = new THREE.MeshBasicMaterial({
+        name: 'umbra-deck-pressure-seams',
+        color: 0x020710,
+        transparent: true,
+        opacity: 0.72,
+        depthWrite: false,
+      });
+      const verticalCount = Math.max(1, Math.floor((width - 8) / 8));
+      const verticalSeams = new THREE.InstancedMesh(
+        new THREE.PlaneGeometry(0.11, depth - 3),
+        seamMaterial,
+        verticalCount,
+      );
+      verticalSeams.name = 'umbra-vertical-deck-seams';
+      const seamTransform = new THREE.Object3D();
+      for (let index = 0; index < verticalCount; index += 1) {
+        const ratio = verticalCount === 1 ? 0.5 : index / (verticalCount - 1);
+        seamTransform.position.set(
+          THREE.MathUtils.lerp(this.map.bounds.minX + 4, this.map.bounds.maxX - 4, ratio),
+          this.map.bounds.floorY + 0.029,
+          centerZ,
+        );
+        seamTransform.rotation.set(-Math.PI / 2, 0, 0);
+        seamTransform.updateMatrix();
+        verticalSeams.setMatrixAt(index, seamTransform.matrix);
+      }
+      verticalSeams.instanceMatrix.needsUpdate = true;
+
+      const horizontalCount = Math.max(1, Math.floor((depth - 8) / 8));
+      const horizontalSeams = new THREE.InstancedMesh(
+        new THREE.PlaneGeometry(width - 3, 0.11),
+        seamMaterial,
+        horizontalCount,
+      );
+      horizontalSeams.name = 'umbra-horizontal-deck-seams';
+      for (let index = 0; index < horizontalCount; index += 1) {
+        const ratio = horizontalCount === 1 ? 0.5 : index / (horizontalCount - 1);
+        seamTransform.position.set(
+          centerX,
+          this.map.bounds.floorY + 0.029,
+          THREE.MathUtils.lerp(this.map.bounds.minZ + 4, this.map.bounds.maxZ - 4, ratio),
+        );
+        seamTransform.rotation.set(-Math.PI / 2, 0, 0);
+        seamTransform.updateMatrix();
+        horizontalSeams.setMatrixAt(index, seamTransform.matrix);
+      }
+      horizontalSeams.instanceMatrix.needsUpdate = true;
+      this.scene.add(verticalSeams, horizontalSeams);
+
+      const hazardMaterial = new THREE.MeshStandardMaterial({
+        name: 'umbra-central-hazard-crown',
+        color: 0xffb24e,
+        emissive: 0xd85a18,
+        emissiveIntensity: 0.72,
+        roughness: 0.34,
+        metalness: 0.38,
+      });
+      const hazardCrown = new THREE.Mesh(new THREE.RingGeometry(9.35, 9.62, 64), hazardMaterial);
+      hazardCrown.name = 'umbra-tower-hazard-crown';
+      hazardCrown.rotation.x = -Math.PI / 2;
+      hazardCrown.position.set(centerX, this.map.bounds.floorY + 0.034, centerZ);
+      this.scene.add(hazardCrown);
+    }
+
     const routeAccentMaterial = new THREE.MeshStandardMaterial({
-      color: 0xb4ef3f,
-      emissive: 0x6f9e20,
-      emissiveIntensity: 0.35,
+      color: palette.neutralAccent,
+      emissive: orbital ? 0x39cce5 : 0x6f9e20,
+      emissiveIntensity: orbital ? 0.82 : 0.35,
       roughness: 0.42,
       metalness: 0.16,
     });
@@ -1764,9 +2462,9 @@ export class ArenaRenderer {
     }
 
     const markingMaterial = new THREE.MeshBasicMaterial({
-      color: 0x94c6ca,
+      color: orbital ? 0x7889d8 : 0x94c6ca,
       transparent: true,
-      opacity: 0.16,
+      opacity: orbital ? 0.24 : 0.16,
       depthWrite: false,
       side: THREE.DoubleSide,
     });
@@ -1799,20 +2497,20 @@ export class ArenaRenderer {
     }
 
     const paintMaterial = new THREE.MeshPhysicalMaterial({
-      color: 0xdce3df,
+      color: orbital ? palette.panelMid : palette.panelLight,
       map: this.facilityPanelTexture,
       normalMap: this.technicalNormalTexture,
       normalScale: new THREE.Vector2(0.21, 0.21),
       roughnessMap: this.technicalRoughnessTexture,
-      roughness: 0.34,
-      metalness: 0.06,
-      clearcoat: 0.34,
-      clearcoatRoughness: 0.32,
-      envMapIntensity: 0.9,
+      roughness: orbital ? 0.3 : 0.34,
+      metalness: orbital ? 0.44 : 0.06,
+      clearcoat: orbital ? 0.4 : 0.34,
+      clearcoatRoughness: orbital ? 0.25 : 0.32,
+      envMapIntensity: orbital ? 1.22 : 0.9,
       vertexColors: true,
     });
     const structureMaterial = new THREE.MeshStandardMaterial({
-      color: 0x081114,
+      color: palette.structure,
       roughness: 0.38,
       metalness: 0.72,
       envMapIntensity: 1.05,
@@ -1829,7 +2527,7 @@ export class ArenaRenderer {
       blending: THREE.AdditiveBlending,
       uniforms: {
         uTime: { value: 0 },
-        uColor: { value: new THREE.Color(0x7ad9da) },
+        uColor: { value: new THREE.Color(this.visualProfile.atmospherePalette.boundaryField) },
       },
       vertexShader: /* glsl */ `
         varying vec2 vUv;
@@ -1853,7 +2551,7 @@ export class ArenaRenderer {
     });
     const earthworkMaterial = new THREE.MeshPhysicalMaterial({
       name: 'playable-earthwork-soil',
-      color: 0x8b9f7c,
+      color: palette.earthwork,
       map: this.groundTexture,
       normalMap: this.groundNormalTexture,
       normalScale: new THREE.Vector2(0.96, 0.96),
@@ -1867,7 +2565,7 @@ export class ArenaRenderer {
     });
     const outcropMaterial = new THREE.MeshPhysicalMaterial({
       name: 'playable-weathered-rock',
-      color: 0x53665b,
+      color: palette.outcrop,
       map: this.groundTexture,
       normalMap: this.groundNormalTexture,
       normalScale: new THREE.Vector2(1.18, 1.18),
@@ -1977,6 +2675,10 @@ export class ArenaRenderer {
         && size.z <= 8.5
         && !obstacle.id.includes('growbed');
       const baseColor = new THREE.Color(artificialSurfaceColor(obstacle));
+      if (orbital) {
+        const orbitalTarget = new THREE.Color(palette.panelMid);
+        baseColor.lerp(orbitalTarget, obstacle.kind === 'tower' ? 0.32 : 0.52);
+      }
       const material = paintMaterial.clone();
       material.color.copy(baseColor);
       material.roughness = obstacle.kind === 'tower' ? 0.32 : 0.38;
@@ -2055,7 +2757,10 @@ export class ArenaRenderer {
         const top = new THREE.Mesh(
           new RoundedBoxGeometry(size.x * 0.84, topHeight, size.z * 0.84, 2, 0.025),
           new THREE.MeshStandardMaterial({
-            color: baseColor.clone().lerp(new THREE.Color(0xf2f4ef), 0.42),
+            color: baseColor.clone().lerp(
+              new THREE.Color(orbital ? palette.panelLight : 0xf2f4ef),
+              orbital ? 0.22 : 0.42,
+            ),
             roughness: 0.3,
             metalness: 0.18,
             envMapIntensity: 0.92,

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three';
 
-import { CRATER_RIDGE } from '../game/map';
+import { CRATER_RIDGE, UMBRA_STATION } from '../game/map';
 import type { AabbObstacle } from '../game/types';
 import {
   artificialSurfaceColor,
@@ -146,9 +146,22 @@ describe('terrain and architecture visual vocabulary', () => {
     expect(colors.size).toBeGreaterThanOrEqual(8);
     expect(artificialSurfaceColor(obstacle('west-mid-console-n')))
       .toBe(artificialSurfaceColor(obstacle('east-mid-console-n')));
+    expect(artificialSurfaceColor(obstacle('west-mid-console-n'))).toBe(0x72878a);
     for (const buildingId of ['west-base-front-n', 'north-relay-front-west', 'south-greenhouse-front-east']) {
       const finish = new THREE.Color(artificialSurfaceColor(obstacle(buildingId)));
       expect(finish.getHSL({ h: 0, s: 0, l: 0 }).l, buildingId).toBeGreaterThan(0.58);
+    }
+  });
+
+  it('gives every mirrored Umbra facility obstacle the same industrial coating', () => {
+    const westObstacles = UMBRA_STATION.obstacles.filter(({ id }) => id.startsWith('umbra-west-'));
+
+    expect(westObstacles.length).toBeGreaterThan(0);
+    for (const west of westObstacles) {
+      const eastId = west.id.replace(/^umbra-west-/, 'umbra-east-');
+      const east = UMBRA_STATION.obstacles.find(({ id }) => id === eastId);
+      expect(east, `${west.id} has mirrored obstacle ${eastId}`).toBeDefined();
+      expect(artificialSurfaceColor(west), west.id).toBe(artificialSurfaceColor(east!));
     }
   });
 });

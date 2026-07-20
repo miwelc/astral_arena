@@ -1,7 +1,11 @@
 import * as THREE from 'three';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { createForestGroundTextures, createTechnicalSurfaceTextures } from './visualTextures';
+import {
+  createForestGroundTextures,
+  createOrbitalEnvironmentTexture,
+  createTechnicalSurfaceTextures,
+} from './visualTextures';
 
 interface CapturedCanvas {
   width: number;
@@ -24,11 +28,17 @@ const installCanvasStub = (): void => {
           getContext: (contextId: string) => {
             if (contextId !== '2d') return null;
             return {
+              createLinearGradient: () => ({ addColorStop: () => undefined }),
+              createRadialGradient: () => ({ addColorStop: () => undefined }),
               createImageData: (width: number, height: number) => ({
                 width,
                 height,
                 data: new Uint8ClampedArray(width * height * 4),
               }),
+              fillRect: () => undefined,
+              beginPath: () => undefined,
+              arc: () => undefined,
+              fill: () => undefined,
               putImageData: (imageData: ImageData) => {
                 canvas.pixels = imageData.data;
               },
@@ -132,5 +142,20 @@ describe('technical surface PBR texture set', () => {
     expect(first.roughness.colorSpace).toBe(THREE.NoColorSpace);
     expect(first.normal.wrapS).toBe(THREE.RepeatWrapping);
     expect(first.roughness.wrapT).toBe(THREE.RepeatWrapping);
+  });
+});
+
+describe('orbital environment map', () => {
+  it('creates a dark equirectangular reflection source with stable sampling settings', () => {
+    const texture = createOrbitalEnvironmentTexture(256, 128);
+
+    expect(texture.name).toBe('umbra-orbital-equirectangular-environment');
+    expect(texture.mapping).toBe(THREE.EquirectangularReflectionMapping);
+    expect(texture.colorSpace).toBe(THREE.SRGBColorSpace);
+    expect(texture.wrapS).toBe(THREE.RepeatWrapping);
+    expect(texture.wrapT).toBe(THREE.ClampToEdgeWrapping);
+    expect(texture.generateMipmaps).toBe(false);
+    expect((texture.image as CapturedCanvas).width).toBe(256);
+    expect((texture.image as CapturedCanvas).height).toBe(128);
   });
 });

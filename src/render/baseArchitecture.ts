@@ -40,6 +40,120 @@ interface ArchitectureMaterials {
   screen: THREE.MeshStandardMaterial;
 }
 
+interface PhysicalSurfaceProfile {
+  color: number;
+  roughness: number;
+  metalness: number;
+  clearcoat: number;
+  clearcoatRoughness: number;
+  envMapIntensity: number;
+}
+
+interface ArchitectureMaterialProfile {
+  panel: PhysicalSurfaceProfile;
+  darkPanel: PhysicalSurfaceProfile;
+  structure: {
+    color: number;
+    roughness: number;
+    metalness: number;
+    envMapIntensity: number;
+  };
+  glass: PhysicalSurfaceProfile;
+  rubber: { color: number; roughness: number; metalness: number };
+  floorMarking: number;
+  teamSurface: { roughness: number; metalness: number; clearcoat: number };
+  screen: {
+    color: number;
+    emissive: number;
+    emissiveIntensity: number;
+    roughness: number;
+    metalness: number;
+  };
+}
+
+/**
+ * Crater is a bright ceramic research campus, while Umbra is an orbital
+ * installation built from low-albedo pressure hull panels. Keeping this
+ * distinction at the material boundary lets both architecture builders retain
+ * the same semantic material names, batching and disposal contracts.
+ */
+const ARCHITECTURE_MATERIAL_PROFILES: Record<MapDefinition['id'], ArchitectureMaterialProfile> = {
+  'crater-ridge': {
+    panel: {
+      color: 0xf7f4ec,
+      roughness: 0.34,
+      metalness: 0.1,
+      clearcoat: 0.38,
+      clearcoatRoughness: 0.27,
+      envMapIntensity: 1.08,
+    },
+    darkPanel: {
+      color: 0x1a292f,
+      roughness: 0.4,
+      metalness: 0.48,
+      clearcoat: 0.18,
+      clearcoatRoughness: 0.32,
+      envMapIntensity: 1.05,
+    },
+    structure: { color: 0x101a1e, roughness: 0.31, metalness: 0.74, envMapIntensity: 1.08 },
+    glass: {
+      color: 0x68aebd,
+      roughness: 0.1,
+      metalness: 0.08,
+      clearcoat: 0.95,
+      clearcoatRoughness: 0.06,
+      envMapIntensity: 1.4,
+    },
+    rubber: { color: 0x080c0e, roughness: 0.72, metalness: 0.08 },
+    floorMarking: 0xd9e9df,
+    teamSurface: { roughness: 0.38, metalness: 0.24, clearcoat: 0.34 },
+    screen: {
+      color: 0x8ce7df,
+      emissive: 0x37cfc5,
+      emissiveIntensity: 2.45,
+      roughness: 0.16,
+      metalness: 0.16,
+    },
+  },
+  'umbra-station': {
+    panel: {
+      color: 0x263342,
+      roughness: 0.25,
+      metalness: 0.68,
+      clearcoat: 0.24,
+      clearcoatRoughness: 0.18,
+      envMapIntensity: 1.38,
+    },
+    darkPanel: {
+      color: 0x080d16,
+      roughness: 0.32,
+      metalness: 0.82,
+      clearcoat: 0.12,
+      clearcoatRoughness: 0.24,
+      envMapIntensity: 1.28,
+    },
+    structure: { color: 0x070b12, roughness: 0.24, metalness: 0.88, envMapIntensity: 1.34 },
+    glass: {
+      color: 0x31546a,
+      roughness: 0.07,
+      metalness: 0.18,
+      clearcoat: 1,
+      clearcoatRoughness: 0.04,
+      envMapIntensity: 1.58,
+    },
+    rubber: { color: 0x020407, roughness: 0.66, metalness: 0.18 },
+    floorMarking: 0x7b91a6,
+    teamSurface: { roughness: 0.26, metalness: 0.5, clearcoat: 0.22 },
+    screen: {
+      color: 0x87b9ff,
+      emissive: 0x2a67d8,
+      emissiveIntensity: 2.75,
+      roughness: 0.12,
+      metalness: 0.32,
+    },
+  },
+};
+
 interface GeometryBatch {
   material: THREE.Material;
   geometries: THREE.BufferGeometry[];
@@ -132,7 +246,11 @@ const createArchitectureTextures = (seed: number): ArchitectureTextures => {
   };
 };
 
-const createArchitectureMaterials = (textures: ArchitectureTextures): ArchitectureMaterials => {
+const createArchitectureMaterials = (
+  textures: ArchitectureTextures,
+  mapId: MapDefinition['id'],
+): ArchitectureMaterials => {
+  const profile = ARCHITECTURE_MATERIAL_PROFILES[mapId];
   const sharedSurface = {
     map: textures.albedo,
     normalMap: textures.normal,
@@ -142,53 +260,33 @@ const createArchitectureMaterials = (textures: ArchitectureTextures): Architectu
   return {
     panel: new THREE.MeshPhysicalMaterial({
       name: 'architecture-white-panel',
-      color: 0xf7f4ec,
+      ...profile.panel,
       ...sharedSurface,
-      roughness: 0.34,
-      metalness: 0.1,
-      clearcoat: 0.38,
-      clearcoatRoughness: 0.27,
-      envMapIntensity: 1.08,
     }),
     darkPanel: new THREE.MeshPhysicalMaterial({
       name: 'architecture-dark-panel',
-      color: 0x1a292f,
+      ...profile.darkPanel,
       ...sharedSurface,
-      roughness: 0.4,
-      metalness: 0.48,
-      clearcoat: 0.18,
-      clearcoatRoughness: 0.32,
-      envMapIntensity: 1.05,
     }),
     structure: new THREE.MeshStandardMaterial({
       name: 'architecture-structural-steel',
-      color: 0x101a1e,
-      roughness: 0.31,
-      metalness: 0.74,
-      envMapIntensity: 1.08,
+      ...profile.structure,
     }),
     glass: new THREE.MeshPhysicalMaterial({
       name: 'architecture-laminated-glass',
-      color: 0x68aebd,
-      roughness: 0.1,
-      metalness: 0.08,
+      ...profile.glass,
       transmission: 0.22,
       transparent: true,
       opacity: 0.68,
       depthWrite: false,
-      clearcoat: 0.95,
-      clearcoatRoughness: 0.06,
-      envMapIntensity: 1.4,
     }),
     rubber: new THREE.MeshStandardMaterial({
       name: 'architecture-rubber',
-      color: 0x080c0e,
-      roughness: 0.72,
-      metalness: 0.08,
+      ...profile.rubber,
     }),
     floorMarking: new THREE.MeshBasicMaterial({
       name: 'architecture-floor-marking',
-      color: 0xd9e9df,
+      color: profile.floorMarking,
       transparent: true,
       opacity: 0.48,
       depthWrite: false,
@@ -217,17 +315,13 @@ const createArchitectureMaterials = (textures: ArchitectureTextures): Architectu
         name: 'architecture-aurora-panel',
         color: TEAM_STYLE.aurora.accent,
         ...sharedSurface,
-        roughness: 0.38,
-        metalness: 0.24,
-        clearcoat: 0.34,
+        ...profile.teamSurface,
       }),
       nova: new THREE.MeshPhysicalMaterial({
         name: 'architecture-nova-panel',
         color: TEAM_STYLE.nova.accent,
         ...sharedSurface,
-        roughness: 0.38,
-        metalness: 0.24,
-        clearcoat: 0.34,
+        ...profile.teamSurface,
       }),
     },
     teamGlow: {
@@ -250,11 +344,7 @@ const createArchitectureMaterials = (textures: ArchitectureTextures): Architectu
     },
     screen: new THREE.MeshStandardMaterial({
       name: 'architecture-information-screen',
-      color: 0x8ce7df,
-      emissive: 0x37cfc5,
-      emissiveIntensity: 2.45,
-      roughness: 0.16,
-      metalness: 0.16,
+      ...profile.screen,
       toneMapped: false,
     }),
   };
@@ -1067,7 +1157,7 @@ export const createBaseArchitecture = (
   const quality = options.quality ?? 'high';
   const seed = Math.trunc(options.seed ?? 0x4a91c7);
   const textures = createArchitectureTextures(seed);
-  const materials = createArchitectureMaterials(textures);
+  const materials = createArchitectureMaterials(textures, map.id);
   const group = new THREE.Group();
   group.name = 'human-base-architecture';
   group.userData.architectureVersion = 1;

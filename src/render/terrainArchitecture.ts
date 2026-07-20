@@ -59,7 +59,9 @@ export const artificialSurfaceColor = (obstacle: Pick<AabbObstacle, 'id' | 'kind
   let hash = 2166136261;
   // Team prefixes intentionally share the same suffix-driven finish so mirror
   // geometry remains coherent while cyan/red IFF lighting carries allegiance.
-  const stableId = id.replace(/^(west|east|aurora|nova)-/, 'team-');
+  const stableId = id
+    .replace(/^umbra-(west|east)-/, 'umbra-team-')
+    .replace(/^(west|east|aurora|nova)-/, 'team-');
   for (let index = 0; index < stableId.length; index += 1) {
     hash ^= stableId.charCodeAt(index);
     hash = Math.imul(hash, 16777619);
