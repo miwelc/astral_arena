@@ -5,7 +5,9 @@ export type Team = 'aurora' | 'nova' | 'neutral';
 export type PlayerKind = 'human' | 'bot' | 'remote';
 export type WeaponId = 'pulse-rifle' | 'sidearm' | 'battle-rifle' | 'sniper' | 'shotgun' | 'rocket-launcher';
 export type PickupKind = 'weapon' | 'overshield' | 'ammo' | 'grenade';
-export const GAME_PROTOCOL_VERSION = 5 as const;
+export const MAP_IDS = ['crater-ridge', 'umbra-station', 'titan-expanse'] as const;
+export type MapId = (typeof MAP_IDS)[number];
+export const GAME_PROTOCOL_VERSION = 6 as const;
 export const PLAYER_PITCH_LIMIT = 1.48;
 
 export interface Vec3 {
@@ -24,7 +26,7 @@ export interface MatchConfig {
   timeLimitSeconds: number;
   botFill: boolean;
   playerName: string;
-  mapId: 'crater-ridge' | 'umbra-station';
+  mapId: MapId;
 }
 
 export interface PlayerInput {
@@ -316,6 +318,8 @@ export interface AabbObstacle {
   max: Vec3;
   kind: 'wall' | 'platform' | 'tower' | 'cover';
   color: number;
+  /** False for collision-only geometry represented by authored scenery. */
+  render?: boolean;
 }
 
 export interface SpawnPoint {
@@ -346,6 +350,10 @@ export interface MapDefinition {
   id: MatchConfig['mapId'];
   name: string;
   bounds: { minX: number; maxX: number; minZ: number; maxZ: number; floorY: number; ceilingY: number };
+  /** Optional deterministic walkable terrain surface used by simulation and presentation. */
+  groundHeightAt?: (x: number, z: number) => number;
+  /** Keeps free-for-all starts in purpose-built neutral encounter spaces. */
+  preferNeutralSpawns?: boolean;
   obstacles: AabbObstacle[];
   spawns: SpawnPoint[];
   waypoints: Vec3[];

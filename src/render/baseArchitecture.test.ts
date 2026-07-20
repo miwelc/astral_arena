@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import * as THREE from 'three';
 
-import { CRATER_RIDGE, UMBRA_STATION } from '../game/map';
+import { CRATER_RIDGE, TITAN_EXPANSE, UMBRA_STATION } from '../game/map';
 import { createBaseArchitecture, type BaseArchitectureBundle } from './baseArchitecture';
 
 const bundles: BaseArchitectureBundle[] = [];
@@ -14,6 +14,12 @@ const createBundle = (quality: 'low' | 'high' = 'high'): BaseArchitectureBundle 
 
 const createUmbraBundle = (): BaseArchitectureBundle => {
   const bundle = createBaseArchitecture(UMBRA_STATION, { quality: 'high', seed: 909 });
+  bundles.push(bundle);
+  return bundle;
+};
+
+const createTitanBundle = (): BaseArchitectureBundle => {
+  const bundle = createBaseArchitecture(TITAN_EXPANSE, { quality: 'high', seed: 1217 });
   bundles.push(bundle);
   return bundle;
 };
@@ -135,7 +141,7 @@ describe('human base architecture', () => {
   });
 
   it('batches static detail into a browser-friendly render budget', () => {
-    const groups = [createBundle().group, createUmbraBundle().group];
+    const groups = [createBundle().group, createUmbraBundle().group, createTitanBundle().group];
     for (const group of groups) {
       let renderables = 0;
       group.traverse((object) => {
@@ -143,6 +149,24 @@ describe('human base architecture', () => {
       });
       expect(renderables).toBeLessThanOrEqual(60);
     }
+  });
+
+  it('dispatches Titan to minimal green-white field architecture', () => {
+    const { group } = createTitanBundle();
+    const architecture = group.getObjectByName('titan-expanse-field-architecture');
+    const panel = findAuthoredMesh(group, 'titan-west-base-white-back-shell')
+      ?.material as THREE.MeshPhysicalMaterial | undefined;
+
+    expect(architecture).toBeInstanceOf(THREE.Group);
+    expect(architecture?.userData.function).toBe('minimal-alpine-expedition-camps-and-towah-relay');
+    expect(group.getObjectByName('titan-aurora-expedition-camp')).toBeInstanceOf(THREE.Group);
+    expect(group.getObjectByName('titan-nova-expedition-camp')).toBeInstanceOf(THREE.Group);
+    expect(findAuthoredMesh(group, 'titan-west-base-moss-green-canopy')).toBeInstanceOf(THREE.Mesh);
+    expect(findAuthoredMesh(group, 'titan-relay-slender-mast')).toBeInstanceOf(THREE.Mesh);
+    expect(panel?.name).toBe('architecture-white-panel');
+    expect(panel?.color.getHex()).toBe(0xe9eee2);
+    expect(group.getObjectByName('observatory-relay-building')).toBeUndefined();
+    expect(group.getObjectByName('umbra-station-architecture')).toBeUndefined();
   });
 
   it('dispatches Umbra to its own orbital-station architecture without Crater-only dependencies', () => {

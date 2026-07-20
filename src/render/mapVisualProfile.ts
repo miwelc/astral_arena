@@ -1,6 +1,6 @@
 import type { MapDefinition } from '../game/types';
 
-export type MapEnvironmentKind = 'alien-forest' | 'orbital-station';
+export type MapEnvironmentKind = 'alien-forest' | 'orbital-station' | 'alpine-forest';
 
 export type VisualVector3 = readonly [x: number, y: number, z: number];
 
@@ -90,7 +90,11 @@ export type PracticalLightZone =
   | 'south-hydroponics'
   | 'north-signal-array'
   | 'south-power-annex'
-  | 'upper-catwalk-ring';
+  | 'upper-catwalk-ring'
+  | 'west-expedition-camp'
+  | 'east-expedition-camp'
+  | 'titan-relay'
+  | 'south-creek';
 
 export type PracticalLightPurpose = 'interior' | 'orientation' | 'landmark';
 
@@ -359,6 +363,110 @@ const MAP_VISUAL_PROFILES = deepFreeze({
         color: 0x8d72ff,
         intensity: 5.5,
         distance: 19,
+        decay: 2,
+        castShadow: false,
+      },
+    ],
+  },
+  'titan-expanse': {
+    mapId: 'titan-expanse',
+    environmentKind: 'alpine-forest',
+    backgroundColor: 0x75a7af,
+    fog: { color: 0x89aba9, density: 0.0046 },
+    exposure: 0.98,
+    environmentIntensity: 1.08,
+    lighting: {
+      ambient: { color: 0x8eaaa2, intensity: 0.95 },
+      hemisphere: { skyColor: 0xc8e2e3, groundColor: 0x456b4d, intensity: 1.5 },
+      sun: {
+        color: 0xffd39a,
+        direction: [-0.48, 0.61, -0.63],
+        intensity: 2.85,
+      },
+      fill: {
+        color: 0x83c7d0,
+        direction: [0.66, 0.36, 0.58],
+        intensity: 1.12,
+      },
+      centralTower: { color: 0x9fe8d4, intensity: 12, distance: 18, decay: 2 },
+      teamBases: {
+        aurora: { color: 0x75e1e3, intensity: 9.5, distance: 13, decay: 2 },
+        nova: { color: 0xf58aa7, intensity: 9.5, distance: 13, decay: 2 },
+      },
+    },
+    bloom: { strength: 0.32, radius: 0.48, threshold: 0.96 },
+    surfacePalette: {
+      ground: 0x6f875c,
+      outerGround: 0x455d4d,
+      earthwork: 0x62734d,
+      outcrop: 0x50635b,
+      wetSurface: 0x17464a,
+      panelLight: 0xf2f2e7,
+      panelMid: 0x83a27d,
+      panelDark: 0x172821,
+      structure: 0x17312d,
+      glass: 0x79aeb0,
+      neutralAccent: 0xa7cb72,
+      auroraAccent: 0x55cbd0,
+      novaAccent: 0xe47b96,
+    },
+    atmospherePalette: {
+      haze: 0xb7d0c8,
+      motes: 0xffe7b8,
+      boundaryField: 0x8ac9bd,
+      horizonGlow: 0xe0dbbd,
+      shadowTint: 0x1c3838,
+      highlightTint: 0xffd7a4,
+    },
+    practicalLights: [
+      {
+        id: 'titan-west-field-camp',
+        kind: 'point',
+        zone: 'west-expedition-camp',
+        purpose: 'interior',
+        position: [-84, 3.2, 0],
+        color: 0x76e4df,
+        intensity: 6.5,
+        distance: 10,
+        decay: 2,
+        castShadow: false,
+      },
+      {
+        id: 'titan-east-field-camp',
+        kind: 'point',
+        zone: 'east-expedition-camp',
+        purpose: 'interior',
+        position: [84, 3.2, 0],
+        color: 0xf194a9,
+        intensity: 6.5,
+        distance: 10,
+        decay: 2,
+        castShadow: false,
+      },
+      {
+        id: 'titan-central-relay',
+        kind: 'spot',
+        zone: 'titan-relay',
+        purpose: 'landmark',
+        position: [0, 12.5, 0],
+        target: [0, 1, -11],
+        color: 0xa9f2da,
+        intensity: 8.5,
+        distance: 22,
+        decay: 2,
+        angle: 0.52,
+        penumbra: 0.8,
+        castShadow: false,
+      },
+      {
+        id: 'titan-south-creek-beacon',
+        kind: 'point',
+        zone: 'south-creek',
+        purpose: 'orientation',
+        position: [0, 2.2, 47.4],
+        color: 0x7bc5b8,
+        intensity: 3.4,
+        distance: 9,
         decay: 2,
         castShadow: false,
       },

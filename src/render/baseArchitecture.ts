@@ -152,6 +152,43 @@ const ARCHITECTURE_MATERIAL_PROFILES: Record<MapDefinition['id'], ArchitectureMa
       metalness: 0.32,
     },
   },
+  'titan-expanse': {
+    panel: {
+      color: 0xe9eee2,
+      roughness: 0.43,
+      metalness: 0.08,
+      clearcoat: 0.24,
+      clearcoatRoughness: 0.34,
+      envMapIntensity: 0.92,
+    },
+    darkPanel: {
+      color: 0x2f5142,
+      roughness: 0.55,
+      metalness: 0.22,
+      clearcoat: 0.12,
+      clearcoatRoughness: 0.48,
+      envMapIntensity: 0.88,
+    },
+    structure: { color: 0x17312d, roughness: 0.48, metalness: 0.58, envMapIntensity: 0.94 },
+    glass: {
+      color: 0x75a8a2,
+      roughness: 0.16,
+      metalness: 0.06,
+      clearcoat: 0.72,
+      clearcoatRoughness: 0.12,
+      envMapIntensity: 1.14,
+    },
+    rubber: { color: 0x101b18, roughness: 0.78, metalness: 0.04 },
+    floorMarking: 0xc9ddbd,
+    teamSurface: { roughness: 0.48, metalness: 0.18, clearcoat: 0.22 },
+    screen: {
+      color: 0xa6ead5,
+      emissive: 0x4bc5a7,
+      emissiveIntensity: 1.75,
+      roughness: 0.24,
+      metalness: 0.12,
+    },
+  },
 };
 
 interface GeometryBatch {
@@ -1098,6 +1135,128 @@ const createUmbraStationArchitecture = (
   return group;
 };
 
+const createTitanFieldArchitecture = (
+  map: MapDefinition,
+  materials: ArchitectureMaterials,
+): THREE.Group => {
+  const group = new THREE.Group();
+  group.name = 'titan-expanse-field-architecture';
+  group.userData.function = 'minimal-alpine-expedition-camps-and-towah-relay';
+
+  const addObstacleShell = (
+    id: string,
+    material: THREE.Material,
+    name = id,
+  ): THREE.Mesh => {
+    const obstacle = obstacleById(map, id);
+    const size: [number, number, number] = [
+      obstacle.max.x - obstacle.min.x,
+      obstacle.max.y - obstacle.min.y,
+      obstacle.max.z - obstacle.min.z,
+    ];
+    const center: [number, number, number] = [
+      (obstacle.min.x + obstacle.max.x) * 0.5,
+      (obstacle.min.y + obstacle.max.y) * 0.5,
+      (obstacle.min.z + obstacle.max.z) * 0.5,
+    ];
+    const mesh = boxMesh(name, size, center, material);
+    group.add(mesh);
+    return mesh;
+  };
+
+  for (const side of ['west', 'east'] as const) {
+    const team: TeamId = side === 'west' ? 'aurora' : 'nova';
+    const prefix = `titan-${side}-base`;
+    const camp = new THREE.Group();
+    camp.name = `titan-${team}-expedition-camp`;
+    camp.userData.hasInterior = true;
+    const floor = addObstacleShell(`${prefix}-floor`, materials.darkPanel, `${prefix}-terrain-deck`);
+    const back = addObstacleShell(`${prefix}-back`, materials.panel, `${prefix}-white-back-shell`);
+    const northWing = addObstacleShell(`${prefix}-north-wing`, materials.team[team]);
+    const southWing = addObstacleShell(`${prefix}-south-wing`, materials.team[team]);
+    const roof = addObstacleShell(`${prefix}-roof`, materials.darkPanel, `${prefix}-moss-green-canopy`);
+    floor.castShadow = false;
+    roof.castShadow = false;
+    const inwardFace = side === 'west' ? 1 : -1;
+    const campX = side === 'west' ? -84 : 84;
+    for (const z of [-8.7, 8.7]) {
+      const post = boxMesh(
+        `${prefix}-slender-frame-${z < 0 ? 'north' : 'south'}`,
+        [0.24, 3.8, 0.24],
+        [campX + inwardFace * 7.2, 2.1, z],
+        materials.structure,
+      );
+      group.add(post);
+    }
+    const fascia = boxMesh(
+      `${prefix}-white-canopy-fascia`,
+      [0.28, 0.35, 19.1],
+      [campX + inwardFace * 7.35, 4.12, 0],
+      materials.panel,
+    );
+    const console = boxMesh(
+      `${prefix}-field-console`,
+      [1.55, 0.82, 2.3],
+      [campX + inwardFace * 4.5, 0.76, 0],
+      materials.darkPanel,
+    );
+    const screen = boxMesh(
+      `${prefix}-field-console-screen`,
+      [0.055, 0.58, 1.65],
+      [campX + inwardFace * 5.29, 1.0, 0],
+      materials.teamGlow[team],
+    );
+    fascia.castShadow = false;
+    console.castShadow = false;
+    screen.castShadow = false;
+    group.add(fascia, console, screen);
+    camp.add(floor, back, northWing, southWing, roof);
+    group.add(camp);
+  }
+
+  const relay = new THREE.Group();
+  relay.name = 'titan-towah-relay';
+  relay.userData.function = 'towah-uplink-and-weather-relay';
+  for (const id of ['tower-core', 'tower-cap'] as const) addObstacleShell(id, materials.darkPanel, `titan-${id}`);
+  const deck = addObstacleShell('tower-deck', materials.panel, 'titan-relay-white-deck');
+  deck.castShadow = false;
+  for (const id of [
+    'tower-rail-n',
+    'tower-rail-s',
+    'tower-rail-w-n',
+    'tower-rail-w-s',
+    'tower-rail-e-n',
+    'tower-rail-e-s',
+  ] as const) {
+    const rail = addObstacleShell(id, materials.structure, `titan-${id}`);
+    rail.castShadow = false;
+  }
+  const mastBase = new THREE.Vector3(map.towerCenter.x, map.towerCenter.y + 1.4, map.towerCenter.z);
+  const mastTop = new THREE.Vector3(map.towerCenter.x, map.towerCenter.y + 9.4, map.towerCenter.z);
+  relay.add(cylinderBetween('titan-relay-slender-mast', mastBase, mastTop, 0.14, materials.panel, 10));
+  for (let index = 0; index < 3; index += 1) {
+    const angle = index / 3 * Math.PI * 2;
+    const antenna = boxMesh(
+      `titan-relay-green-fin-${index}`,
+      [0.08, 1.35, 0.72],
+      [Math.cos(angle) * 0.52, mastTop.y - 0.8, Math.sin(angle) * 0.52],
+      materials.darkPanel,
+    );
+    antenna.rotation.y = -angle;
+    relay.add(antenna);
+  }
+  const relayBeacon = new THREE.Mesh(
+    new THREE.SphereGeometry(0.24, 12, 8),
+    materials.screen,
+  );
+  relayBeacon.name = 'titan-relay-warm-beacon';
+  relayBeacon.position.copy(mastTop);
+  relayBeacon.castShadow = false;
+  relay.add(relayBeacon);
+  group.add(relay);
+  return group;
+};
+
 /**
  * Static opaque architecture does not need one WebGL draw per beam, crate
  * brace or door jamb. Bake those meshes into one geometry per material while
@@ -1161,16 +1320,22 @@ export const createBaseArchitecture = (
   const group = new THREE.Group();
   group.name = 'human-base-architecture';
   group.userData.architectureVersion = 1;
-  if (map.id === 'umbra-station') {
-    group.add(createUmbraStationArchitecture(map, materials));
-  } else {
-    group.add(
-      createTeamOperationsBuilding(map, 'aurora', materials),
-      createTeamOperationsBuilding(map, 'nova', materials),
-      createRelayBuilding(map, materials),
-      createGreenhouseBuilding(map, materials, quality, seed ^ 0x9e3779b9),
-      createLogisticsDetails(map, materials),
-    );
+  switch (map.id) {
+    case 'crater-ridge':
+      group.add(
+        createTeamOperationsBuilding(map, 'aurora', materials),
+        createTeamOperationsBuilding(map, 'nova', materials),
+        createRelayBuilding(map, materials),
+        createGreenhouseBuilding(map, materials, quality, seed ^ 0x9e3779b9),
+        createLogisticsDetails(map, materials),
+      );
+      break;
+    case 'umbra-station':
+      group.add(createUmbraStationArchitecture(map, materials));
+      break;
+    case 'titan-expanse':
+      group.add(createTitanFieldArchitecture(map, materials));
+      break;
   }
   batchStaticArchitecture(group);
 

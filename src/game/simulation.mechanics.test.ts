@@ -247,7 +247,7 @@ describe('grenade detonation', () => {
   it('starts a frag fuse on first ground contact instead of while airborne', () => {
     const simulation = createSimulation();
     const owner = player(simulation, 'local');
-    const { start } = findClearLine(simulation.map);
+    const { start } = findClearRun(simulation.map);
     owner.position = { x: simulation.map.bounds.maxX - 1, y: simulation.map.bounds.floorY, z: simulation.map.bounds.maxZ - 1 };
     const projectile = grenade(owner, { ...start, y: simulation.map.bounds.floorY + 8 }, {
       velocity: { x: 0.5, y: 0, z: 0 },
@@ -274,6 +274,37 @@ describe('grenade detonation', () => {
 
     expect(simulation.state.projectiles).toHaveLength(0);
     expect(simulation.state.events.some((event) => event.type === 'explosion')).toBe(true);
+  });
+
+  it('resolves a Titan terrain contact exactly once', () => {
+    const simulation = new GameSimulation(
+      createDefaultConfig({ mode: 'deathmatch', mapId: 'titan-expanse', botFill: false }),
+      [{ id: 'local', name: 'local' }],
+    );
+    simulation.state.phase = 'playing';
+    simulation.state.countdown = 0;
+    const owner = player(simulation, 'local');
+    owner.position = { x: 90, y: 10, z: 70 };
+    const terrain = simulation.map.groundHeightAt!(30, 0);
+    const projectile = grenade(owner, { x: 30, y: terrain + 0.17, z: 0 }, {
+      velocity: { x: 2, y: -1, z: 0 },
+      radius: 0.16,
+      armed: false,
+      fuse: 1.4,
+    });
+    simulation.state.projectiles.push(projectile);
+
+    simulation.step(0.05);
+
+    expect(projectile.armed).toBe(true);
+    expect(projectile.fuse).toBeCloseTo(1.4, 8);
+    expect(projectile.position.y).toBeCloseTo(
+      simulation.map.groundHeightAt!(projectile.position.x, projectile.position.z) + projectile.radius,
+      6,
+    );
+    expect(projectile.velocity.y).toBeCloseTo(Math.abs(-1 - 18 * 0.05) * 0.48, 8);
+    expect(projectile.velocity.x).toBeCloseTo(2 * 0.78, 8);
+    expect(projectile.alive).toBe(true);
   });
 
   it('bounces an expired grenade off a wall and only detonates when it later reaches the ground', () => {

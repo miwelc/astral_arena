@@ -1,13 +1,13 @@
 import { describe, expect, it } from 'vitest';
 
-import type { MapDefinition } from '../game/types';
+import { MAP_IDS as AUTHORED_MAP_IDS, type MapDefinition } from '../game/types';
 import {
   getMapVisualProfile,
   type MapVisualProfile,
   type PracticalLightProfile,
 } from './mapVisualProfile';
 
-const MAP_IDS = ['crater-ridge', 'umbra-station'] as const satisfies readonly MapDefinition['id'][];
+const MAP_IDS = AUTHORED_MAP_IDS satisfies readonly MapDefinition['id'][];
 
 const expectDeeplyFrozen = (value: unknown): void => {
   if (value === null || typeof value !== 'object') return;
@@ -104,6 +104,19 @@ describe('map visual profiles', () => {
     expect(crater.atmospherePalette).not.toEqual(umbra.atmospherePalette);
   });
 
+  it('dispatches Titan through its own cinematic alpine strategy', () => {
+    const crater = getMapVisualProfile('crater-ridge');
+    const umbra = getMapVisualProfile('umbra-station');
+    const titan = getMapVisualProfile('titan-expanse');
+
+    expect(titan.environmentKind).toBe('alpine-forest');
+    expect(titan.environmentKind).not.toBe(crater.environmentKind);
+    expect(titan.environmentKind).not.toBe(umbra.environmentKind);
+    expect(titan.fog.density).toBeLessThan(crater.fog.density);
+    expect(titan.lighting.sun.color).not.toBe(umbra.lighting.sun.color);
+    expect(titan.surfacePalette.ground).not.toBe(crater.surfacePalette.ground);
+  });
+
   it('gives Umbra enough ambient fill to keep its night-side routes readable', () => {
     const crater = getMapVisualProfile('crater-ridge');
     const umbra = getMapVisualProfile('umbra-station');
@@ -122,6 +135,9 @@ describe('map visual profiles', () => {
     const umbraZones = new Set(
       getMapVisualProfile('umbra-station').practicalLights.map((light) => light.zone),
     );
+    const titanZones = new Set(
+      getMapVisualProfile('titan-expanse').practicalLights.map((light) => light.zone),
+    );
 
     expect(craterZones).toEqual(new Set([
       'aurora-base',
@@ -135,6 +151,12 @@ describe('map visual profiles', () => {
       'north-signal-array',
       'south-power-annex',
       'upper-catwalk-ring',
+    ]));
+    expect(titanZones).toEqual(new Set([
+      'west-expedition-camp',
+      'east-expedition-camp',
+      'titan-relay',
+      'south-creek',
     ]));
   });
 

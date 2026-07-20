@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { moveCapsule, raycastWorld } from './collision';
+import { hasLineOfSight, moveCapsule, raycastWorld } from './collision';
 import { CRATER_RIDGE } from './map';
 import type { AabbObstacle, MapDefinition, PlayerState, Vec3 } from './types';
 
@@ -285,6 +285,188 @@ describe('capsule auto-step', () => {
     expect(current.position.y).toBeCloseTo(0.34);
     expect(current.velocity.x).toBe(-4);
     expect(current.grounded).toBe(true);
+  });
+});
+
+describe('authored terrain relief', () => {
+  it('retains below-floor correction recovery on legacy flat maps', () => {
+    const result = moveCapsule(
+      player({ x: 0, y: -0.2, z: 0 }, { x: 0, y: 2, z: 0 }),
+      createMap(),
+      0.05,
+    );
+
+    expect(result.position.y).toBe(0);
+  });
+
+  it('keeps a grounded capsule attached to a smooth rising surface', () => {
+    const map: MapDefinition = {
+      ...createMap(),
+      groundHeightAt: (x) => Math.max(0, (x + 1) * 0.2),
+    };
+    const result = moveCapsule(
+      player({ x: -1, y: 0, z: 0 }, { x: 4, y: -1, z: 0 }),
+      map,
+      0.2,
+    );
+
+    expect(result.position.x).toBeCloseTo(-0.2);
+    expect(result.position.y).toBeCloseTo(0.16);
+    expect(result.velocity.x).toBe(4);
+    expect(result.grounded).toBe(true);
+  });
+
+  it('follows a smooth descending surface instead of briefly floating', () => {
+    const map: MapDefinition = {
+      ...createMap(),
+      groundHeightAt: (x) => Math.max(0, -x * 0.2),
+    };
+    const result = moveCapsule(
+      player({ x: -1, y: 0.2, z: 0 }, { x: 4, y: -0.2, z: 0 }),
+      map,
+      0.2,
+    );
+
+    expect(result.position.x).toBeCloseTo(-0.2);
+    expect(result.position.y).toBeCloseTo(0.04);
+    expect(result.grounded).toBe(true);
+  });
+
+  it('treats a terrain rise above the auto-step limit as a wall', () => {
+    const map: MapDefinition = {
+      ...createMap(),
+      groundHeightAt: (x) => x >= 0 ? 1 : 0,
+    };
+    const result = moveCapsule(
+      player({ x: -0.6, y: 0, z: 0 }, { x: 4, y: 0, z: 0 }),
+      map,
+      0.2,
+    );
+
+    // The leading edge, not the centre, stops at the terrain face.
+    expect(result.position.x).toBeCloseTo(-0.5, 2);
+    expect(result.velocity.x).toBe(0);
+    expect(result.hitWall).toBe(true);
+  });
+
+  it('makes a steep slope decision independent of fixed-tick subdivision', () => {
+    const map: MapDefinition = {
+      ...createMap(),
+      groundHeightAt: (x) => Math.max(0, (x + 1) * 2),
+    };
+    const initial = player({ x: -1.6, y: 0, z: 0 }, { x: 6.35, y: 0, z: 0 });
+    const single = moveCapsule(initial, map, 0.05);
+    let subdivided = initial;
+    for (let tick = 0; tick < 3; tick += 1) subdivided = {
+      ...subdivided,
+      ...moveCapsule(subdivided, map, 1 / 60),
+    };
+
+    expect(single.position.x).toBeCloseTo(subdivided.position.x, 2);
+    expect(single.velocity.x).toBe(0);
+    expect(subdivided.velocity.x).toBe(0);
+  });
+
+  it('resolves a symmetric diagonal rise without an X-before-Z bias', () => {
+    const map: MapDefinition = {
+      ...createMap(),
+      groundHeightAt: (x, z) => Math.max(0, x + z),
+    };
+    const result = moveCapsule(
+      player({ x: 0, y: 0, z: 0 }, { x: 1, y: 0, z: 1 }),
+      map,
+      0.3,
+    );
+
+    expect(result.position.x).toBeCloseTo(result.position.z, 8);
+    expect(result.velocity.x).toBe(result.velocity.z);
+  });
+
+  it('blocks an airborne capsule at a lateral rise without lifting its feet', () => {
+    const map: MapDefinition = {
+      ...createMap(),
+      groundHeightAt: (x) => x >= 0 ? 0.3 : 0,
+    };
+    const airborne = {
+      ...player({ x: -0.6, y: 0.1, z: 0 }, { x: 4, y: 0.2, z: 0 }),
+      grounded: false,
+    };
+    const result = moveCapsule(airborne, map, 0.2);
+
+    expect(result.position.x).toBeCloseTo(-0.5, 2);
+    expect(result.position.y).toBeCloseTo(0.14, 6);
+    expect(result.grounded).toBe(false);
+    expect(result.hitWall).toBe(true);
+  });
+
+  it('blocks shots and sightlines at the rendered terrain surface', () => {
+    const map: MapDefinition = {
+      ...createMap(),
+      groundHeightAt: (_x, z) => Math.max(0, 2 - Math.abs(z)),
+    };
+    const origin = { x: 0, y: 1, z: -4 };
+    const target = { x: 0, y: 1, z: 4 };
+    const hit = raycastWorld(origin, { x: 0, y: 0, z: 1 }, 8, map, []);
+
+    expect(hit?.obstacleId).toBe('terrain-surface');
+    expect(hit?.point.z).toBeLessThan(0);
+    expect(hasLineOfSight(origin, target, map)).toBe(false);
+  });
+
+  it('finds a smooth crest that rises and falls between coarse ray samples', () => {
+    const map: MapDefinition = {
+      ...createMap(),
+      groundHeightAt: (x) => 1.2 - (x - 0.375) ** 2,
+    };
+    const origin = { x: 0, y: 1.1, z: 0 };
+    const hit = raycastWorld(origin, { x: 1, y: 0, z: 0 }, 0.75, map, []);
+
+    expect(hit?.obstacleId).toBe('terrain-surface');
+    expect(hit?.distance).toBeGreaterThan(0);
+    expect(hit?.distance).toBeLessThan(0.375);
+  });
+
+  it('starts terrain traversal exactly where a ray enters the map bounds', () => {
+    const map: MapDefinition = {
+      ...createMap(),
+      groundHeightAt: () => 2,
+    };
+    const hit = raycastWorld(
+      { x: -10, y: 1, z: 0 },
+      { x: 1, y: 0, z: 0 },
+      20,
+      map,
+      [],
+    );
+
+    expect(hit?.obstacleId).toBe('terrain-surface');
+    expect(hit?.distance).toBeCloseTo(2, 8);
+  });
+
+  it('caps terrain traversal at a nearer indexed obstacle', () => {
+    let terrainSamples = 0;
+    const blocker = box(
+      'near-blocker',
+      { x: 1, y: 0, z: -1 },
+      { x: 2, y: 6, z: 1 },
+    );
+    const map: MapDefinition = {
+      ...createMap([blocker]),
+      groundHeightAt: () => {
+        terrainSamples += 1;
+        return 0;
+      },
+    };
+    const hit = raycastWorld(
+      { x: 0, y: 5, z: 0 },
+      { x: 1, y: 0, z: 0 },
+      100,
+      map,
+      [],
+    );
+
+    expect(hit?.obstacleId).toBe(blocker.id);
+    expect(terrainSamples).toBeLessThan(10);
   });
 });
 

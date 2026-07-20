@@ -1,4 +1,4 @@
-import { canOccupyCapsule, hasLineOfSight, raycastWorld } from './collision';
+import { canOccupyCapsule, hasLineOfSight, mapGroundHeightAt, raycastWorld } from './collision';
 import { MAPS, TOWER_TURRET_LAYOUT } from './map';
 import { canonicalFormatForMode, isTeamGameMode, rulesForMode } from './modeRules';
 import { damageScaleAtDistance, sampleDirectionInCone, shotSpread } from './gunplay';
@@ -1306,24 +1306,9 @@ export class GameSimulation {
       if (projectile.kind === 'grenade') projectile.velocity.y -= PROJECTILE_GRAVITY * dt;
       projectile.position = add(projectile.position, scale(projectile.velocity, dt));
       let explode = projectile.kind === 'rocket' && projectile.fuse <= 0;
-
-      if (projectile.position.y <= this.map.bounds.floorY + projectile.radius) {
-        if (projectile.kind === 'rocket') explode = true;
-        else {
-          this.armGrenade(projectile);
-          projectile.position.y = this.map.bounds.floorY + projectile.radius;
-          if (projectile.fuse <= 0) {
-            explode = true;
-          } else {
-            projectile.velocity.y = Math.abs(projectile.velocity.y) * 0.48;
-            projectile.velocity.x *= 0.78;
-            projectile.velocity.z *= 0.78;
-          }
-        }
-      }
-
       const directionDelta = subtract(projectile.position, previous);
       const travel = distance(previous, projectile.position);
+      let contactResolved = false;
       if (travel > 0.0001) {
         const ignoreOwner = projectile.kind === 'rocket'
           || projectile.fuse > GRENADE_FUSE_SECONDS - GRENADE_OWNER_GRACE_SECONDS;
@@ -1336,6 +1321,7 @@ export class GameSimulation {
           ignoreOwner ? projectile.ownerId : undefined,
         );
         if (hit) {
+          contactResolved = true;
           if (projectile.kind === 'rocket') {
             projectile.position = hit.obstacleId
               ? add(hit.point, scale(directionDelta, -(projectile.radius + 0.04) / travel))
@@ -1344,6 +1330,8 @@ export class GameSimulation {
           } else if (hit.playerId) {
             projectile.position = cloneVec3(hit.point);
             explode = true;
+          } else if (hit.obstacleId === 'terrain-surface') {
+            explode = this.resolveGrenadeTerrainContact(projectile, hit.point.x, hit.point.z);
           } else if (hit.obstacleId) {
             const obstacle = this.map.obstacles.find((candidate) => candidate.id === hit.obstacleId);
             this.armGrenade(projectile);
@@ -1399,6 +1387,28 @@ export class GameSimulation {
           }
         }
       }
+      // The swept query owns normal contacts. Endpoint recovery is a fallback
+      // for a stationary projectile or a corrected snapshot that already
+      // penetrates the heightfield, and must never apply a second response.
+      if (!contactResolved) {
+        const terrainFloor = mapGroundHeightAt(
+          this.map,
+          projectile.position.x,
+          projectile.position.z,
+        );
+        if (projectile.position.y <= terrainFloor + projectile.radius) {
+          if (projectile.kind === 'rocket') {
+            projectile.position.y = terrainFloor + projectile.radius;
+            explode = true;
+          } else {
+            explode = this.resolveGrenadeTerrainContact(
+              projectile,
+              projectile.position.x,
+              projectile.position.z,
+            );
+          }
+        }
+      }
       if (explode) this.explode(projectile, players);
     }
     let aliveCount = 0;
@@ -1412,6 +1422,20 @@ export class GameSimulation {
     if (projectile.kind !== 'grenade' || projectile.armed) return;
     projectile.armed = true;
     projectile.fuse = GRENADE_FUSE_SECONDS;
+  }
+
+  private resolveGrenadeTerrainContact(projectile: ProjectileState, x: number, z: number): boolean {
+    this.armGrenade(projectile);
+    projectile.position = {
+      x,
+      y: mapGroundHeightAt(this.map, x, z) + projectile.radius,
+      z,
+    };
+    if (projectile.fuse <= 0) return true;
+    projectile.velocity.y = Math.abs(projectile.velocity.y) * 0.48;
+    projectile.velocity.x *= 0.78;
+    projectile.velocity.z *= 0.78;
+    return false;
   }
 
   private explode(projectile: ProjectileState, players: readonly PlayerState[]): void {
@@ -1813,10 +1837,12 @@ export class GameSimulation {
   private spawnPlayer(player: PlayerState, initial: boolean): void {
     this.releaseTurret(player.id);
     this.damageContributors.delete(player.id);
-    const matching = this.map.spawns.filter((spawn) => {
-      if (!isTeamMode(this.state)) return true;
-      return spawn.team === player.team;
-    });
+    const neutralSpawns = this.map.spawns.filter((spawn) => spawn.team === 'neutral');
+    const matching = isTeamMode(this.state)
+      ? this.map.spawns.filter((spawn) => spawn.team === player.team)
+      : this.map.preferNeutralSpawns && neutralSpawns.length > 0
+        ? neutralSpawns
+        : this.map.spawns;
     const enemies = Object.values(this.state.players).filter((candidate) => candidate.alive && isEnemy(this.state, player, candidate));
     const allies = Object.values(this.state.players).filter((candidate) => candidate.alive && candidate.id !== player.id && candidate.team === player.team);
     const ranked = matching

@@ -1,6 +1,6 @@
 # Astral Arena
 
-Astral Arena es un prototipo de *arena shooter* 3D para navegador, inspirado en el ritmo de combate, los escudos recargables, el control de armas del mapa y los modos competitivos de los shooters de consola de principios de los 2000. Su identidad propia, **Arctic Orbital Dusk**, combina astronautas *hard-surface* y cerámica/grafito/lima con dos biomas muy distintos: un campus científico entre basalto húmedo y bosque alienígena bajo una tormenta, y una estación orbital azul-negra recortada contra un planeta eclipsado. Conserva una composición atmosférica estilizada con materiales PBR, iluminación práctica y un sol cálido o estelar contra sombras cian.
+Astral Arena es un prototipo de *arena shooter* 3D para navegador, inspirado en el ritmo de combate, los escudos recargables, el control de armas del mapa y los modos competitivos de los shooters de consola de principios de los 2000. Su identidad propia, **Arctic Orbital Dusk**, combina astronautas *hard-surface* y cerámica/grafito/lima con tres entornos muy distintos: un campus científico entre basalto húmedo y bosque alienígena bajo una tormenta, una estación orbital azul-negra recortada contra un planeta eclipsado y un altiplano alpino de praderas jade, arboledas pálidas, roca soleada y energía violeta. Conserva una composición atmosférica estilizada con materiales PBR, iluminación práctica y contrastes cálidos contra sombras cian.
 
 El diseño mantiene reglas coherentes por modo sin limitar el todos-contra-todos a un único tamaño:
 
@@ -15,13 +15,13 @@ Las plazas vacías pueden llenarse con bots. El modo local significa **un humano
 El repositorio contiene una **primera vertical jugable completa**, no una versión terminada ni preparada todavía para partidas públicas. Actualmente incluye:
 
 - simulación determinista del combate, movimiento, colisiones, escudos, reapariciones, proyectiles, granadas, cuerpo a cuerpo, puntuación y objetivos;
-- dos mapas seleccionables: **Cresta del Cráter**, un campus abierto de 104 × 84 m con tres rutas, y **Estación Umbra**, una instalación compacta y vertical de tres alturas con cuatro alas, interiores, puentes, rutas inferiores, torre de señales y plataforma central;
+- tres mapas seleccionables: **Cresta del Cráter**, un campus abierto de 104 × 84 m con tres rutas; **Estación Umbra**, una instalación compacta y vertical de tres alturas con cuatro alas, interiores, puentes, rutas inferiores, torre de señales y plataforma central; y **Extensión Titán**, un campo de batalla alpino abierto con campamentos de expedición simétricos al este y oeste, un relé de mando Towah en el centro, una cresta septentrional tallada por el viento para tiradores y una ruta meridional protegida que enlaza arroyo, arboleda, claros naturales y cruces tácticos;
 - seis armas, bots con tres dificultades moderadas, evaluación de utilidad de pickups, memoria antiatasco, controles de teclado/ratón y mando, hitboxes anatómicos ampliados y audio procedural multicapa por arma;
-- una capa de presentación Three.js con perfiles visuales propios por mapa: Cresta usa terreno PBR húmedo, musgo, raíces, relieve, césped, charcos, bosque, niebla y una corona de obsidiana; Umbra sustituye todo el paisaje terrestre por placas de casco, juntas de presión, anillo orbital, alas solares, muelles, antenas, vapor de refrigeración, cielo estelar y un planeta eclipsado. Ambos comparten UV antirrepetición, materiales cerámicos/*hard-surface*, luces prácticas por zona, sombras, bloom, profundidad de campo, aberración cromática, astronautas articulados y seis armas GLB CC0 con fogonazo, trazadoras e impactos;
+- una capa de presentación Three.js con perfiles visuales propios por mapa: Cresta usa terreno PBR húmedo, musgo, raíces, relieve, césped, charcos, bosque, niebla y una corona de obsidiana; Umbra sustituye todo el paisaje terrestre por placas de casco, juntas de presión, anillo orbital, alas solares, muelles, antenas, vapor de refrigeración, cielo estelar y un planeta eclipsado; Titán abre las líneas de visión entre praderas jade, helechos, roca húmeda, campamentos de campo y el pulso esmeralda del relé Towah, con un arroyo ondulante, árboles altos movidos por el viento y un perímetro de acantilados y montañas. Los tres comparten UV antirrepetición, materiales cerámicos/*hard-surface*, luces prácticas por zona, sombras, bloom, profundidad de campo, aberración cromática, astronautas articulados y seis armas GLB CC0 con fogonazo, trazadoras e impactos;
 - animación procedural compartida entre primera y tercera persona: locomoción ligada a la distancia recorrida y diferenciada por dirección, respiración, salto, caída, aterrizaje, muerte/reaparición, retroceso, recarga, cambio de arma, cuerpo a cuerpo y lanzamiento de granada, con rodillas, pies, manos y piezas de arma móviles;
 - menús con formato canónico por modo, lobby manual P2P, HUD contextual para armas y torreta, radar de movimiento de 25 m, IFF aliado/enemigo, avisos contextuales, voz de objetivos, audio y pantalla de resultado integrados;
 - transporte WebRTC P2P nativo con señalización manual, mensajes tipados y un host con hasta siete invitados;
-- 435 pruebas automatizadas para combate, daño de precisión, ráfagas y balística, drops con munición, dispersión y retículas, transiciones de input P2P, agachado, movimiento, auto-step y deslizamiento por paredes, hitboxes, perfiles y objetivos de bots, radar, regeneración, snapshots P2P, navegación vertical, recorrido físico de rutas, relieve y arquitectura de ambos mapas, pads de salto, torreta, puntuación, determinismo, audio, animación, materiales y modelos de armamento externos.
+- 482 pruebas automatizadas para combate, daño de precisión, ráfagas y balística, drops con munición, dispersión y retículas, transiciones de input P2P, agachado, movimiento, auto-step y deslizamiento por paredes, hitboxes, perfiles y objetivos de bots, radar, regeneración, snapshots P2P, navegación vertical, recorrido físico de rutas, relieve y arquitectura de los tres mapas, pads de salto, torreta, puntuación, determinismo, audio, animación, materiales y modelos de armamento externos.
 
 El proyecto pasa `typecheck`, tests y build de producción. Aun así, el flujo WebRTC debe probarse con varios navegadores y redes reales antes de declarar soporte público 4v4; tampoco hay matchmaking, persistencia, cuentas, backend, migración de host ni anti-cheat.
 
@@ -200,7 +200,7 @@ La vertical se construyó en seis capas verificables, actualmente completadas:
 
 1. **Base técnica:** Vite, TypeScript estricto, estado serializable y simulación fija a 60 Hz.
 2. **Arena shooter:** movimiento, colisiones, escudos, salud, respawn, dos armas, pickups, melee, granadas, hitscan y proyectiles.
-3. **Contenido competitivo:** mapas Cresta del Cráter y Estación Umbra, seis armas, formatos de 2/8 plazas y reglas de los cinco modos.
+3. **Contenido competitivo:** mapas Cresta del Cráter, Estación Umbra y Extensión Titán, seis armas, formatos de 2/8 plazas y reglas de los cinco modos.
 4. **Oponentes:** percepción limitada, memoria, dificultad, navegación, desatasco y conducta específica por objetivo.
 5. **Presentación y red:** arte 3D procedural combinado con modelos CC0, astronautas, cámara FPS, HUD/audio, host autoritativo, predicción/reconciliación del invitado y señalización WebRTC manual.
 6. **Endurecimiento de la vertical:** validación de inputs, backpressure de snapshots, memoria de movimiento autoritativa, regresiones y simulaciones largas de bots.
@@ -229,11 +229,14 @@ Para convertir la vertical en un lanzamiento público, el orden recomendado es: 
     │   ├── collision.test.ts  # Deslizamiento, esquinas y límites del arena
     │   ├── map.ts             # Registro de mapas, Cresta, spawns y pickups
     │   ├── maps/umbraStation.ts # Estación Umbra y su grafo vertical dirigido
+    │   ├── maps/titanExpanse.ts # Extensión Titán y sus rutas naturales simétricas
+    │   ├── maps/titanExpanse.test.ts # Escala, simetría y travesía física de Titán
     │   ├── map.test.ts        # Volúmenes, rutas, escalones y pads de salto
     │   ├── math.ts            # Vectores, límites y aleatoriedad
     │   ├── regressions.test.ts # Regresiones y simulaciones largas de bots
     │   ├── simulation.ts      # Estado autoritativo y reglas de partida
     │   ├── simulation.mechanics.test.ts # Pads físicos y fusible de granadas
+    │   ├── simulation.titan.test.ts # Cinco modos, bots y soaks sobre Titán
     │   ├── simulation.test.ts # Pruebas de combate, modos y determinismo
     │   ├── types.ts           # Contratos de juego y mensajes de red
     │   ├── weapons.ts         # Definiciones, cargadores y equipamientos
@@ -251,6 +254,8 @@ Para convertir la vertical en un lanzamiento público, el orden recomendado es: 
     │   ├── DepthFocusPass.ts  # Profundidad de campo ligera por depth buffer
     │   ├── facilityEnvironment.test.ts # Contratos del entorno instanciado
     │   ├── facilityEnvironment.ts # Bosque y arquitectura modular procedural
+    │   ├── forestWorld.ts     # Relieve, río, bosque y límites naturales de Titán
+    │   ├── forestWorld.test.ts # Determinismo, fidelidad y presupuesto gráfico
     │   ├── externalWeaponModels.ts # Carga GLB, PBR, caché y fallback
     │   ├── landscapeGeometry.ts # Crestas y vegetación procedural
     │   ├── terrainArchitecture.ts # Rocas, montículos, jardineras y carga
@@ -273,7 +278,7 @@ La aplicación no necesita Node.js en producción. El resultado de `npm run buil
 2. Se publica **el contenido de `dist/`**, no `src/` ni el servidor de desarrollo.
 3. El sitio se sirve por HTTPS. `localhost` es la excepción útil para desarrollo; HTTPS evita restricciones de APIs sensibles y manipulación de los códigos durante la carga de la aplicación.
 4. El servidor entrega `index.html` y los módulos JavaScript con MIME correcto. `index.html` no debe quedar cacheado indefinidamente; los assets con hash sí pueden usar caché inmutable.
-5. Con la configuración actual de Vite, la aplicación se publica en la raíz del dominio. Para un subdirectorio hay que configurar `base` y volver a construir.
+5. Con la configuración actual de Vite, el build de producción usa `base: '/astral_arena/'`, la ruta del proyecto en GitHub Pages. Para publicar en la raíz o en otro subdirectorio hay que ajustar `base` y volver a construir.
 6. El navegador objetivo dispone de WebGL, Pointer Lock, Web Audio, `RTCPeerConnection` y RTCDataChannel. La ausencia de Gamepad no debe bloquear teclado y ratón.
 7. Se realiza un *smoke test* local contra bots y otro con dos navegadores/dispositivos usando el flujo completo oferta/respuesta. Si se declara soporte fuera de LAN, se prueba explícitamente sobre varias topologías NAT y se documenta la infraestructura STUN/TURN utilizada.
 8. No se afirma compatibilidad pública 4v4 hasta comprobar una sesión real de ocho participantes, pérdida de paquetes, pestaña en segundo plano, desconexión y carga sostenida del host.
@@ -282,6 +287,6 @@ GitHub Pages, Cloudflare Pages, Netlify, Vercel estático o cualquier servidor H
 
 ## Alcance e identidad
 
-Astral Arena toma referencias de un género y una época, no pretende ser una recreación de una propiedad existente. Nombres, personajes, mapa, código, arte y audio deben mantenerse originales; no deben incorporarse modelos, sonidos, marcas ni otros recursos extraídos de juegos comerciales.
+Astral Arena toma referencias de un género y una época, no pretende ser una recreación de una propiedad existente. Nombres, personajes, mapas, código, arte y audio deben mantenerse originales; no deben incorporarse modelos, sonidos, marcas ni otros recursos extraídos de juegos comerciales. Todo el paisaje, la arquitectura y los recursos visuales propios de Extensión Titán se construyen de forma procedural y determinista dentro del proyecto: son originales y no proceden de paquetes de recursos externos.
 
 Los modelos externos incluidos son CC0: los rifles proceden de **Sci‑Fi Modular Gun Pack** de Quaternius y la pistola, sniper, escopeta y lanzacohetes de **Guns Asset Pack** de Styloo. El registro por archivo, enlaces y licencia está junto a los binarios en `public/models/weapons/README.md`; la presentación del juego modifica orientación, escala, respuesta PBR y luces de identificación sin alterar la simulación.

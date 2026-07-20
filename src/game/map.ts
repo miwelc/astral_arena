@@ -1,3 +1,4 @@
+import { createTitanExpanse } from './maps/titanExpanse';
 import { createUmbraStation } from './maps/umbraStation';
 import { createNamedNavigationGraph } from './navigationGraph';
 import type { AabbObstacle, JumpPadZone, MapDefinition, Vec3 } from './types';
@@ -616,10 +617,12 @@ export const CRATER_RIDGE: MapDefinition = {
 };
 
 export const UMBRA_STATION: MapDefinition = createUmbraStation(TOWER_TURRET_LAYOUT);
+export const TITAN_EXPANSE: MapDefinition = createTitanExpanse(TOWER_TURRET_LAYOUT);
 
 export const MAPS: Record<MapDefinition['id'], MapDefinition> = {
   'crater-ridge': CRATER_RIDGE,
   'umbra-station': UMBRA_STATION,
+  'titan-expanse': TITAN_EXPANSE,
 };
 
 export const jumpPadAt = (position: Vec3, map: MapDefinition = CRATER_RIDGE): JumpPadZone | null =>

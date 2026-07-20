@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { hasLineOfSight, raycastWorld } from './collision';
-import { CRATER_RIDGE, UMBRA_STATION } from './map';
+import { CRATER_RIDGE, TITAN_EXPANSE, UMBRA_STATION } from './map';
 import type { AabbObstacle, MapDefinition, Vec3 } from './types';
 
 const EPSILON = 0.00001;
@@ -77,14 +77,23 @@ const createRandom = (initialSeed: number): (() => number) => {
 const randomBetween = (random: () => number, minimum: number, maximum: number): number =>
   minimum + (maximum - minimum) * random();
 
+const withoutTerrainSurface = (map: MapDefinition): MapDefinition => {
+  const obstacleOnlyMap = { ...map };
+  delete obstacleOnlyMap.groundHeightAt;
+  return obstacleOnlyMap;
+};
+
 describe('obstacle BVH differential', () => {
   it.each([
-    ['Crater Ridge', CRATER_RIDGE, 0xc0ffee],
-    ['Umbra Station', UMBRA_STATION, 0x51a710],
-  ] as const)('matches the linear reference exactly across %s', (_name, map, seed) => {
+    ['Crater Ridge', CRATER_RIDGE, 0xc0ffee, 4_000],
+    ['Umbra Station', UMBRA_STATION, 0x51a710, 4_000],
+    // Titan's authoritative raycast also intersects its smooth heightfield.
+    // Remove only that surface so this AABB reference remains a pure BVH differential.
+    ['Titan Expanse obstacles', withoutTerrainSurface(TITAN_EXPANSE), 0x717a9, 2_500],
+  ] as const)('matches the linear reference exactly across %s', (_name, map, seed, samples) => {
     const random = createRandom(seed);
     const failures: string[] = [];
-    for (let index = 0; index < 4_000; index += 1) {
+    for (let index = 0; index < samples; index += 1) {
       const origin = {
         x: randomBetween(random, map.bounds.minX - 8, map.bounds.maxX + 8),
         y: randomBetween(random, map.bounds.floorY - 2, map.bounds.ceilingY + 2),

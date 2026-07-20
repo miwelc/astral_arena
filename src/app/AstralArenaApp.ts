@@ -70,6 +70,10 @@ const MAP_PRESENTATION: Record<MapId, { code: string; description: string }> = {
     code: 'UM',
     description: 'Estación vertical · Pasarelas · Cuatro alas',
   },
+  'titan-expanse': {
+    code: 'TX',
+    description: 'Altiplano alpino · Relé Towah · Arroyo y cresta',
+  },
 };
 
 const TEAM_LABELS: Record<Team, string> = { aurora: 'Aurora', nova: 'Nova', neutral: 'Libre' };

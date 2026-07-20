@@ -12,6 +12,15 @@ const overlapsVertical = (feetY: number, height: number, obstacle: AabbObstacle)
 
 const CONTACT_EPSILON = 0.0001;
 const MAX_AUTO_STEP_HEIGHT = 0.42;
+const MAX_TERRAIN_GROUND_SNAP = 0.28;
+const TERRAIN_RAY_STEP = 0.75;
+const TERRAIN_MOVE_STEP = 0.05;
+const MAX_WALKABLE_TERRAIN_SLOPE = 1.15;
+const TERRAIN_SWEEP_REFINEMENT_STEPS = 10;
+const TERRAIN_RAY_REFINEMENT_DEPTH = 10;
+const TERRAIN_RAY_BISECTION_STEPS = 10;
+/** Conservative upper bound for the authored smooth heightfields. */
+const TERRAIN_RAY_MAX_SLOPE = 2.5;
 const OBSTACLE_BVH_LEAF_SIZE = 3;
 type HorizontalAxis = 'x' | 'z';
 
@@ -35,6 +44,10 @@ interface ObstacleBvhCacheEntry {
 }
 
 const OBSTACLE_BVH_CACHE = new WeakMap<MapDefinition, ObstacleBvhCacheEntry>();
+
+/** Samples the authoritative walkable surface shared by movement and rendering. */
+export const mapGroundHeightAt = (map: MapDefinition, x: number, z: number): number =>
+  map.groundHeightAt?.(x, z) ?? map.bounds.floorY;
 
 // Map geometry is authored once and treated as immutable during a match. The
 // cache still rebuilds for supported dynamic fixtures that add/remove boxes;
@@ -200,7 +213,7 @@ export const canOccupyCapsule = (
   height: number,
   map: MapDefinition,
 ): boolean => {
-  if (height <= 0 || position.y < map.bounds.floorY - CONTACT_EPSILON) return false;
+  if (height <= 0 || position.y < mapGroundHeightAt(map, position.x, position.z) - CONTACT_EPSILON) return false;
   if (position.y + height > map.bounds.ceilingY - CONTACT_EPSILON) return false;
   const obstacles = obstaclesOverlappingBounds(
     map,
@@ -387,6 +400,92 @@ const sweepHorizontalAxis = (
   return collided;
 };
 
+interface TerrainHorizontalSweepResult {
+  fraction: number;
+  blocked: boolean;
+}
+
+/**
+ * Sweeps authored relief along the actual horizontal movement vector. Sampling
+ * by travelled distance makes the walkability decision independent of the
+ * caller's tick size, while a leading-foot probe prevents a capsule from
+ * embedding half its radius into a sharp rise.
+ */
+const sweepHorizontalTerrain = (
+  player: Pick<PlayerState, 'position' | 'velocity' | 'radius' | 'grounded'>,
+  map: MapDefinition,
+  dt: number,
+): TerrainHorizontalSweepResult => {
+  if (!map.groundHeightAt || dt <= 0) return { fraction: 1, blocked: false };
+  const deltaX = player.velocity.x * dt;
+  const deltaZ = player.velocity.z * dt;
+  const movementLength = Math.hypot(deltaX, deltaZ);
+  if (movementLength < EPSILON) return { fraction: 1, blocked: false };
+
+  const directionX = deltaX / movementLength;
+  const directionZ = deltaZ / movementLength;
+  const startGround = mapGroundHeightAt(map, player.position.x, player.position.z);
+  const terrainSupported = player.grounded
+    && player.position.y >= startGround - CONTACT_EPSILON
+    && player.position.y - startGround <= MAX_TERRAIN_GROUND_SNAP + CONTACT_EPSILON;
+  const sample = (fraction: number) => {
+    const centerX = player.position.x + deltaX * fraction;
+    const centerZ = player.position.z + deltaZ * fraction;
+    const probeX = centerX + directionX * player.radius;
+    const probeZ = centerZ + directionZ * player.radius;
+    return {
+      centerHeight: mapGroundHeightAt(map, centerX, centerZ),
+      probeHeight: mapGroundHeightAt(map, probeX, probeZ),
+    };
+  };
+  const isBlockedBetween = (
+    lowerFraction: number,
+    lowerProbeHeight: number,
+    upperFraction: number,
+    upperSample: ReturnType<typeof sample>,
+  ): boolean => {
+    if (terrainSupported) {
+      const run = movementLength * (upperFraction - lowerFraction);
+      const rise = upperSample.probeHeight - lowerProbeHeight;
+      return rise > CONTACT_EPSILON
+        && rise / Math.max(run, EPSILON) > MAX_WALKABLE_TERRAIN_SLOPE + CONTACT_EPSILON;
+    }
+    const feetY = player.position.y + player.velocity.y * dt * upperFraction;
+    const surfaceHeight = Math.max(upperSample.centerHeight, upperSample.probeHeight);
+    return surfaceHeight > feetY + CONTACT_EPSILON
+      && surfaceHeight > startGround + CONTACT_EPSILON;
+  };
+
+  const segmentCount = Math.max(1, Math.ceil(movementLength / TERRAIN_MOVE_STEP));
+  let previousFraction = 0;
+  let previousSample = sample(0);
+  for (let segment = 1; segment <= segmentCount; segment += 1) {
+    const fraction = segment / segmentCount;
+    const currentSample = sample(fraction);
+    if (!isBlockedBetween(previousFraction, previousSample.probeHeight, fraction, currentSample)) {
+      previousFraction = fraction;
+      previousSample = currentSample;
+      continue;
+    }
+
+    let lower = previousFraction;
+    let lowerSample = previousSample;
+    let upper = fraction;
+    for (let iteration = 0; iteration < TERRAIN_SWEEP_REFINEMENT_STEPS; iteration += 1) {
+      const midpoint = (lower + upper) * 0.5;
+      const midpointSample = sample(midpoint);
+      if (isBlockedBetween(lower, lowerSample.probeHeight, midpoint, midpointSample)) {
+        upper = midpoint;
+      } else {
+        lower = midpoint;
+        lowerSample = midpointSample;
+      }
+    }
+    return { fraction: lower, blocked: true };
+  }
+  return { fraction: 1, blocked: false };
+};
+
 export interface MovementResult {
   position: Vec3;
   velocity: Vec3;
@@ -424,11 +523,48 @@ export const moveCapsule = (
     Math.max(position.z, intendedZ) + player.radius,
   );
 
+  const horizontalStart = { x: position.x, z: position.z };
+  const terrainSweep = sweepHorizontalTerrain(player, map, dt);
+  let terrainBlocked = terrainSweep.blocked;
+  if (terrainBlocked) {
+    velocity.x *= terrainSweep.fraction;
+    velocity.z *= terrainSweep.fraction;
+  }
+
   const autoStep = autoStepHeight(position, velocity, player, map, dt, movementObstacles);
   if (autoStep) position.y = autoStep.height;
 
   hitWall = sweepHorizontalAxis(position, velocity, player, map, dt, 'x', movementObstacles) || hitWall;
   hitWall = sweepHorizontalAxis(position, velocity, player, map, dt, 'z', movementObstacles) || hitWall;
+
+  // Obstacle sliding can change the actual movement vector. Validate that
+  // resolved vector once more so an X/Z wall response cannot redirect the
+  // capsule through a non-walkable terrain face.
+  if (!terrainBlocked && dt > 0) {
+    const resolvedVelocity = {
+      x: (position.x - horizontalStart.x) / dt,
+      y: player.velocity.y,
+      z: (position.z - horizontalStart.z) / dt,
+    };
+    const resolvedTerrainSweep = sweepHorizontalTerrain({
+      position: player.position,
+      velocity: resolvedVelocity,
+      radius: player.radius,
+      grounded: player.grounded,
+    }, map, dt);
+    if (resolvedTerrainSweep.blocked) {
+      position.x = horizontalStart.x
+        + (position.x - horizontalStart.x) * resolvedTerrainSweep.fraction;
+      position.z = horizontalStart.z
+        + (position.z - horizontalStart.z) * resolvedTerrainSweep.fraction;
+      terrainBlocked = true;
+    }
+  }
+  if (terrainBlocked) {
+    velocity.x = 0;
+    velocity.z = 0;
+    hitWall = true;
+  }
 
   const verticalStartY = position.y;
   const nextY = position.y + velocity.y * dt;
@@ -436,7 +572,7 @@ export const moveCapsule = (
   let grounded = false;
 
   if (velocity.y <= 0) {
-    let floor = map.bounds.floorY;
+    let floor = mapGroundHeightAt(map, position.x, position.z);
     for (const obstacle of movementObstacles) {
       const supportMargin = obstacle.id === autoStep?.supportId
         ? player.radius
@@ -445,7 +581,12 @@ export const moveCapsule = (
       const top = obstacle.max.y;
       if (verticalStartY >= top - 0.08 && nextY <= top + 0.08 && top > floor) floor = top;
     }
-    if (resolvedY <= floor) {
+    const followsTerrainSlope = Boolean(
+      map.groundHeightAt
+      && player.grounded
+      && resolvedY - floor <= MAX_TERRAIN_GROUND_SNAP,
+    );
+    if (resolvedY <= floor || followsTerrainSlope) {
       resolvedY = floor;
       velocity.y = 0;
       grounded = true;
@@ -463,7 +604,15 @@ export const moveCapsule = (
     }
   }
 
-  position.y = clamp(resolvedY, map.bounds.floorY, map.bounds.ceilingY - player.height);
+  // Grounding and terrain snap are resolved explicitly above. An unconditional
+  // terrain clamp would teleport an airborne capsule onto a lateral rise, but
+  // flat legacy maps and genuinely penetrated corrections still need recovery.
+  const localGround = mapGroundHeightAt(map, position.x, position.z);
+  const startedBelowGround = player.position.y
+    < mapGroundHeightAt(map, player.position.x, player.position.z) - CONTACT_EPSILON;
+  position.y = !map.groundHeightAt || startedBelowGround
+    ? clamp(resolvedY, localGround, map.bounds.ceilingY - player.height)
+    : Math.min(resolvedY, map.bounds.ceilingY - player.height);
   return { position, velocity, grounded, hitWall };
 };
 
@@ -672,8 +821,7 @@ const rayIsBlockedByObstacle = (
   map: MapDefinition,
 ): boolean => {
   const root = obstacleBvhRoot(map);
-  if (!root) return false;
-  const stack = [root];
+  const stack = root ? [root] : [];
 
   while (stack.length > 0) {
     const node = stack.pop()!;
@@ -714,7 +862,145 @@ const rayIsBlockedByObstacle = (
     if (node.left) stack.push(node.left);
     if (node.right) stack.push(node.right);
   }
-  return false;
+  return nearestTerrainRayHit(
+    originX,
+    originY,
+    originZ,
+    directionX,
+    directionY,
+    directionZ,
+    distanceLimit,
+    map,
+  ) !== null;
+};
+
+const clipTerrainRayToBounds = (
+  originX: number,
+  originZ: number,
+  directionX: number,
+  directionZ: number,
+  distanceLimit: number,
+  map: MapDefinition,
+): readonly [number, number] | null => {
+  let entry = 0;
+  let exit = distanceLimit;
+  const clipAxis = (
+    origin: number,
+    direction: number,
+    minimum: number,
+    maximum: number,
+  ): boolean => {
+    if (Math.abs(direction) < EPSILON) return origin >= minimum && origin <= maximum;
+    const first = (minimum - origin) / direction;
+    const second = (maximum - origin) / direction;
+    entry = Math.max(entry, Math.min(first, second));
+    exit = Math.min(exit, Math.max(first, second));
+    return entry <= exit;
+  };
+  if (!clipAxis(originX, directionX, map.bounds.minX, map.bounds.maxX)) return null;
+  if (!clipAxis(originZ, directionZ, map.bounds.minZ, map.bounds.maxZ)) return null;
+  if (exit < 0 || entry > distanceLimit) return null;
+  return [Math.max(0, entry), Math.min(distanceLimit, exit)];
+};
+
+const nearestTerrainRayHit = (
+  originX: number,
+  originY: number,
+  originZ: number,
+  directionX: number,
+  directionY: number,
+  directionZ: number,
+  distanceLimit: number,
+  map: MapDefinition,
+): number | null => {
+  if (!map.groundHeightAt || distanceLimit <= 0) return null;
+  const clipped = clipTerrainRayToBounds(
+    originX,
+    originZ,
+    directionX,
+    directionZ,
+    distanceLimit,
+    map,
+  );
+  if (!clipped) return null;
+  const [entryDistance, exitDistance] = clipped;
+  const clearanceAt = (distance: number): number => {
+    const x = clamp(originX + directionX * distance, map.bounds.minX, map.bounds.maxX);
+    const z = clamp(originZ + directionZ * distance, map.bounds.minZ, map.bounds.maxZ);
+    return originY + directionY * distance - mapGroundHeightAt(map, x, z);
+  };
+  const refineCrossing = (lowerStart: number, upperStart: number): number => {
+    let lower = lowerStart;
+    let upper = upperStart;
+    for (let iteration = 0; iteration < TERRAIN_RAY_BISECTION_STEPS; iteration += 1) {
+      const midpoint = (lower + upper) * 0.5;
+      if (clearanceAt(midpoint) > CONTACT_EPSILON) lower = midpoint;
+      else upper = midpoint;
+    }
+    return upper;
+  };
+  const maximumClearanceRate = Math.abs(directionY)
+    + TERRAIN_RAY_MAX_SLOPE * Math.hypot(directionX, directionZ);
+  const intervalCannotHit = (
+    lowerDistance: number,
+    lowerClearance: number,
+    upperDistance: number,
+    upperClearance: number,
+  ): boolean => lowerClearance > CONTACT_EPSILON
+    && upperClearance > CONTACT_EPSILON
+    && lowerClearance + upperClearance - CONTACT_EPSILON * 2
+      > maximumClearanceRate * (upperDistance - lowerDistance);
+  const searchInterval = (
+    lowerDistance: number,
+    lowerClearance: number,
+    upperDistance: number,
+    upperClearance: number,
+    depth: number,
+  ): number | null => {
+    if (lowerClearance <= CONTACT_EPSILON) return lowerDistance;
+    if (intervalCannotHit(lowerDistance, lowerClearance, upperDistance, upperClearance)) return null;
+    const midpoint = (lowerDistance + upperDistance) * 0.5;
+    const midpointClearance = clearanceAt(midpoint);
+    if (depth >= TERRAIN_RAY_REFINEMENT_DEPTH) {
+      if (midpointClearance <= CONTACT_EPSILON) return refineCrossing(lowerDistance, midpoint);
+      if (upperClearance <= CONTACT_EPSILON) return refineCrossing(midpoint, upperDistance);
+      return null;
+    }
+    const firstHalf = searchInterval(
+      lowerDistance,
+      lowerClearance,
+      midpoint,
+      midpointClearance,
+      depth + 1,
+    );
+    if (firstHalf !== null) return firstHalf;
+    return searchInterval(
+      midpoint,
+      midpointClearance,
+      upperDistance,
+      upperClearance,
+      depth + 1,
+    );
+  };
+
+  let previousDistance = entryDistance;
+  let previousClearance = clearanceAt(previousDistance);
+  if (previousClearance <= CONTACT_EPSILON) return previousDistance;
+  while (previousDistance < exitDistance - EPSILON) {
+    const distance = Math.min(exitDistance, previousDistance + TERRAIN_RAY_STEP);
+    const currentClearance = clearanceAt(distance);
+    const hit = searchInterval(
+      previousDistance,
+      previousClearance,
+      distance,
+      currentClearance,
+      0,
+    );
+    if (hit !== null) return hit;
+    previousDistance = distance;
+    previousClearance = currentClearance;
+  }
+  return null;
 };
 
 export const raycastWorld = (
@@ -727,7 +1013,28 @@ export const raycastWorld = (
 ): RayHit | null => {
   let result: RayHit | null = null;
   const obstacleHit = nearestObstacleRayHit(origin, direction, maxDistance, map);
-  if (obstacleHit) {
+  const terrainDistance = nearestTerrainRayHit(
+    origin.x,
+    origin.y,
+    origin.z,
+    direction.x,
+    direction.y,
+    direction.z,
+    obstacleHit ? Math.min(maxDistance, obstacleHit.distance) : maxDistance,
+    map,
+  );
+  if (terrainDistance !== null) {
+    result = {
+      distance: terrainDistance,
+      point: {
+        x: origin.x + direction.x * terrainDistance,
+        y: origin.y + direction.y * terrainDistance,
+        z: origin.z + direction.z * terrainDistance,
+      },
+      obstacleId: 'terrain-surface',
+    };
+  }
+  if (obstacleHit && (!result || obstacleHit.distance < result.distance)) {
     result = {
       distance: obstacleHit.distance,
       point: {

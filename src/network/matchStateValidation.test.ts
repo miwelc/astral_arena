@@ -70,6 +70,19 @@ describe('P2P MatchState validation', () => {
     expect(isValidMatchState(simulation.snapshot())).toBe(true);
   });
 
+  it('accepts an Extensión Titán snapshot with authored bot navigation memory', () => {
+    const simulation = new GameSimulation(
+      createDefaultConfig({ mode: 'capture-the-flag', mapId: 'titan-expanse', botFill: true }),
+      [{ id: 'local-player', name: 'Lince' }],
+    );
+    simulation.state.phase = 'playing';
+    simulation.state.countdown = 0;
+    simulation.step(1 / 60);
+
+    const overTheWire = JSON.parse(JSON.stringify(simulation.snapshot())) as unknown;
+    expect(isValidMatchState(overTheWire)).toBe(true);
+  });
+
   it('keeps accepting legacy bot snapshots without authored navigation memory', () => {
     const state = copy(makeState());
     const memory = firstBotMemory(state) as Partial<BotMemory>;

@@ -592,7 +592,9 @@ const objectivePlan = (state: MatchState, player: PlayerState, map: MapDefinitio
   if (state.config.mode === 'towah-of-powah') return towahPlan(state, player, map);
 
   const pickup = nearestAvailablePickup(state, player);
-  if (pickup && horizontalDistance(player.position, pickup.position) <= 30) {
+  const mapArea = (map.bounds.maxX - map.bounds.minX) * (map.bounds.maxZ - map.bounds.minZ);
+  const pickupSearchRadius = Math.max(30, Math.min(48, Math.sqrt(mapArea) * 0.25));
+  if (pickup && horizontalDistance(player.position, pickup.position) <= pickupSearchRadius) {
     player.bot!.objective = 'pickup';
     return { goal: pickup.position, urgent: false, pickupId: pickup.id };
   }

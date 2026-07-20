@@ -1,6 +1,6 @@
 import { canonicalFormatForMode, rulesForMode } from '../game/modeRules';
 import { CROUCHED_PLAYER_HEIGHT, STANDING_PLAYER_HEIGHT } from '../game/playerMovement';
-import { PLAYER_PITCH_LIMIT, type GameMode, type MatchState } from '../game/types';
+import { MAP_IDS, PLAYER_PITCH_LIMIT, type GameMode, type MatchState } from '../game/types';
 import { isValidPlayerInput } from './playerInputProtocol';
 
 type UnknownRecord = Record<string, unknown>;
@@ -33,6 +33,7 @@ const FLAG_ACTIONS = new Set(['taken', 'dropped', 'returned', 'captured']);
 const FLAG_STATUSES = new Set(['home', 'carried', 'dropped']);
 const BOT_OBJECTIVES = new Set(['attack', 'defend', 'pickup', 'flag', 'tower']);
 const MATCH_PHASES = new Set(['countdown', 'playing', 'finished']);
+const VALID_MAP_IDS: ReadonlySet<string> = new Set(MAP_IDS);
 
 const MAX_PLAYERS = 8;
 const MAX_PROJECTILES = 512;
@@ -235,7 +236,7 @@ const isMatchConfig = (value: unknown): boolean => {
     && isSafeNonNegativeInteger(value.timeLimitSeconds) && value.timeLimitSeconds > 0 && value.timeLimitSeconds <= 86_400
     && typeof value.botFill === 'boolean'
     && typeof value.playerName === 'string' && value.playerName.length > 0 && value.playerName.length <= 64
-    && (value.mapId === 'crater-ridge' || value.mapId === 'umbra-station');
+    && isEnumValue(VALID_MAP_IDS, value.mapId);
 };
 
 const isProjectile = (value: unknown): boolean => {
