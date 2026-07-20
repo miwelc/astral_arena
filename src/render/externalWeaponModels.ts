@@ -187,7 +187,7 @@ const externalSurfaceFor = (
 /**
  * Preserve the source texture's wear/value information while discarding its
  * hue. This lets normal maps and authored scratches survive while moving the
- * imported paint into a dark graphite/ceramic sci-fi palette.
+ * imported paint into the game's clean white-ceramic sci-fi palette.
  */
 const installCeramicAlbedoRemap = (
   material: THREE.MeshPhysicalMaterial,
@@ -205,13 +205,13 @@ const installCeramicAlbedoRemap = (
             sampledDiffuseColor = sRGBTransferEOTF(sampledDiffuseColor);
           #endif
           float ceramicValue = dot(sampledDiffuseColor.rgb, vec3(0.2126, 0.7152, 0.0722));
-          ceramicValue = ${dark ? 'mix(0.38, 0.94, smoothstep(0.02, 0.96, ceramicValue))' : 'mix(0.62, 1.06, smoothstep(0.02, 0.96, ceramicValue))'};
+          ceramicValue = ${dark ? 'mix(0.38, 0.94, smoothstep(0.02, 0.96, ceramicValue))' : 'mix(0.68, 0.98, smoothstep(0.02, 0.96, ceramicValue))'};
           diffuseColor *= vec4(vec3(ceramicValue), sampledDiffuseColor.a);
         #endif
       `,
     );
   };
-  material.customProgramCacheKey = () => `astral-ceramic-albedo-${surface}-v1`;
+  material.customProgramCacheKey = () => `astral-ceramic-albedo-${surface}-v2`;
 };
 
 const tuneExternalMaterials = (root: THREE.Object3D, id: WeaponId): void => {
@@ -228,7 +228,7 @@ const tuneExternalMaterials = (root: THREE.Object3D, id: WeaponId): void => {
 
     const material = new THREE.MeshPhysicalMaterial({
       name: `${id}-external-${surface}-${source.name || 'surface'}`,
-      color: surface === 'ceramic' ? 0x34464b : 0x101a20,
+      color: surface === 'ceramic' ? 0xe3e5e1 : 0x101a20,
       map: source.map,
       normalMap: source.normalMap,
       normalScale: source.normalScale.clone().multiplyScalar(1.08),
@@ -244,10 +244,10 @@ const tuneExternalMaterials = (root: THREE.Object3D, id: WeaponId): void => {
       depthWrite: source.depthWrite,
       depthTest: source.depthTest,
       roughness: surface === 'ceramic' ? 0.34 : 0.48,
-      metalness: surface === 'ceramic' ? 0.26 : 0.44,
-      clearcoat: surface === 'ceramic' ? 0.34 : 0.14,
-      clearcoatRoughness: surface === 'ceramic' ? 0.2 : 0.4,
-      envMapIntensity: surface === 'ceramic' ? 1.36 : 1.12,
+      metalness: surface === 'ceramic' ? 0.1 : 0.44,
+      clearcoat: surface === 'ceramic' ? 0.48 : 0.14,
+      clearcoatRoughness: surface === 'ceramic' ? 0.22 : 0.4,
+      envMapIntensity: surface === 'ceramic' ? 1.28 : 1.12,
     });
     material.userData.externalWeaponSurface = surface;
     material.userData.ceramicAlbedoRemap = Boolean(material.map);

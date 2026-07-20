@@ -544,40 +544,40 @@ export const createForestGroundTextures = (size = 512): ForestGroundTextures => 
     const leaf = Math.max(greenLeaf, ochreLeaf);
 
     // Damp mineral soil.
-    let red = 48 + variation * 11;
-    let green = 55 + variation * 12;
-    let blue = 44 + variation * 8;
+    let red = 132 + variation * 18;
+    let green = 150 + variation * 20;
+    let blue = 105 + variation * 15;
 
     // Dense moss has several greens, avoiding a single synthetic-looking hue.
     const mossVariation = clamp01(0.48 + variation * 1.4);
-    red = lerp(red, lerp(53, 82, mossVariation), moss * 0.9);
-    green = lerp(green, lerp(78, 112, mossVariation), moss * 0.9);
-    blue = lerp(blue, lerp(45, 61, mossVariation), moss * 0.9);
+    red = lerp(red, lerp(100, 140, mossVariation), moss * 0.9);
+    green = lerp(green, lerp(145, 195, mossVariation), moss * 0.9);
+    blue = lerp(blue, lerp(80, 110, mossVariation), moss * 0.9);
 
     // Puddles are dark because the saturated soil absorbs more light, not
     // because a directional highlight has been painted into the albedo.
-    red = lerp(red, 28 + variation * 4, puddle * 0.82);
-    green = lerp(green, 38 + variation * 5, puddle * 0.82);
-    blue = lerp(blue, 37 + variation * 5, puddle * 0.82);
+    red = lerp(red, 60 + variation * 7, puddle * 0.82);
+    green = lerp(green, 82 + variation * 8, puddle * 0.82);
+    blue = lerp(blue, 78 + variation * 8, puddle * 0.82);
 
-    red = lerp(red, 70 + variation * 8, root * 0.88);
-    green = lerp(green, 57 + variation * 6, root * 0.88);
-    blue = lerp(blue, 41 + variation * 5, root * 0.88);
+    red = lerp(red, 135 + variation * 12, root * 0.88);
+    green = lerp(green, 105 + variation * 10, root * 0.88);
+    blue = lerp(blue, 72 + variation * 9, root * 0.88);
 
     // Quartz/slate pebbles remain neutral so real scene lights define form.
-    red = lerp(red, 91 + variation * 14, stone * 0.84);
-    green = lerp(green, 100 + variation * 13, stone * 0.84);
-    blue = lerp(blue, 94 + variation * 11, stone * 0.84);
+    red = lerp(red, 155 + variation * 18, stone * 0.84);
+    green = lerp(green, 165 + variation * 17, stone * 0.84);
+    blue = lerp(blue, 155 + variation * 16, stone * 0.84);
 
-    red = lerp(red, 54 + variation * 8, greenLeaf * 0.92);
-    green = lerp(green, 75 + variation * 10, greenLeaf * 0.92);
-    blue = lerp(blue, 40 + variation * 6, greenLeaf * 0.92);
-    red = lerp(red, 119 + variation * 11, ochreLeaf * 0.92);
-    green = lerp(green, 91 + variation * 9, ochreLeaf * 0.92);
-    blue = lerp(blue, 47 + variation * 6, ochreLeaf * 0.92);
-    red = lerp(red, 52, twig * 0.9);
-    green = lerp(green, 42, twig * 0.9);
-    blue = lerp(blue, 31, twig * 0.9);
+    red = lerp(red, 100 + variation * 12, greenLeaf * 0.92);
+    green = lerp(green, 150 + variation * 16, greenLeaf * 0.92);
+    blue = lerp(blue, 78 + variation * 10, greenLeaf * 0.92);
+    red = lerp(red, 180 + variation * 15, ochreLeaf * 0.92);
+    green = lerp(green, 145 + variation * 13, ochreLeaf * 0.92);
+    blue = lerp(blue, 80 + variation * 10, ochreLeaf * 0.92);
+    red = lerp(red, 100, twig * 0.9);
+    green = lerp(green, 78, twig * 0.9);
+    blue = lerp(blue, 55, twig * 0.9);
 
     const offset = index * 4;
     albedoImage.data[offset] = Math.round(Math.min(255, Math.max(0, red)));

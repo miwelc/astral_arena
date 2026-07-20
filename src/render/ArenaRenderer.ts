@@ -711,12 +711,12 @@ export class ArenaRenderer {
     );
     const viewKey = new THREE.DirectionalLight(
       orbitalViewLighting ? 0xd7eaff : 0xffedcd,
-      alpineViewLighting ? 2.3 : orbitalViewLighting ? 2.75 : 3.25,
+      alpineViewLighting ? 2.3 : orbitalViewLighting ? 2.75 : 2.55,
     );
     viewKey.position.set(-2.2, 3.4, 2.6);
     const viewRim = new THREE.PointLight(
       orbitalViewLighting ? 0x5be8ff : 0x56eddb,
-      alpineViewLighting ? 3.2 : orbitalViewLighting ? 6.2 : 5.4,
+      alpineViewLighting ? 3.2 : orbitalViewLighting ? 6.2 : 3.8,
       4.5,
       2,
     );
@@ -809,7 +809,7 @@ export class ArenaRenderer {
             color = mix(color, radialBlur, impactBlur);
           }
           float luminance = dot(color, vec3(0.2126, 0.7152, 0.0722));
-          float saturation = mix(mix(1.09, 1.16, uOrbital), 1.29, uAlpine);
+          float saturation = mix(mix(1.17, 1.16, uOrbital), 1.29, uAlpine);
           color = mix(vec3(luminance), color, saturation);
           // Titan is graded in linear HDR before OutputPass/AgX. A contrast
           // pivot at 0.5 subtracted 0.0275 from every shaded channel and
@@ -1226,28 +1226,28 @@ export class ArenaRenderer {
 
       void main() {
         float h = clamp(vDirection.y * 0.5 + 0.5, 0.0, 1.0);
-        vec3 horizon = vec3(0.13, 0.26, 0.28);
-        vec3 middle = vec3(0.045, 0.135, 0.20);
-        vec3 zenith = vec3(0.009, 0.038, 0.086);
+        vec3 horizon = vec3(0.22, 0.44, 0.51);
+        vec3 middle = vec3(0.07, 0.25, 0.39);
+        vec3 zenith = vec3(0.018, 0.09, 0.22);
         vec3 color = mix(horizon, middle, smoothstep(0.43, 0.68, h));
         color = mix(color, zenith, smoothstep(0.66, 1.0, h));
 
         vec3 sunDir = normalize(vec3(-0.52, 0.64, -0.56));
         float alignment = max(dot(vDirection, sunDir), 0.0);
-        color += vec3(1.0, 0.79, 0.48) * pow(alignment, 520.0) * 7.2;
-        color += vec3(1.0, 0.55, 0.22) * pow(alignment, 42.0) * 0.34;
-        color += vec3(0.24, 0.48, 0.48) * pow(alignment, 7.0) * 0.22;
+        color += vec3(1.0, 0.84, 0.58) * pow(alignment, 520.0) * 6.6;
+        color += vec3(1.0, 0.66, 0.32) * pow(alignment, 42.0) * 0.3;
+        color += vec3(0.34, 0.62, 0.58) * pow(alignment, 7.0) * 0.24;
 
         vec2 cloudUv = vDirection.xz * 4.5 + vDirection.y * vec2(1.9, -1.2);
         float cloudNoise = fbm(cloudUv + vec2(uTime * 0.0035, 0.0));
         float cloudBand = smoothstep(0.45, 0.68, cloudNoise);
         cloudBand *= smoothstep(0.34, 0.51, h) * (1.0 - smoothstep(0.78, 0.91, h));
-        vec3 stormCloud = mix(vec3(0.065, 0.12, 0.15), vec3(0.28, 0.35, 0.33), alignment);
-        color = mix(color, stormCloud, cloudBand * 0.56);
+        vec3 stormCloud = mix(vec3(0.18, 0.29, 0.33), vec3(0.52, 0.57, 0.50), alignment);
+        color = mix(color, stormCloud, cloudBand * 0.4);
 
         float aurora = exp(-pow(h - 0.64, 2.0) * 180.0);
         aurora *= smoothstep(0.48, 0.76, fbm(vDirection.xz * 2.1 + vec2(uTime * 0.0012, 8.0)));
-        color += vec3(0.10, 0.42, 0.38) * aurora * 0.16;
+        color += vec3(0.12, 0.46, 0.4) * aurora * 0.13;
 
         vec3 planetDir = normalize(vec3(0.61, 0.34, 0.72));
         float planetDot = dot(vDirection, planetDir);
@@ -1590,9 +1590,9 @@ export class ArenaRenderer {
 
     const random = seededRandom(0x51f1e);
     const ridgeMaterials = [
-      new THREE.MeshStandardMaterial({ color: 0x101c1c, roughness: 0.91, metalness: 0.03, flatShading: true }),
-      new THREE.MeshStandardMaterial({ color: 0x1e3230, roughness: 0.94, flatShading: true }),
-      new THREE.MeshStandardMaterial({ color: 0x344943, roughness: 0.97, flatShading: true }),
+      new THREE.MeshStandardMaterial({ color: 0x354b43, roughness: 0.91, metalness: 0.02, envMapIntensity: 0.68, flatShading: true }),
+      new THREE.MeshStandardMaterial({ color: 0x4b6256, roughness: 0.94, envMapIntensity: 0.7, flatShading: true }),
+      new THREE.MeshStandardMaterial({ color: 0x667768, roughness: 0.97, envMapIntensity: 0.72, flatShading: true }),
     ];
 
     const ridgeBands = [
@@ -1631,11 +1631,11 @@ export class ArenaRenderer {
       }
     }
 
-    const rockGeometry = new THREE.DodecahedronGeometry(1, 0);
+    const rockGeometry = new THREE.IcosahedronGeometry(1, 1);
     const rockMaterials = [
-      new THREE.MeshPhysicalMaterial({ color: 0x34493f, roughness: 0.72, clearcoat: 0.18, clearcoatRoughness: 0.7, flatShading: true }),
-      new THREE.MeshPhysicalMaterial({ color: 0x4e5d51, roughness: 0.78, clearcoat: 0.14, clearcoatRoughness: 0.72, flatShading: true }),
-      new THREE.MeshPhysicalMaterial({ color: 0x263d35, roughness: 0.74, clearcoat: 0.2, clearcoatRoughness: 0.68, flatShading: true }),
+      new THREE.MeshPhysicalMaterial({ color: 0x74847b, emissive: 0x24322c, emissiveIntensity: 0.035, roughness: 0.68, clearcoat: 0.16, clearcoatRoughness: 0.62, envMapIntensity: 0.94, flatShading: true }),
+      new THREE.MeshPhysicalMaterial({ color: 0x898f83, emissive: 0x2a312b, emissiveIntensity: 0.035, roughness: 0.74, clearcoat: 0.12, clearcoatRoughness: 0.68, envMapIntensity: 0.9, flatShading: true }),
+      new THREE.MeshPhysicalMaterial({ color: 0x677b71, emissive: 0x213029, emissiveIntensity: 0.035, roughness: 0.71, clearcoat: 0.2, clearcoatRoughness: 0.58, envMapIntensity: 0.98, flatShading: true }),
     ];
     const rockCounts = [22, 22, 22];
     for (let materialIndex = 0; materialIndex < rockMaterials.length; materialIndex += 1) {
@@ -1662,10 +1662,13 @@ export class ArenaRenderer {
     }
 
     const plantMaterials = {
-      stem: new THREE.MeshStandardMaterial({ color: 0x0e211d, roughness: 0.94, flatShading: true }),
+      stem: new THREE.MeshStandardMaterial({ color: 0x344b3d, roughness: 0.94, envMapIntensity: 0.68, flatShading: true }),
       leaf: new THREE.MeshStandardMaterial({
-        color: 0x416e56,
+        color: 0x629266,
+        emissive: 0x223d29,
+        emissiveIntensity: 0.07,
         roughness: 0.82,
+        envMapIntensity: 0.74,
         flatShading: true,
       }),
       glow: new THREE.MeshStandardMaterial({
@@ -1698,12 +1701,12 @@ export class ArenaRenderer {
 
     const basaltMaterial = new THREE.MeshPhysicalMaterial({
       name: 'crater-rim-obsidian',
-      color: 0x111c1c,
+      color: 0x45574f,
       roughness: 0.58,
       metalness: 0.08,
       clearcoat: 0.36,
       clearcoatRoughness: 0.42,
-      envMapIntensity: 0.72,
+      envMapIntensity: 0.96,
       flatShading: true,
     });
     const spireCount = 18;
@@ -1930,7 +1933,7 @@ export class ArenaRenderer {
     // forest silhouette without creating invisible gameplay blockers.
     const environment = createFacilityEnvironment({
       seed: 0xa57a1,
-      quality: 'low',
+      quality: 'medium',
       bounds: {
         minX: playableBounds.minX - 20,
         maxX: playableBounds.maxX + 20,
@@ -2070,10 +2073,10 @@ export class ArenaRenderer {
       seed: 0xf0e57,
       bounds: playableBounds,
       materials: environment.materials,
-      fernCount: Math.min(340, Math.round(arenaArea * 0.034)),
+      fernCount: Math.min(470, Math.round(arenaArea * 0.047)),
       // One instanced draw call can afford a genuinely lawn-like density in
       // the earth pockets while paths, objectives and interiors stay clear.
-      grassCount: Math.min(4800, Math.round(arenaArea * 0.52)),
+      grassCount: Math.min(5600, Math.round(arenaArea * 0.61)),
       heightAt: (x, z) => floorY - 0.035 + sampleGroundRelief(this.map, x, z) + 0.006,
       exclusions,
       castShadow: false,
@@ -2083,7 +2086,7 @@ export class ArenaRenderer {
           Math.abs(z - centerZ) / Math.max(1, halfDepth),
         );
         const islands = Math.sin(x * 0.43 + z * 0.17) * Math.cos(z * 0.36 - x * 0.12) * 0.5 + 0.5;
-        return THREE.MathUtils.clamp(0.22 + edge * 0.5 + islands * 0.25, 0.16, 0.92);
+        return THREE.MathUtils.clamp(0.3 + edge * 0.42 + islands * 0.3, 0.24, 0.94);
       },
     });
     const raisedEarthworks = this.map.obstacles.filter((obstacle) =>
@@ -2103,8 +2106,8 @@ export class ArenaRenderer {
       seed: 0xe47a1,
       bounds: playableBounds,
       materials: environment.materials,
-      fernCount: 64,
-      grassCount: 1_400,
+      fernCount: 84,
+      grassCount: 1_600,
       heightAt: (x, z) => raisedEarthworkAt(x, z)?.max.y ?? Number.NaN,
       densityAt: (x, z) => {
         const obstacle = raisedEarthworkAt(x, z);
@@ -2118,8 +2121,8 @@ export class ArenaRenderer {
       seed: 0x5a11d,
       bounds: playableBounds,
       materials: environment.materials,
-      count: Math.min(54, Math.round(arenaArea * 0.0046)),
-      radiusRange: [0.12, 0.42],
+      count: Math.min(88, Math.round(arenaArea * 0.0075)),
+      radiusRange: [0.15, 0.58],
       heightAt: (x, z) => floorY - 0.035 + sampleGroundRelief(this.map, x, z) + 0.005,
       exclusions,
       castShadow: false,
@@ -2732,6 +2735,8 @@ export class ArenaRenderer {
       floorGeometry,
       new THREE.MeshPhysicalMaterial({
         color: palette.ground,
+        emissive: orbital ? 0x000000 : 0x30442c,
+        emissiveIntensity: orbital ? 0 : 0.055,
         map: this.groundTexture,
         normalMap: this.groundNormalTexture,
         normalScale: new THREE.Vector2(orbital ? 0.42 : 0.85, orbital ? 0.42 : 0.85),
@@ -3046,6 +3051,8 @@ export class ArenaRenderer {
     const earthworkMaterial = new THREE.MeshPhysicalMaterial({
       name: 'playable-earthwork-soil',
       color: palette.earthwork,
+      emissive: 0x293b27,
+      emissiveIntensity: 0.045,
       map: this.groundTexture,
       normalMap: this.groundNormalTexture,
       normalScale: new THREE.Vector2(0.96, 0.96),
@@ -3060,6 +3067,8 @@ export class ArenaRenderer {
     const outcropMaterial = new THREE.MeshPhysicalMaterial({
       name: 'playable-weathered-rock',
       color: palette.outcrop,
+      emissive: 0x263730,
+      emissiveIntensity: 0.04,
       map: this.groundTexture,
       normalMap: this.groundNormalTexture,
       normalScale: new THREE.Vector2(1.18, 1.18),

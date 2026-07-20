@@ -90,8 +90,8 @@ describe('procedural weapon animation contract', () => {
         for (const material of materials) materialNames.add(material.name);
       });
 
-      expect([...materialNames].some((name) => name.endsWith('-graphite-coated-alloy'))).toBe(true);
-      expect([...materialNames].some((name) => name.endsWith('-graphite-ceramic-panel'))).toBe(true);
+      expect([...materialNames].some((name) => name.endsWith('-white-ceramic-shell'))).toBe(true);
+      expect([...materialNames].some((name) => name.endsWith('-white-ceramic-panel'))).toBe(true);
       expect([...materialNames].some((name) => name.endsWith('-dark-polymer'))).toBe(true);
       expect([...materialNames].some((name) => name.endsWith('-grip-rubber'))).toBe(true);
       expect([...materialNames].some((name) => name.endsWith('-machined-metal'))).toBe(true);

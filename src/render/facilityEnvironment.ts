@@ -54,12 +54,12 @@ export const DEFAULT_FACILITY_PALETTE: Readonly<FacilityPalette> = Object.freeze
   accentOrange: 0xd47a45,
   accentBlue: 0x4c9db6,
   glass: 0x315c65,
-  bark: 0x101b19,
-  canopy: 0x3b6242,
-  fern: 0x568c4d,
-  grass: 0x769f58,
-  wetRock: 0x263c3b,
-  lichen: 0x748e58,
+  bark: 0x665f4c,
+  canopy: 0x8dbc74,
+  fern: 0x80ad61,
+  grass: 0xa0c578,
+  wetRock: 0x829089,
+  lichen: 0xadc181,
   emissive: 0x4bd9ff,
 });
 
@@ -255,6 +255,7 @@ export const createFacilityMaterialKit = (
       color: palette.bark,
       roughness: 0.93,
       metalness: 0.02,
+      envMapIntensity: 0.72,
       vertexColors: true,
     }),
     canopy: new THREE.MeshStandardMaterial({
@@ -262,6 +263,9 @@ export const createFacilityMaterialKit = (
       color: palette.canopy,
       roughness: 0.78,
       metalness: 0,
+      emissive: palette.canopy,
+      emissiveIntensity: 0.085,
+      envMapIntensity: 0.78,
       vertexColors: true,
     }),
     fern: new THREE.MeshStandardMaterial({
@@ -269,6 +273,9 @@ export const createFacilityMaterialKit = (
       color: palette.fern,
       roughness: 0.84,
       metalness: 0,
+      emissive: palette.fern,
+      emissiveIntensity: 0.065,
+      envMapIntensity: 0.76,
       side: THREE.DoubleSide,
       vertexColors: true,
     }),
@@ -276,19 +283,23 @@ export const createFacilityMaterialKit = (
       name: 'facility-forest-grass',
       color: palette.grass,
       emissive: palette.grass,
-      emissiveIntensity: 0.035,
+      emissiveIntensity: 0.105,
       roughness: 0.88,
       metalness: 0,
+      envMapIntensity: 0.74,
       side: THREE.DoubleSide,
       vertexColors: true,
     }),
     wetRock: new THREE.MeshPhysicalMaterial({
       name: 'facility-wet-rock',
       color: palette.wetRock,
-      metalness: 0.08,
-      roughness: 0.43,
-      clearcoat: 0.82,
-      clearcoatRoughness: 0.16,
+      emissive: 0x26352f,
+      emissiveIntensity: 0.04,
+      metalness: 0.035,
+      roughness: 0.58,
+      clearcoat: 0.38,
+      clearcoatRoughness: 0.34,
+      envMapIntensity: 1.08,
       vertexColors: true,
     }),
     lichen: new THREE.MeshStandardMaterial({
@@ -296,6 +307,7 @@ export const createFacilityMaterialKit = (
       color: palette.lichen,
       roughness: 0.96,
       metalness: 0,
+      envMapIntensity: 0.7,
       side: THREE.DoubleSide,
     }),
     cable: new THREE.MeshStandardMaterial({
@@ -484,7 +496,7 @@ export interface TallTreeGroveOptions {
  */
 export const createTallTreeGrove = (options: TallTreeGroveOptions): THREE.Group => {
   const random = seededRandom(options.seed);
-  const heightRange = options.heightRange ?? [8.5, 15.5];
+  const heightRange = options.heightRange ?? [10.5, 18.5];
   requirePositive(heightRange[0], 'Minimum tree height');
   if (heightRange[1] < heightRange[0]) throw new RangeError('Tree height range is inverted.');
   const points = scatterPoints(
@@ -507,7 +519,7 @@ export const createTallTreeGrove = (options: TallTreeGroveOptions): THREE.Group 
     leanX: (random() - 0.5) * 0.075,
     leanZ: (random() - 0.5) * 0.075,
     branchCount: 2 + Math.floor(random() * 3),
-    crownCount: 3 + Math.floor(random() * 3),
+    crownCount: 4 + Math.floor(random() * 3),
   }));
   const totalBranches = treeRecords.reduce((sum, tree) => sum + tree.branchCount, 0);
   const totalCrowns = treeRecords.reduce((sum, tree) => sum + tree.crownCount, 0);

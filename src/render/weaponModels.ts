@@ -158,20 +158,20 @@ const setTransform = (
 const createMaterials = (id: WeaponId): WeaponMaterials => {
   const tint = WEAPONS[id].tint;
   const paint = new THREE.MeshStandardMaterial({
-    name: `${id}-graphite-coated-alloy`,
-    color: 0x18242b,
-    roughness: 0.32,
-    metalness: 0.56,
-    envMapIntensity: 1.22,
+    name: `${id}-white-ceramic-shell`,
+    color: 0xdaddd8,
+    roughness: 0.34,
+    metalness: 0.16,
+    envMapIntensity: 1.18,
   });
   const ceramic = new THREE.MeshPhysicalMaterial({
-    name: `${id}-graphite-ceramic-panel`,
-    color: 0x34464b,
-    roughness: 0.34,
-    metalness: 0.22,
-    clearcoat: 0.38,
-    clearcoatRoughness: 0.2,
-    envMapIntensity: 1.28,
+    name: `${id}-white-ceramic-panel`,
+    color: 0xeeede8,
+    roughness: 0.31,
+    metalness: 0.06,
+    clearcoat: 0.5,
+    clearcoatRoughness: 0.21,
+    envMapIntensity: 1.24,
   });
   const polymer = new THREE.MeshStandardMaterial({
     name: `${id}-dark-polymer`,

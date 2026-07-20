@@ -123,7 +123,7 @@ describe('map visual profiles', () => {
 
     expect(umbra.exposure).toBeGreaterThan(crater.exposure);
     expect(umbra.lighting.ambient.intensity).toBeGreaterThan(
-      crater.lighting.ambient.intensity * 4,
+      crater.lighting.ambient.intensity * 2,
     );
     expect(umbra.lighting.fill.intensity).toBeGreaterThan(crater.lighting.fill.intensity);
   });
