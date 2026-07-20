@@ -59,7 +59,8 @@ const HEALTH_RECHARGE_RATE = 14;
 const WEAPON_EQUIP_SECONDS = 0.42;
 const MELEE_DAMAGE = 100;
 const MELEE_LUNGE_RANGE = 2.55;
-const GRENADE_FUSE_SECONDS = 1.7;
+const GRENADE_FUSE_SECONDS = 1.4;
+const GRENADE_DAMAGE = 225;
 const GRENADE_OWNER_GRACE_SECONDS = 0.22;
 const BOT_NAMES = ['Orion', 'Vega', 'Lyra', 'Atlas', 'Sol', 'Mira', 'Pulsar', 'Cosmo'];
 const PRIORITY_EVENT_TYPES = new Set<GameEvent['type']>([
@@ -1003,7 +1004,7 @@ export class GameSimulation {
       position: add(origin, scale(direction, 0.8)),
       velocity: add(scale(direction, 14), vec3(0, 5.5, 0)),
       radius: 0.16,
-      damage: 210,
+      damage: GRENADE_DAMAGE,
       blastRadius: 5.5,
       armed: false,
       fuse: GRENADE_FUSE_SECONDS,

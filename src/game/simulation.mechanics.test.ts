@@ -228,6 +228,22 @@ describe('jump pad movement', () => {
 });
 
 describe('grenade detonation', () => {
+  it('throws frags with the tuned fuse and damage profile', () => {
+    const simulation = createSimulation();
+    const owner = player(simulation, 'local');
+
+    simulation.setInput(owner.id, { ...emptyInput(), sequence: 1, grenade: true });
+    simulation.step(0);
+
+    expect(simulation.state.projectiles).toHaveLength(1);
+    expect(simulation.state.projectiles[0]).toMatchObject({
+      kind: 'grenade',
+      fuse: 1.4,
+      damage: 225,
+      blastRadius: 5.5,
+    });
+  });
+
   it('starts a frag fuse on first ground contact instead of while airborne', () => {
     const simulation = createSimulation();
     const owner = player(simulation, 'local');
@@ -236,7 +252,7 @@ describe('grenade detonation', () => {
     const projectile = grenade(owner, { ...start, y: simulation.map.bounds.floorY + 8 }, {
       velocity: { x: 0.5, y: 0, z: 0 },
       armed: false,
-      fuse: 1.7,
+      fuse: 1.4,
     });
     simulation.state.projectiles.push(projectile);
 
@@ -244,7 +260,7 @@ describe('grenade detonation', () => {
 
     expect(simulation.state.projectiles).toHaveLength(1);
     expect(projectile.armed).toBe(false);
-    expect(projectile.fuse).toBeCloseTo(1.7, 6);
+    expect(projectile.fuse).toBeCloseTo(1.4, 6);
     expect(simulation.state.events.some((event) => event.type === 'explosion')).toBe(false);
 
     projectile.position.y = simulation.map.bounds.floorY + projectile.radius + 0.01;
@@ -252,7 +268,7 @@ describe('grenade detonation', () => {
     simulation.step(0.05);
 
     expect(projectile.armed).toBe(true);
-    expect(projectile.fuse).toBeCloseTo(1.7, 6);
+    expect(projectile.fuse).toBeCloseTo(1.4, 6);
     expect(simulation.state.projectiles).toHaveLength(1);
     for (let index = 0; index < 36 && projectile.alive; index += 1) simulation.step(0.05);
 
