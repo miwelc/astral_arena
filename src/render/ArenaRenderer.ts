@@ -1463,31 +1463,6 @@ export class ArenaRenderer {
       this.scene.add(practical, practical.target);
     }
 
-    if (this.visualProfile.environmentKind === 'orbital-station') {
-      // Recessed overhead luminaires bridge the tonal gap between the star
-      // field and Umbra's graphite pressure hull. The stellar key still owns
-      // form shadows; these inexpensive fixtures reveal route depth.
-      let fixtureIndex = 0;
-      for (const x of [-22, 0, 22]) {
-        for (const z of [-10.5, 10.5]) {
-          const fixture = new THREE.SpotLight(
-            z < 0 ? 0xb8e7ff : 0xb8c7ff,
-            8.2,
-            15,
-            0.66,
-            0.78,
-            2,
-          );
-          fixture.name = `umbra-deck-luminaire-${fixtureIndex}`;
-          fixture.position.set(x, 8.55, z);
-          fixture.target.position.set(x * 0.94, 0, z * 0.92);
-          fixture.userData.zone = z < 0 ? 'north-signal-array' : 'south-power-annex';
-          fixture.userData.purpose = 'route-readability';
-          this.scene.add(fixture, fixture.target);
-          fixtureIndex += 1;
-        }
-      }
-    }
   }
 
   private createLandscape(): void {
@@ -2234,14 +2209,27 @@ export class ArenaRenderer {
       body.receiveShadow = true;
       const spine = new THREE.Mesh(new RoundedBoxGeometry(22, 0.34, 0.4, 2, 0.08), steel);
       spine.position.set(0, 2.6, 3.58);
-      module.add(body, spine);
-      for (const x of [-9.2, -4.6, 0, 4.6, 9.2]) {
-        const rib = new THREE.Mesh(new RoundedBoxGeometry(0.22, 5.15, 0.34, 2, 0.07), steel);
-        rib.position.set(x, 0, 3.55);
-        const viewport = new THREE.Mesh(new RoundedBoxGeometry(2.6, 0.16, 0.08, 2, 0.035), colorMaterial);
-        viewport.position.set(x, 0.5, 3.78);
-        module.add(rib, viewport);
+      const detailXs = [-9.2, -4.6, 0, 4.6, 9.2];
+      const ribs = new THREE.InstancedMesh(new THREE.BoxGeometry(0.22, 5.15, 0.34), steel, detailXs.length);
+      ribs.name = `${id}-armor-ribs`;
+      const viewports = new THREE.InstancedMesh(
+        new THREE.BoxGeometry(2.6, 0.16, 0.08),
+        colorMaterial,
+        detailXs.length,
+      );
+      viewports.name = `${id}-viewport-strip`;
+      const moduleTransform = new THREE.Object3D();
+      for (let index = 0; index < detailXs.length; index += 1) {
+        moduleTransform.position.set(detailXs[index]!, 0, 3.55);
+        moduleTransform.updateMatrix();
+        ribs.setMatrixAt(index, moduleTransform.matrix);
+        moduleTransform.position.set(detailXs[index]!, 0.5, 3.78);
+        moduleTransform.updateMatrix();
+        viewports.setMatrixAt(index, moduleTransform.matrix);
       }
+      ribs.instanceMatrix.needsUpdate = true;
+      viewports.instanceMatrix.needsUpdate = true;
+      module.add(body, spine, ribs, viewports);
       group.add(module);
     };
     addDockModule(
@@ -2326,20 +2314,18 @@ export class ArenaRenderer {
         && obstacleHeight >= 1.35
         && Math.max(obstacleWidth, obstacleDepth) >= 2.4;
     });
-    const insetMaterial = new THREE.MeshPhysicalMaterial({
+    const insetMaterial = new THREE.MeshStandardMaterial({
       name: 'umbra-recessed-service-panel',
       color: 0x263d52,
-      roughness: 0.3,
-      metalness: 0.67,
-      clearcoat: 0.3,
-      clearcoatRoughness: 0.22,
-      envMapIntensity: 1.5,
+      roughness: 0.34,
+      metalness: 0.62,
+      envMapIntensity: 1.34,
     });
-    const insetGeometry = new RoundedBoxGeometry(1, 1, 0.065, 2, 0.055);
+    const insetGeometry = new THREE.BoxGeometry(1, 1, 0.065);
     const servicePanels = new THREE.InstancedMesh(insetGeometry, insetMaterial, panelCandidates.length * 2);
     servicePanels.name = 'umbra-modular-service-panel-insets';
     const statusBars = new THREE.InstancedMesh(
-      new RoundedBoxGeometry(1, 1, 0.075, 2, 0.025),
+      new THREE.BoxGeometry(1, 1, 0.075),
       cyanSignal,
       panelCandidates.length * 2,
     );
@@ -2393,7 +2379,7 @@ export class ArenaRenderer {
 
     // Alternating cyan/violet runway beacons create a strong perspective grid
     // through the central combat lane without adding gameplay collision.
-    const beaconGeometry = new RoundedBoxGeometry(0.34, 0.045, 0.11, 2, 0.02);
+    const beaconGeometry = new THREE.BoxGeometry(0.34, 0.045, 0.11);
     const cyanBeacons = new THREE.InstancedMesh(beaconGeometry, cyanSignal, 24);
     const violetBeacons = new THREE.InstancedMesh(beaconGeometry, violetSignal, 24);
     cyanBeacons.name = 'umbra-cyan-runway-beacons';
@@ -2422,25 +2408,44 @@ export class ArenaRenderer {
     violetBeacons.instanceMatrix.needsUpdate = true;
     group.add(cyanBeacons, violetBeacons);
 
-    // Visible housings justify the six deck spotlights added to the lighting
-    // rig and give the upper silhouette more manufactured detail.
+    // The housings remain emissive set dressing, but are intentionally not
+    // real-time lights. Three batched draws preserve the visual landmark at a
+    // fraction of the former per-pixel lighting cost.
+    const luminaireHousing = new THREE.InstancedMesh(
+      new RoundedBoxGeometry(2.8, 0.34, 1.15, 2, 0.16),
+      steel,
+      6,
+    );
+    luminaireHousing.name = 'umbra-suspended-luminaire-housings';
+    const cyanEmitters = new THREE.InstancedMesh(new THREE.BoxGeometry(2.15, 0.055, 0.62), cyanSignal, 3);
+    cyanEmitters.name = 'umbra-suspended-cyan-emitters';
+    const violetEmitters = new THREE.InstancedMesh(new THREE.BoxGeometry(2.15, 0.055, 0.62), violetSignal, 3);
+    violetEmitters.name = 'umbra-suspended-violet-emitters';
+    const luminaireTransform = new THREE.Object3D();
+    let luminaireIndex = 0;
+    let cyanEmitterIndex = 0;
+    let violetEmitterIndex = 0;
     for (const x of [-22, 0, 22]) {
       for (const z of [-10.5, 10.5]) {
-        const housing = new THREE.Mesh(
-          new RoundedBoxGeometry(2.8, 0.34, 1.15, 3, 0.16),
-          steel,
-        );
-        housing.name = `umbra-suspended-luminaire-${x}-${z}`;
-        housing.position.set(x, floorY + 8.6, z);
-        const emitter = new THREE.Mesh(
-          new RoundedBoxGeometry(2.15, 0.055, 0.62, 2, 0.025),
-          z < 0 ? cyanSignal : violetSignal,
-        );
-        emitter.position.set(x, floorY + 8.405, z);
-        emitter.castShadow = false;
-        group.add(housing, emitter);
+        luminaireTransform.position.set(x, floorY + 8.6, z);
+        luminaireTransform.updateMatrix();
+        luminaireHousing.setMatrixAt(luminaireIndex, luminaireTransform.matrix);
+        luminaireIndex += 1;
+        luminaireTransform.position.y = floorY + 8.405;
+        luminaireTransform.updateMatrix();
+        if (z < 0) {
+          cyanEmitters.setMatrixAt(cyanEmitterIndex, luminaireTransform.matrix);
+          cyanEmitterIndex += 1;
+        } else {
+          violetEmitters.setMatrixAt(violetEmitterIndex, luminaireTransform.matrix);
+          violetEmitterIndex += 1;
+        }
       }
     }
+    luminaireHousing.instanceMatrix.needsUpdate = true;
+    cyanEmitters.instanceMatrix.needsUpdate = true;
+    violetEmitters.instanceMatrix.needsUpdate = true;
+    group.add(luminaireHousing, cyanEmitters, violetEmitters);
 
     this.scene.add(group);
   }
