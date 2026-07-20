@@ -1,5 +1,5 @@
 import { clamp } from '../game/math';
-import type { Vec3 } from '../game/types';
+import type { GameEvent, Vec3 } from '../game/types';
 
 export type CombatWarningTone = 'critical' | 'warning' | 'utility';
 
@@ -58,6 +58,24 @@ export interface DirectionalDamagePresentation {
   strength: number;
   tone: 'shield' | 'health';
 }
+
+/**
+ * Finds the newest local hit in the not-yet-scanned suffix of an event log.
+ * Match events are ordered by increasing id, so reaching the cursor lets the
+ * HUD stop without revisiting older history on every animation frame.
+ */
+export const latestDamageEventAfter = (
+  events: readonly GameEvent[],
+  targetId: string,
+  afterEventId: number,
+): GameEvent | undefined => {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (!event || event.id <= afterEventId) break;
+    if (event.type === 'hit' && event.targetId === targetId) return event;
+  }
+  return undefined;
+};
 
 /**
  * Converts an authoritative world-space damage source into a clockwise HUD

@@ -187,10 +187,11 @@ const canSeePlayer = (
   target: PlayerState,
   profile: DifficultyProfile,
   hasLineOfSight: LineOfSightTest,
+  observerEye: Vec3 = eyePosition(observer),
 ): boolean =>
   distance(observer.position, target.position) <= profile.visionRange &&
   isInView(observer, target.position, profile) &&
-  hasLineOfSight(eyePosition(observer), eyePosition(target));
+  hasLineOfSight(observerEye, eyePosition(target));
 
 const targetPriority = (state: MatchState, observer: PlayerState, target: PlayerState, currentId: string | null): number => {
   let score = distance(observer.position, target.position);
@@ -210,6 +211,8 @@ const acquireVisibleTarget = (
   profile: DifficultyProfile,
   hasLineOfSight: LineOfSightTest,
   players: readonly PlayerState[] = orderedPlayers(state),
+  observerEye: Vec3 = eyePosition(observer),
+  knownVisibleTarget: PlayerState | null = null,
 ): PlayerState | null => {
   let best: PlayerState | null = null;
   let bestScore = Number.POSITIVE_INFINITY;
@@ -226,7 +229,7 @@ const acquireVisibleTarget = (
       attacker?.alive &&
       isEnemy(state, observer, attacker) &&
       distance(observer.position, attacker.position) <= profile.visionRange &&
-      hasLineOfSight(eyePosition(observer), eyePosition(attacker))
+      hasLineOfSight(observerEye, eyePosition(attacker))
     ) {
       best = attacker;
       bestScore = targetPriority(state, observer, attacker, observer.bot?.targetId ?? null) - 14;
@@ -235,7 +238,10 @@ const acquireVisibleTarget = (
   }
 
   for (const candidate of players) {
-    if (!isEnemy(state, observer, candidate) || !canSeePlayer(observer, candidate, profile, hasLineOfSight)) continue;
+    if (
+      !isEnemy(state, observer, candidate)
+      || (candidate !== knownVisibleTarget && !canSeePlayer(observer, candidate, profile, hasLineOfSight, observerEye))
+    ) continue;
     const score = targetPriority(state, observer, candidate, observer.bot?.targetId ?? null);
     if (score < bestScore) {
       best = candidate;
@@ -1066,13 +1072,24 @@ const updatePerception = (
   players: readonly PlayerState[],
 ): PlayerState | null => {
   const memory = player.bot!;
+  const observerEye = eyePosition(player);
   const previous = memory.targetId ? state.players[memory.targetId] : undefined;
   const previousVisible = previous?.alive && isEnemy(state, player, previous)
-    ? canSeePlayer(player, previous, profile, hasLineOfSight)
+    ? canSeePlayer(player, previous, profile, hasLineOfSight, observerEye)
     : false;
 
   let target = previousVisible ? previous ?? null : null;
-  if (decisionDue) target = acquireVisibleTarget(state, player, profile, hasLineOfSight, players) ?? target;
+  if (decisionDue) {
+    target = acquireVisibleTarget(
+      state,
+      player,
+      profile,
+      hasLineOfSight,
+      players,
+      observerEye,
+      previousVisible ? previous ?? null : null,
+    ) ?? target;
+  }
 
   if (target) {
     const hadRecentSight = state.elapsed - memory.lastSeenAt <= Math.max(0.05, profile.decisionInterval * 1.5);

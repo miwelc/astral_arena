@@ -5,7 +5,7 @@ import { isJumpPad } from '../game/map';
 import { distance, emptyInput } from '../game/math';
 import { createDefaultConfig, GameSimulation } from '../game/simulation';
 import type { MapDefinition, MatchState, PlayerInput, PlayerState, Vec3 } from '../game/types';
-import { LocalPlayerPrediction } from './LocalPlayerPrediction';
+import { clonePlayerStateForPrediction, LocalPlayerPrediction } from './LocalPlayerPrediction';
 
 const STEP = 1 / 60;
 const TEST_NOW = 1_700_000_400_000;
@@ -79,6 +79,71 @@ beforeEach(() => vi.spyOn(Date, 'now').mockReturnValue(TEST_NOW));
 afterEach(() => vi.restoreAllMocks());
 
 describe('LocalPlayerPrediction', () => {
+  it('deep-clones every nested player field used by current state', () => {
+    const simulation = new GameSimulation(
+      createDefaultConfig({ mode: 'deathmatch', botFill: true, playerCount: 2 }),
+      [{ id: 'human', name: 'Human', kind: 'human' }],
+    );
+    const source = Object.values(simulation.state.players).find((player) => player.bot);
+    if (!source?.bot) throw new Error('Missing bot fixture');
+    source.movementMemory.jumpPadMomentum = {
+      direction: { x: 0.4, y: 0, z: -0.8 },
+      minimumSpeed: 3.2,
+    };
+    source.bot.lastSeenPosition = { x: 1, y: 2, z: 3 };
+    source.bot.radarContactPosition = { x: 4, y: 5, z: 6 };
+    source.bot.navigationRoute = [1, 3, 5];
+    source.bot.lastPosition = { x: 7, y: 8, z: 9 };
+    source.bot.pickupBlacklist = [{ pickupId: 'pickup-a', retryAt: 12 }];
+    const expected = structuredClone(source);
+
+    const clone = clonePlayerStateForPrediction(source);
+
+    expect(clone).toEqual(expected);
+    expect(clone.position).not.toBe(source.position);
+    expect(clone.velocity).not.toBe(source.velocity);
+    expect(clone.inventory).not.toBe(source.inventory);
+    for (let index = 0; index < source.inventory.length; index += 1) {
+      expect(clone.inventory[index]).not.toBe(source.inventory[index]);
+    }
+    expect(clone.input).not.toBe(source.input);
+    expect(clone.movementMemory).not.toBe(source.movementMemory);
+    expect(clone.movementMemory.jumpPadMomentum).not.toBe(source.movementMemory.jumpPadMomentum);
+    expect(clone.movementMemory.jumpPadMomentum?.direction)
+      .not.toBe(source.movementMemory.jumpPadMomentum?.direction);
+    expect(clone.bot).not.toBe(source.bot);
+    expect(clone.bot?.lastSeenPosition).not.toBe(source.bot.lastSeenPosition);
+    expect(clone.bot?.radarContactPosition).not.toBe(source.bot.radarContactPosition);
+    expect(clone.bot?.navigationRoute).not.toBe(source.bot.navigationRoute);
+    expect(clone.bot?.aimError).not.toBe(source.bot.aimError);
+    expect(clone.bot?.lastPosition).not.toBe(source.bot.lastPosition);
+    expect(clone.bot?.pickupBlacklist).not.toBe(source.bot.pickupBlacklist);
+    expect(clone.bot?.pickupBlacklist[0]).not.toBe(source.bot.pickupBlacklist[0]);
+
+    clone.position.x += 10;
+    clone.velocity.y += 10;
+    clone.inventory[0]!.magazine += 10;
+    clone.input.fire = !clone.input.fire;
+    clone.movementMemory.jumpPadMomentum!.direction.z += 10;
+    clone.bot!.lastSeenPosition!.x += 10;
+    clone.bot!.radarContactPosition!.y += 10;
+    clone.bot!.navigationRoute[0] = 99;
+    clone.bot!.aimError.z += 10;
+    clone.bot!.lastPosition!.x += 10;
+    clone.bot!.pickupBlacklist[0]!.retryAt += 10;
+    expect(source).toEqual(expected);
+
+    // Validation accepts snapshots from the transitional bot-memory shape with
+    // these fields absent. The explicit clone must retain that exact shape too.
+    const legacyShape = structuredClone(source);
+    const legacyBot = legacyShape.bot as unknown as Record<string, unknown>;
+    delete legacyBot.radarContactPosition;
+    delete legacyBot.navigationRoute;
+    delete legacyBot.navigationCursor;
+    delete legacyBot.navigationGoalIndex;
+    expect(clonePlayerStateForPrediction(legacyShape)).toEqual(structuredClone(legacyShape));
+  });
+
   it('moves the local presentation immediately without waiting for a host snapshot', () => {
     const host = createHost();
     const authoritative = host.snapshot();

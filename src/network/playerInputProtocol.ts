@@ -18,11 +18,15 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 /** Strict runtime boundary shared by host input and snapshot validation. */
 export const isValidPlayerInput = (value: unknown): value is PlayerInput => {
   if (!isRecord(value)) return false;
-  return Number.isSafeInteger(value.sequence)
+  if (!(Number.isSafeInteger(value.sequence)
     && (value.sequence as number) >= 0
     && typeof value.moveX === 'number' && Number.isFinite(value.moveX) && Math.abs(value.moveX) <= 1
     && typeof value.moveZ === 'number' && Number.isFinite(value.moveZ) && Math.abs(value.moveZ) <= 1
     && typeof value.yaw === 'number' && Number.isFinite(value.yaw) && Math.abs(value.yaw) <= Math.PI + 0.001
     && typeof value.pitch === 'number' && Number.isFinite(value.pitch) && Math.abs(value.pitch) <= PLAYER_PITCH_LIMIT + 0.001
-    && DIGITAL_INPUT_KEYS.every((key) => typeof value[key] === 'boolean');
+  )) return false;
+  for (const key of DIGITAL_INPUT_KEYS) {
+    if (typeof value[key] !== 'boolean') return false;
+  }
+  return true;
 };

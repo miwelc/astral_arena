@@ -1,5 +1,5 @@
 import { MAPS, TOWER_TURRET_LAYOUT } from '../game/map';
-import { clamp, distance, moveAngleToward, vec3 } from '../game/math';
+import { clamp, moveAngleToward, vec3 } from '../game/math';
 import {
   advancePlayerMovement,
   STANDING_PLAYER_HEIGHT,
@@ -23,6 +23,47 @@ interface PendingInput {
   input: PlayerInput;
   dt: number;
 }
+
+/**
+ * Prediction mutates only the pose, input and movement memory, but retaining an
+ * independent inventory/bot graph keeps this a drop-in replacement for the
+ * previous structured clone if prediction grows to cover more state later.
+ */
+export const clonePlayerStateForPrediction = (player: PlayerState): PlayerState => ({
+  ...player,
+  position: { ...player.position },
+  velocity: { ...player.velocity },
+  inventory: player.inventory.map((weapon) => ({ ...weapon })),
+  input: { ...player.input },
+  movementMemory: {
+    ...player.movementMemory,
+    jumpPadMomentum: player.movementMemory.jumpPadMomentum
+      ? {
+          ...player.movementMemory.jumpPadMomentum,
+          direction: { ...player.movementMemory.jumpPadMomentum.direction },
+        }
+      : null,
+  },
+  ...(player.bot
+    ? {
+        bot: {
+          ...player.bot,
+          ...(player.bot.lastSeenPosition
+            ? { lastSeenPosition: { ...player.bot.lastSeenPosition } }
+            : {}),
+          ...(player.bot.radarContactPosition
+            ? { radarContactPosition: { ...player.bot.radarContactPosition } }
+            : {}),
+          ...(player.bot.navigationRoute
+            ? { navigationRoute: [...player.bot.navigationRoute] }
+            : {}),
+          aimError: { ...player.bot.aimError },
+          ...(player.bot.lastPosition ? { lastPosition: { ...player.bot.lastPosition } } : {}),
+          pickupBlacklist: player.bot.pickupBlacklist.map((entry) => ({ ...entry })),
+        },
+      }
+    : {}),
+});
 
 /**
  * Predicts only the locally controlled guest's movement.
@@ -78,8 +119,15 @@ export class LocalPlayerPrediction {
   public observeEdge(state: MatchState, playerId: string, input: PlayerInput): void {
     this.ensureInitialized(state, playerId);
     const previous = this.queuedTransitions.at(-1) ?? this.previousInput;
-    const changed = !previous
-      || DIGITAL_INPUT_KEYS.some((key) => previous[key] !== input[key]);
+    let changed = previous === null;
+    if (previous) {
+      for (const key of DIGITAL_INPUT_KEYS) {
+        if (previous[key] !== input[key]) {
+          changed = true;
+          break;
+        }
+      }
+    }
     if (!changed) return;
     this.queuedTransitions.push({ ...input });
     if (this.queuedTransitions.length > MAX_QUEUED_TRANSITIONS) {
@@ -109,13 +157,15 @@ export class LocalPlayerPrediction {
 
     const sameMatch = this.matchId === state.matchId;
     const previousAlive = this.player?.alive ?? authoritative.alive;
-    const previouslyPresented = this.player
-      ? {
-          x: this.player.position.x + this.visualCorrection.x,
-          y: this.player.position.y + this.visualCorrection.y,
-          z: this.player.position.z + this.visualCorrection.z,
-        }
-      : { ...authoritative.position };
+    const previouslyPresentedX = this.player
+      ? this.player.position.x + this.visualCorrection.x
+      : authoritative.position.x;
+    const previouslyPresentedY = this.player
+      ? this.player.position.y + this.visualCorrection.y
+      : authoritative.position.y;
+    const previouslyPresentedZ = this.player
+      ? this.player.position.z + this.visualCorrection.z
+      : authoritative.position.z;
 
     if (!sameMatch || !previousAlive || !authoritative.alive) {
       this.pending.length = 0;
@@ -135,8 +185,8 @@ export class LocalPlayerPrediction {
     }
 
     this.matchId = state.matchId;
-    this.player = structuredClone(authoritative);
-    this.previousInput = { ...authoritative.input };
+    this.player = clonePlayerStateForPrediction(authoritative);
+    this.previousInput = this.player.input;
 
     let replayElapsed = 0;
     for (const command of this.pending) {
@@ -144,14 +194,19 @@ export class LocalPlayerPrediction {
       replayElapsed += command.dt;
     }
 
-    const correctionDistance = distance(previouslyPresented, this.player.position);
+    const correctionX = previouslyPresentedX - this.player.position.x;
+    const correctionY = previouslyPresentedY - this.player.position.y;
+    const correctionZ = previouslyPresentedZ - this.player.position.z;
+    const correctionDistance = Math.sqrt(
+      correctionX * correctionX + correctionY * correctionY + correctionZ * correctionZ,
+    );
     const shouldSmooth = sameMatch
       && previousAlive
       && authoritative.alive
       && correctionDistance <= SNAP_CORRECTION_DISTANCE;
-    this.visualCorrection.x = shouldSmooth ? previouslyPresented.x - this.player.position.x : 0;
-    this.visualCorrection.y = shouldSmooth ? previouslyPresented.y - this.player.position.y : 0;
-    this.visualCorrection.z = shouldSmooth ? previouslyPresented.z - this.player.position.z : 0;
+    this.visualCorrection.x = shouldSmooth ? correctionX : 0;
+    this.visualCorrection.y = shouldSmooth ? correctionY : 0;
+    this.visualCorrection.z = shouldSmooth ? correctionZ : 0;
   }
 
   /** Publishes the predicted pose into the render snapshot. */
@@ -188,8 +243,8 @@ export class LocalPlayerPrediction {
     const authoritative = state.players[playerId];
     if (!authoritative) return;
     this.matchId = state.matchId;
-    this.player = structuredClone(authoritative);
-    this.previousInput = { ...authoritative.input };
+    this.player = clonePlayerStateForPrediction(authoritative);
+    this.previousInput = this.player.input;
     this.pending.length = 0;
     this.queuedTransitions.length = 0;
     this.visualCorrection.x = 0;

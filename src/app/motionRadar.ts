@@ -43,21 +43,20 @@ export const DEFAULT_MOTION_RADAR_OPTIONS = Object.freeze({
   revealAfterShotSeconds: 0.8,
 });
 
+const EMPTY_MOTION_RADAR_OPTIONS: MotionRadarOptions = Object.freeze({});
+
 const clamp = (value: number, minimum: number, maximum: number): number =>
   Math.min(maximum, Math.max(minimum, value));
 
 const finiteOr = (value: number | undefined, fallback: number): number =>
   value !== undefined && Number.isFinite(value) ? value : fallback;
 
-const isTeamMode = (state: MatchState): boolean =>
-  isTeamGameMode(state.config.mode);
-
 const relationToLocal = (
-  state: MatchState,
+  teamMode: boolean,
   local: PlayerState,
   target: PlayerState,
 ): MotionRadarRelation =>
-  isTeamMode(state) && local.team !== 'neutral' && target.team === local.team ? 'ally' : 'enemy';
+  teamMode && local.team !== 'neutral' && target.team === local.team ? 'ally' : 'enemy';
 
 /**
  * Produces presentation-ready movement contacts in local-player radar space.
@@ -69,7 +68,7 @@ const relationToLocal = (
 export const buildMotionRadarContacts = (
   state: MatchState,
   localPlayerId: string,
-  options: MotionRadarOptions = {},
+  options: MotionRadarOptions = EMPTY_MOTION_RADAR_OPTIONS,
 ): MotionRadarContact[] => {
   const local = state.players[localPlayerId];
   if (!local || !local.alive) return [];
@@ -93,39 +92,46 @@ export const buildMotionRadarContacts = (
     finiteOr(options.revealAfterShotSeconds, DEFAULT_MOTION_RADAR_OPTIONS.revealAfterShotSeconds),
   );
 
-  if (![local.position.x, local.position.y, local.position.z, local.yaw].every(Number.isFinite)) return [];
+  if (
+    !Number.isFinite(local.position.x)
+    || !Number.isFinite(local.position.y)
+    || !Number.isFinite(local.position.z)
+    || !Number.isFinite(local.yaw)
+  ) return [];
 
-  const recentlyFiring = new Set(state.events
-    .filter((event) =>
+  let recentlyFiring: Set<string> | null = null;
+  for (const event of state.events) {
+    if (
       event.type === 'shot'
       && event.actorId
       && state.elapsed >= event.time
-      && state.elapsed - event.time <= revealAfterShotSeconds,
-    )
-    .map((event) => event.actorId as string));
+      && state.elapsed - event.time <= revealAfterShotSeconds
+    ) (recentlyFiring ??= new Set<string>()).add(event.actorId);
+  }
   const forwardX = -Math.sin(local.yaw);
   const forwardZ = -Math.cos(local.yaw);
   const rightX = Math.cos(local.yaw);
   const rightZ = -Math.sin(local.yaw);
+  const teamMode = isTeamGameMode(state.config.mode);
   const contacts: MotionRadarContact[] = [];
 
-  for (const target of Object.values(state.players)) {
+  for (const targetId in state.players) {
+    const target = state.players[targetId];
+    if (!target) continue;
     if (target.id === local.id || !target.alive) continue;
     if (
-      ![
-        target.position.x,
-        target.position.y,
-        target.position.z,
-        target.velocity.x,
-        target.velocity.y,
-        target.velocity.z,
-      ].every(Number.isFinite)
+      !Number.isFinite(target.position.x)
+      || !Number.isFinite(target.position.y)
+      || !Number.isFinite(target.position.z)
+      || !Number.isFinite(target.velocity.x)
+      || !Number.isFinite(target.velocity.y)
+      || !Number.isFinite(target.velocity.z)
     ) {
       continue;
     }
 
     const speed = Math.hypot(target.velocity.x, target.velocity.y, target.velocity.z);
-    const firedRecently = recentlyFiring.has(target.id);
+    const firedRecently = recentlyFiring?.has(target.id) ?? false;
     // Like Halo's motion tracker, a crouch-walking contact stays hidden. Firing
     // still reveals it briefly so stealth has a clear, readable counterplay.
     if (target.crouched && !firedRecently) continue;
@@ -160,7 +166,7 @@ export const buildMotionRadarContacts = (
       playerId: target.id,
       name: target.name,
       team: target.team,
-      relation: relationToLocal(state, local, target),
+      relation: relationToLocal(teamMode, local, target),
       elevation,
       x,
       y,

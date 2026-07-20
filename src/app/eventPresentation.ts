@@ -42,9 +42,16 @@ const playerName = (player: PlayerState | undefined, fallback = 'Astronauta'): s
 
 const playerNamedAtStart = (state: MatchState, message: string): PlayerState | undefined => {
   const normalizedMessage = normalized(message);
-  return Object.values(state.players)
-    .sort((left, right) => right.name.length - left.name.length)
-    .find((player) => normalizedMessage.startsWith(`${normalized(player.name)} `));
+  let match: PlayerState | undefined;
+  for (const playerId in state.players) {
+    const player = state.players[playerId];
+    if (
+      player
+      && (!match || player.name.length > match.name.length)
+      && normalizedMessage.startsWith(`${normalized(player.name)} `)
+    ) match = player;
+  }
+  return match;
 };
 
 const eventActor = (event: GameEvent, state: MatchState): PlayerState | undefined =>

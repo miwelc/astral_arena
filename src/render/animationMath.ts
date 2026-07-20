@@ -311,12 +311,17 @@ export const evaluateWeaponBob = (
 };
 
 /** Magazine/energy-cell manipulation with a long support-hand release. */
-export const evaluateReload = (progress: number): ActionPoseWeights => ({
-  lower: trianglePulse(progress, 0, 0.24, 1),
-  twist: trianglePulse(progress, 0.04, 0.31, 0.94),
-  part: trianglePulse(progress, 0.2, 0.49, 0.8),
-  hand: trianglePulse(progress, 0.09, 0.3, 0.89),
-});
+export const evaluateReload = (
+  progress: number,
+  out?: ActionPoseWeights,
+): ActionPoseWeights => {
+  const result = out ?? { lower: 0, twist: 0, part: 0, hand: 0 };
+  result.lower = trianglePulse(progress, 0, 0.24, 1);
+  result.twist = trianglePulse(progress, 0.04, 0.31, 0.94);
+  result.part = trianglePulse(progress, 0.2, 0.49, 0.8);
+  result.hand = trianglePulse(progress, 0.09, 0.3, 0.89);
+  return result;
+};
 
 /**
  * A pistol reload is deliberately staged instead of reusing the long-gun
@@ -327,61 +332,78 @@ export const evaluateReload = (progress: number): ActionPoseWeights => ({
 export const evaluateWeaponReload = (
   progress: number,
   weaponId: WeaponId | null,
+  out?: WeaponReloadPose,
 ): WeaponReloadPose => {
+  const result = out ?? {
+    action: { lower: 0, twist: 0, part: 0, hand: 0 },
+    magazineOffsetX: 0,
+    magazineOffsetY: 0,
+    magazineOffsetZ: 0,
+    magazineRoll: 0,
+    slideOffsetZ: 0,
+  };
   if (weaponId !== 'sidearm') {
-    const action = evaluateReload(progress);
-    return {
-      action,
-      magazineOffsetX: action.part > 0 ? -action.part * 0.06 : 0,
-      magazineOffsetY: action.part > 0 ? -action.part * 0.38 : 0,
-      magazineOffsetZ: 0,
-      magazineRoll: action.part * 0.18,
-      slideOffsetZ: 0,
-    };
+    const action = evaluateReload(progress, result.action);
+    result.magazineOffsetX = action.part > 0 ? -action.part * 0.06 : 0;
+    result.magazineOffsetY = action.part > 0 ? -action.part * 0.38 : 0;
+    result.magazineOffsetZ = 0;
+    result.magazineRoll = action.part * 0.18;
+    result.slideOffsetZ = 0;
+    return result;
   }
 
   const magazineDrop = smoothWindow(progress, 0.14, 0.34, 0.47, 0.68);
   const magazineSweep = trianglePulse(progress, 0.2, 0.43, 0.67);
   const slideRack = smoothWindow(progress, 0.7, 0.79, 0.81, 0.92);
-  const action: ActionPoseWeights = {
-    lower: smoothWindow(progress, 0, 0.2, 0.82, 1),
-    twist: smoothWindow(progress, 0.04, 0.24, 0.8, 0.97),
-    part: magazineDrop,
-    hand: smoothWindow(progress, 0.08, 0.27, 0.76, 0.95),
-  };
-
-  return {
-    action,
-    // The magazine follows the grip axis. In particular, it never receives a
-    // positive Z kick toward the camera, which was the conspicuous old jump.
-    magazineOffsetX: magazineSweep > 0 ? -magazineSweep * 0.035 : 0,
-    magazineOffsetY: magazineDrop > 0 ? -magazineDrop * 0.29 : 0,
-    magazineOffsetZ: 0,
-    magazineRoll: magazineSweep * 0.1,
-    slideOffsetZ: slideRack * 0.085,
-  };
+  result.action.lower = smoothWindow(progress, 0, 0.2, 0.82, 1);
+  result.action.twist = smoothWindow(progress, 0.04, 0.24, 0.8, 0.97);
+  result.action.part = magazineDrop;
+  result.action.hand = smoothWindow(progress, 0.08, 0.27, 0.76, 0.95);
+  // The magazine follows the grip axis. In particular, it never receives a
+  // positive Z kick toward the camera, which was the conspicuous old jump.
+  result.magazineOffsetX = magazineSweep > 0 ? -magazineSweep * 0.035 : 0;
+  result.magazineOffsetY = magazineDrop > 0 ? -magazineDrop * 0.29 : 0;
+  result.magazineOffsetZ = 0;
+  result.magazineRoll = magazineSweep * 0.1;
+  result.slideOffsetZ = slideRack * 0.085;
+  return result;
 };
 
 /** Fast down/up weapon swap; `part` peaks while the weapon is concealed. */
-export const evaluateSwap = (progress: number): ActionPoseWeights => ({
-  lower: trianglePulse(progress, 0, 0.48, 1),
-  twist: trianglePulse(progress, 0.04, 0.42, 0.96),
-  part: trianglePulse(progress, 0.16, 0.5, 0.84),
-  hand: trianglePulse(progress, 0.07, 0.37, 0.91),
-});
+export const evaluateSwap = (
+  progress: number,
+  out?: ActionPoseWeights,
+): ActionPoseWeights => {
+  const result = out ?? { lower: 0, twist: 0, part: 0, hand: 0 };
+  result.lower = trianglePulse(progress, 0, 0.48, 1);
+  result.twist = trianglePulse(progress, 0.04, 0.42, 0.96);
+  result.part = trianglePulse(progress, 0.16, 0.5, 0.84);
+  result.hand = trianglePulse(progress, 0.07, 0.37, 0.91);
+  return result;
+};
 
 /** Short wind-up and decisive forward strike, followed by a longer recovery. */
-export const evaluateMelee = (progress: number): ActionPoseWeights => ({
-  lower: trianglePulse(progress, 0, 0.2, 0.7),
-  twist: trianglePulse(progress, 0.04, 0.32, 0.92),
-  part: trianglePulse(progress, 0.18, 0.38, 0.64),
-  hand: trianglePulse(progress, 0, 0.34, 1),
-});
+export const evaluateMelee = (
+  progress: number,
+  out?: ActionPoseWeights,
+): ActionPoseWeights => {
+  const result = out ?? { lower: 0, twist: 0, part: 0, hand: 0 };
+  result.lower = trianglePulse(progress, 0, 0.2, 0.7);
+  result.twist = trianglePulse(progress, 0.04, 0.32, 0.92);
+  result.part = trianglePulse(progress, 0.18, 0.38, 0.64);
+  result.hand = trianglePulse(progress, 0, 0.34, 1);
+  return result;
+};
 
 /** Support-hand release and throw impulse with enough time for follow-through. */
-export const evaluateGrenade = (progress: number): ActionPoseWeights => ({
-  lower: trianglePulse(progress, 0, 0.27, 1),
-  twist: trianglePulse(progress, 0.06, 0.36, 0.93),
-  part: trianglePulse(progress, 0.2, 0.4, 0.68),
-  hand: trianglePulse(progress, 0.04, 0.29, 0.76),
-});
+export const evaluateGrenade = (
+  progress: number,
+  out?: ActionPoseWeights,
+): ActionPoseWeights => {
+  const result = out ?? { lower: 0, twist: 0, part: 0, hand: 0 };
+  result.lower = trianglePulse(progress, 0, 0.27, 1);
+  result.twist = trianglePulse(progress, 0.06, 0.36, 0.93);
+  result.part = trianglePulse(progress, 0.2, 0.4, 0.68);
+  result.hand = trianglePulse(progress, 0.04, 0.29, 0.76);
+  return result;
+};

@@ -5,10 +5,6 @@ import {
   add,
   clamp,
   directionFromAngles,
-  distance,
-  dot,
-  normalize,
-  subtract,
   vec3,
 } from '../game/math';
 import { canonicalFormatForMode, isTeamGameMode, rulesForMode } from '../game/modeRules';
@@ -39,7 +35,7 @@ import { LocalPlayerPrediction } from '../network/LocalPlayerPrediction';
 import { RemoteInputBuffer } from '../network/RemoteInputBuffer';
 import type { ArenaRenderer } from '../render/ArenaRenderer';
 import type { ExternalWeaponLoadReport } from '../render/externalWeaponModels';
-import { directionalDamagePresentation, selectCombatWarning } from './combatHud';
+import { directionalDamagePresentation, latestDamageEventAfter, selectCombatWarning } from './combatHud';
 import { presentGameEvents, selectAnnouncementCandidate, type EventPresentation } from './eventPresentation';
 import { interactionPromptFor } from './interactionPrompt';
 import { buildMotionRadarContacts } from './motionRadar';
@@ -89,6 +85,8 @@ const formatTime = (seconds: number): string => {
 const isTeamMode = (state: MatchState): boolean =>
   isTeamGameMode(state.config.mode);
 
+const NO_EVENT_PRESENTATIONS: readonly EventPresentation[] = Object.freeze([]);
+
 export class AstralArenaApp {
   private simulation: GameSimulation | null = null;
   private network: P2PNetwork<WireMessage> | null = null;
@@ -114,9 +112,13 @@ export class AstralArenaApp {
   private readonly localPlayerPrediction = new LocalPlayerPrediction();
   private readonly elementCache = new Map<string, Element>();
   private readonly markupCache = new WeakMap<HTMLElement, string>();
+  private readonly widthCache = new WeakMap<HTMLElement, number>();
+  private tacticalStateCache: MatchState | null = null;
+  private readonly tacticalPlayerCache = Object.create(null) as MatchState['players'];
   private guestName = 'Astronauta';
   private gameViewActive = false;
   private lastDamageEvent = 0;
+  private lastDamageScannedEvent = 0;
   private lastLocalGrounded: boolean | null = null;
   private lastLocalVerticalVelocity = 0;
   private sniperZoomLevel: 0 | 1 = 0;
@@ -129,7 +131,14 @@ export class AstralArenaApp {
   private lastInvalidSnapshotAt = Number.NEGATIVE_INFINITY;
   private damageHudTimer = 0;
   private toastTimer = 0;
-  private eventFeedKey = '';
+  private eventFeedSequence = -1;
+  private eventFeedFirstId = -1;
+  private eventFeedLength = -1;
+  private eventFeedPlayerCount = -1;
+  private interactionPromptAction = '';
+  private interactionPromptLabel = '';
+  private interactionPromptDetail = '';
+  private displayedTimeSeconds = -1;
   private externalWeaponPreload: Promise<ExternalWeaponLoadReport> | null = null;
   private sessionGeneration = 0;
 
@@ -601,6 +610,10 @@ export class AstralArenaApp {
     this.lastFrameErrorAt = 0;
     this.lastLocalGrounded = null;
     this.lastLocalVerticalVelocity = 0;
+    this.displayedTimeSeconds = -1;
+    this.interactionPromptAction = '';
+    this.interactionPromptLabel = '';
+    this.interactionPromptDetail = '';
     const loadingIndicator = this.root.querySelector<HTMLElement>('.status-light');
     if (loadingIndicator) loadingIndicator.textContent = 'PREPARANDO EQUIPO';
     let prepared: [typeof import('../render/ArenaRenderer'), ExternalWeaponLoadReport];
@@ -772,7 +785,10 @@ export class AstralArenaApp {
       }
       const hostConnected = this.network.isPeerConnected('host');
       while (this.accumulator >= fixed) {
-        const input = { ...sampledInput, sequence: ++this.inputSequence };
+        const sequence = ++this.inputSequence;
+        const input = sequence === sampledInput.sequence
+          ? sampledInput
+          : { ...sampledInput, sequence };
         this.lastInput = input;
         if (this.currentState) {
           this.localPlayerPrediction.advance(this.currentState, this.localPlayerId, input, fixed);
@@ -844,12 +860,13 @@ export class AstralArenaApp {
     this.setText('#shield-value', player.maxShield === 0 ? 'OFF' : String(Math.ceil(player.shield)));
     this.setText('#health-value', String(Math.max(0, Math.ceil(player.health))));
     this.setText('#grenade-value', String(player.grenades));
-    this.query('#shield-block')?.classList.toggle('disabled', player.maxShield === 0);
+    const shieldBlock = this.query<HTMLElement>('#shield-block');
+    shieldBlock?.classList.toggle('disabled', player.maxShield === 0);
     const shieldRecharging = player.alive
       && player.maxShield > 0
       && player.shield < player.maxShield
       && state.elapsed - player.lastDamageAt >= 5;
-    this.query('#shield-block')?.classList.toggle('recharging', shieldRecharging);
+    shieldBlock?.classList.toggle('recharging', shieldRecharging);
     if (operatingTurret) {
       this.setText('#weapon-name', 'Torreta M41');
       this.setText('#weapon-role', 'EMPLAZAMIENTO CONECTADO');
@@ -863,7 +880,11 @@ export class AstralArenaApp {
       this.setText('#ammo-reserve', String(weapon.reserve));
       this.setText('#reload-state', weapon.reloadTimer > 0 ? `RECARGANDO ${weapon.reloadTimer.toFixed(1)}` : '');
     }
-    this.setText('#match-time', formatTime(state.timeRemaining));
+    const displayedTimeSeconds = Math.max(0, Math.ceil(state.timeRemaining));
+    if (displayedTimeSeconds !== this.displayedTimeSeconds) {
+      this.displayedTimeSeconds = displayedTimeSeconds;
+      this.setText('#match-time', formatTime(displayedTimeSeconds));
+    }
     this.setText('#ping-value', this.role === 'guest' && this.networkStatus === 'connected' ? `${this.latency} MS` : '');
     if (this.role === 'guest') this.setText('#net-state', this.networkStatus === 'connected' ? 'P2P' : this.networkStatus === 'lost' ? 'SIN HOST' : 'RECONECTANDO');
     const sniperScoped = opticalAimActive && weapon?.id === 'sniper';
@@ -906,12 +927,16 @@ export class AstralArenaApp {
     this.query('.hud-bottom-right')?.classList.toggle('turret-active', operatingTurret);
     const turretHud = this.query<HTMLElement>('#turret-hud');
     turretHud?.classList.toggle('active', operatingTurret);
-    turretHud?.setAttribute('aria-hidden', String(!operatingTurret));
+    const turretHidden = String(!operatingTurret);
+    if (turretHud && turretHud.getAttribute('aria-hidden') !== turretHidden) {
+      turretHud.setAttribute('aria-hidden', turretHidden);
+    }
     this.updateInteractionPrompt(state, player);
     this.setText('#scope-zoom', this.sniperZoomLevel === 0 ? '5×' : '10×');
     const radar = this.query<HTMLElement>('#motion-radar');
     radar?.classList.toggle('zoom-hidden', opticalAimActive);
-    radar?.setAttribute('aria-hidden', String(opticalAimActive));
+    const radarHidden = String(opticalAimActive);
+    if (radar && radar.getAttribute('aria-hidden') !== radarHidden) radar.setAttribute('aria-hidden', radarHidden);
     const hudNow = performance.now();
     if (hudNow >= this.nextTacticalHudAt) {
       const tacticalState = this.presentedTacticalState(state);
@@ -951,7 +976,10 @@ export class AstralArenaApp {
 
     const countdown = this.query<HTMLElement>('#countdown');
     if (countdown) {
-      countdown.textContent = state.phase === 'countdown' ? (state.countdown > 0.35 ? String(Math.ceil(state.countdown)) : 'COMBATE') : '';
+      const countdownText = state.phase === 'countdown'
+        ? (state.countdown > 0.35 ? String(Math.ceil(state.countdown)) : 'COMBATE')
+        : '';
+      if (countdown.textContent !== countdownText) countdown.textContent = countdownText;
       countdown.classList.toggle('visible', state.phase === 'countdown');
     }
     const death = this.query<HTMLElement>('#death-state');
@@ -962,28 +990,25 @@ export class AstralArenaApp {
       );
     }
 
-    let damage: MatchState['events'][number] | undefined;
-    for (let index = state.events.length - 1; index >= 0; index -= 1) {
-      const event = state.events[index];
-      if (event?.type === 'hit' && event.targetId === player.id) {
-        damage = event;
-        break;
-      }
-    }
-    if (damage && damage.id > this.lastDamageEvent) {
-      this.lastDamageEvent = damage.id;
-      const damageHud = this.query<HTMLElement>('#damage-hud');
-      if (damageHud) {
-        const presentation = directionalDamagePresentation(damage, player);
-        damageHud.style.setProperty('--damage-strength', presentation.strength.toFixed(2));
-        damageHud.style.setProperty('--damage-angle', `${presentation.angleDegrees.toFixed(1)}deg`);
-        damageHud.classList.toggle('shield-only', presentation.tone === 'shield');
-        damageHud.classList.toggle('health-hit', presentation.tone === 'health');
-        damageHud.classList.remove('active');
-        void damageHud.offsetWidth;
-        damageHud.classList.add('active');
-        window.clearTimeout(this.damageHudTimer);
-        this.damageHudTimer = window.setTimeout(() => damageHud.classList.remove('active'), 760);
+    const newestDamageCandidate = state.events.at(-1);
+    if (newestDamageCandidate && newestDamageCandidate.id > this.lastDamageScannedEvent) {
+      const damage = latestDamageEventAfter(state.events, player.id, this.lastDamageScannedEvent);
+      this.lastDamageScannedEvent = newestDamageCandidate.id;
+      if (damage && damage.id > this.lastDamageEvent) {
+        this.lastDamageEvent = damage.id;
+        const damageHud = this.query<HTMLElement>('#damage-hud');
+        if (damageHud) {
+          const presentation = directionalDamagePresentation(damage, player);
+          damageHud.style.setProperty('--damage-strength', presentation.strength.toFixed(2));
+          damageHud.style.setProperty('--damage-angle', `${presentation.angleDegrees.toFixed(1)}deg`);
+          damageHud.classList.toggle('shield-only', presentation.tone === 'shield');
+          damageHud.classList.toggle('health-hit', presentation.tone === 'health');
+          damageHud.classList.remove('active');
+          void damageHud.offsetWidth;
+          damageHud.classList.add('active');
+          window.clearTimeout(this.damageHudTimer);
+          this.damageHudTimer = window.setTimeout(() => damageHud.classList.remove('active'), 760);
+        }
       }
     }
 
@@ -1000,14 +1025,37 @@ export class AstralArenaApp {
 
   private presentedTacticalState(state: MatchState): MatchState {
     if (!this.renderer) return state;
+    if (this.tacticalStateCache?.matchId !== state.matchId) {
+      this.tacticalStateCache = null;
+      for (const id in this.tacticalPlayerCache) delete this.tacticalPlayerCache[id];
+    }
+
     let changed = false;
-    const players = Object.fromEntries(Object.entries(state.players).map(([id, player]) => {
-      const presented = this.renderer?.getPresentedPlayerPosition(id);
-      if (!presented) return [id, player];
-      changed = true;
-      return [id, { ...player, position: presented }];
-    }));
-    return changed ? { ...state, players } : state;
+    for (const id in state.players) {
+      const player = state.players[id];
+      if (!player) continue;
+      const presented = this.renderer.getPresentedPlayerPosition(id);
+      changed ||= presented !== null;
+      let tacticalPlayer = this.tacticalPlayerCache[id];
+      if (!tacticalPlayer) {
+        tacticalPlayer = { ...player, position: presented ?? player.position };
+        this.tacticalPlayerCache[id] = tacticalPlayer;
+      } else {
+        Object.assign(tacticalPlayer, player);
+        tacticalPlayer.position = presented ?? player.position;
+        // Object.assign intentionally retains absent optional properties.
+        if (player.bot === undefined) delete tacticalPlayer.bot;
+      }
+    }
+    for (const id in this.tacticalPlayerCache) {
+      if (!Object.hasOwn(state.players, id)) delete this.tacticalPlayerCache[id];
+    }
+    if (!changed) return state;
+
+    if (this.tacticalStateCache) Object.assign(this.tacticalStateCache, state);
+    else this.tacticalStateCache = { ...state, players: this.tacticalPlayerCache };
+    this.tacticalStateCache.players = this.tacticalPlayerCache;
+    return this.tacticalStateCache;
   }
 
   private updateCombatIdentification(
@@ -1028,6 +1076,7 @@ export class AstralArenaApp {
       : add(player.position, vec3(0, 1.5, 0));
     const aimDirection = directionFromAngles(player.yaw, player.pitch);
     const map = MAPS[state.config.mapId];
+    const teamMode = isTeamMode(state);
     const hit = raycastWorld(
       origin,
       aimDirection,
@@ -1044,14 +1093,27 @@ export class AstralArenaApp {
       const assistRange = Math.min(weaponRange, definition?.magnetismRange ?? 0);
       let bestAngle = angleLimit;
       if (angleLimit > 0 && assistRange > 0) {
+        const targetPoint = vec3();
         for (const candidate of Object.values(state.players)) {
           if (!candidate.alive || candidate.id === player.id) continue;
-          const enemy = !isTeamMode(state) || candidate.team !== player.team;
+          const enemy = !teamMode || candidate.team !== player.team;
           if (!enemy) continue;
-          const targetPoint = add(candidate.position, vec3(0, candidate.height * 0.62, 0));
-          if (distance(origin, targetPoint) > assistRange || !hasLineOfSight(origin, targetPoint, map)) continue;
-          const candidateDirection = normalize(subtract(targetPoint, origin));
-          const angle = Math.acos(clamp(dot(aimDirection, candidateDirection), -1, 1));
+          targetPoint.x = candidate.position.x;
+          targetPoint.y = candidate.position.y + candidate.height * 0.62;
+          targetPoint.z = candidate.position.z;
+          const deltaX = targetPoint.x - origin.x;
+          const deltaY = targetPoint.y - origin.y;
+          const deltaZ = targetPoint.z - origin.z;
+          const targetDistance = Math.sqrt(deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ);
+          if (targetDistance > assistRange || !hasLineOfSight(origin, targetPoint, map)) continue;
+          const aimDot = targetDistance < 0.00001
+            ? 0
+            : (
+                aimDirection.x * deltaX
+                + aimDirection.y * deltaY
+                + aimDirection.z * deltaZ
+              ) / targetDistance;
+          const angle = Math.acos(clamp(aimDot, -1, 1));
           if (angle >= bestAngle) continue;
           bestAngle = angle;
           target = candidate;
@@ -1059,7 +1121,7 @@ export class AstralArenaApp {
       }
     }
     if (!target) return;
-    const relation = isTeamMode(state) && target.team === player.team ? 'ally' : 'enemy';
+    const relation = teamMode && target.team === player.team ? 'ally' : 'enemy';
     crosshair?.classList.add(relation);
     scope?.classList.add(relation);
   }
@@ -1068,6 +1130,17 @@ export class AstralArenaApp {
     const element = this.query<HTMLElement>('#interaction-prompt');
     if (!element) return;
     const prompt = interactionPromptFor(state, player);
+    const action = prompt?.action ?? '';
+    const label = prompt?.label ?? '';
+    const detail = prompt?.detail ?? '';
+    if (
+      action === this.interactionPromptAction
+      && label === this.interactionPromptLabel
+      && detail === this.interactionPromptDetail
+    ) return;
+    this.interactionPromptAction = action;
+    this.interactionPromptLabel = label;
+    this.interactionPromptDetail = detail;
     element.classList.toggle('visible', prompt !== null);
     element.classList.toggle('turret-action', prompt?.action === 'enter-turret' || prompt?.action === 'exit-turret');
     if (!prompt) {
@@ -1083,23 +1156,32 @@ export class AstralArenaApp {
     const contacts = buildMotionRadarContacts(state, this.localPlayerId);
     const blips = this.query<HTMLElement>('#radar-blips');
     if (blips) {
-      const markup = contacts.map((contact) => {
+      let markup = '';
+      for (const contact of contacts) {
         const left = 50 + contact.x * 44;
         const top = 50 + contact.y * 44;
-        return `<i class="radar-blip ${contact.relation} ${contact.elevation} ${contact.revealedBy}" style="left:${left.toFixed(2)}%;top:${top.toFixed(2)}%;opacity:${contact.opacity.toFixed(2)}" title="${escapeHtml(contact.name)}"></i>`;
-      }).join('');
+        markup += `<i class="radar-blip ${contact.relation} ${contact.elevation} ${contact.revealedBy}" style="left:${left.toFixed(2)}%;top:${top.toFixed(2)}%;opacity:${contact.opacity.toFixed(2)}" title="${escapeHtml(contact.name)}"></i>`;
+      }
       this.setMarkup(blips, markup);
     }
     const local = state.players[this.localPlayerId];
-    const moving = Boolean(local && !local.crouched && Math.hypot(local.velocity.x, local.velocity.y, local.velocity.z) >= 0.55);
+    const moving = Boolean(
+      local
+      && !local.crouched
+      && local.velocity.x * local.velocity.x
+        + local.velocity.y * local.velocity.y
+        + local.velocity.z * local.velocity.z >= 0.55 * 0.55,
+    );
     this.query('#motion-radar')?.classList.toggle('local-moving', moving);
   }
 
   private updateEventPresentation(state: MatchState): void {
     if (!this.localPlayerId) return;
     const now = performance.now();
-    const unseen = presentGameEvents(state.events, state, this.localPlayerId, this.lastPresentedEvent);
     const newestEvent = state.events.at(-1);
+    const unseen = newestEvent && newestEvent.id > this.lastPresentedEvent
+      ? presentGameEvents(state.events, state, this.localPlayerId, this.lastPresentedEvent)
+      : NO_EVENT_PRESENTATIONS;
     if (newestEvent) this.lastPresentedEvent = Math.max(this.lastPresentedEvent, newestEvent.id);
 
     let alertsChanged = false;
@@ -1187,9 +1269,16 @@ export class AstralArenaApp {
     for (const playerId in state.players) {
       if (Object.hasOwn(state.players, playerId)) playerCount += 1;
     }
-    const feedKey = `${state.eventSequence}:${firstEventId}:${state.events.length}:${playerCount}`;
-    if (feedKey !== this.eventFeedKey) {
-      this.eventFeedKey = feedKey;
+    if (
+      state.eventSequence !== this.eventFeedSequence
+      || firstEventId !== this.eventFeedFirstId
+      || state.events.length !== this.eventFeedLength
+      || playerCount !== this.eventFeedPlayerCount
+    ) {
+      this.eventFeedSequence = state.eventSequence;
+      this.eventFeedFirstId = firstEventId;
+      this.eventFeedLength = state.events.length;
+      this.eventFeedPlayerCount = playerCount;
       const allPresentations = presentGameEvents(state.events, state, this.localPlayerId, 0);
       const feedPresentations: EventPresentation[] = [];
       for (let index = allPresentations.length - 1; index >= 0 && feedPresentations.length < 5; index -= 1) {
@@ -1349,6 +1438,7 @@ export class AstralArenaApp {
     this.latency = 0;
     this.networkStatus = 'connecting';
     this.lastDamageEvent = 0;
+    this.lastDamageScannedEvent = 0;
     this.lastLocalGrounded = null;
     this.lastLocalVerticalVelocity = 0;
     this.sniperZoomLevel = 0;
@@ -1357,13 +1447,22 @@ export class AstralArenaApp {
     this.lastAnnouncement = { message: '', at: 0 };
     this.pendingAnnouncement = null;
     this.nextTacticalHudAt = 0;
-    this.eventFeedKey = '';
+    this.eventFeedSequence = -1;
+    this.eventFeedFirstId = -1;
+    this.eventFeedLength = -1;
+    this.eventFeedPlayerCount = -1;
+    this.interactionPromptAction = '';
+    this.interactionPromptLabel = '';
+    this.interactionPromptDetail = '';
+    this.displayedTimeSeconds = -1;
     this.lastFrameErrorAt = 0;
     window.clearTimeout(this.damageHudTimer);
     this.damageHudTimer = 0;
     window.clearTimeout(this.toastTimer);
     this.toastTimer = 0;
     this.elementCache.clear();
+    this.tacticalStateCache = null;
+    for (const id in this.tacticalPlayerCache) delete this.tacticalPlayerCache[id];
     if (document.pointerLockElement) document.exitPointerLock();
   }
 
@@ -1431,7 +1530,9 @@ export class AstralArenaApp {
 
   private query<T extends Element>(selector: string): T | null {
     const cached = this.elementCache.get(selector);
-    if (cached?.isConnected) return cached as T;
+    // Every internal root replacement clears this map first (or goes through
+    // destroySession), so a hit is valid for the lifetime of the current view.
+    if (cached) return cached as T;
     const element = this.root.querySelector<T>(selector);
     if (element) this.elementCache.set(selector, element);
     else this.elementCache.delete(selector);
@@ -1451,7 +1552,10 @@ export class AstralArenaApp {
 
   private setWidth(selector: string, percentage: number): void {
     const element = this.query<HTMLElement>(selector);
-    const width = `${clamp(percentage, 0, 100)}%`;
-    if (element && element.style.width !== width) element.style.width = width;
+    if (!element) return;
+    const clamped = clamp(percentage, 0, 100);
+    if (this.widthCache.get(element) === clamped) return;
+    this.widthCache.set(element, clamped);
+    element.style.width = `${clamped}%`;
   }
 }

@@ -101,22 +101,36 @@ export const evaluateSurfaceTint = (x: number, z: number, seed: number): Surface
 };
 
 /** Time profile for a bright initial detonation followed by fire, smoke and debris. */
-export const evaluateExplosionVisual = (progress: number): ExplosionVisualProfile => {
+export const evaluateExplosionVisual = (
+  progress: number,
+  out?: ExplosionVisualProfile,
+): ExplosionVisualProfile => {
   const value = saturate(progress);
   const flash = 1 - rangeStep(0.02, 0.2, value);
   const fireFade = 1 - rangeStep(0.1, 0.48, value);
   const smokeRise = rangeStep(0.06, 0.22, value);
   const smokeFade = 1 - rangeStep(0.68, 1, value);
-  return {
-    coreScale: 0.42 + easeOutCubic(value / 0.3) * 2.9,
-    coreOpacity: (1 - rangeStep(0.06, 0.34, value)) * 0.98,
-    fireballScale: 0.52 + easeOutCubic(value / 0.48) * 3.65,
-    fireballOpacity: fireFade * 0.68,
-    shockScale: 0.5 + easeOutCubic(value / 0.68) * 8.4,
-    shockOpacity: (1 - rangeStep(0.05, 0.62, value)) * 0.72,
-    smokeScale: 0.38 + easeOutCubic(value) * 4.6,
-    smokeOpacity: smokeRise * smokeFade * 0.36,
-    sparkOpacity: (1 - rangeStep(0.16, 0.82, value)) * 0.96,
-    lightIntensity: flash * 54 + fireFade * 13,
+  const result = out ?? {
+    coreScale: 0,
+    coreOpacity: 0,
+    fireballScale: 0,
+    fireballOpacity: 0,
+    shockScale: 0,
+    shockOpacity: 0,
+    smokeScale: 0,
+    smokeOpacity: 0,
+    sparkOpacity: 0,
+    lightIntensity: 0,
   };
+  result.coreScale = 0.42 + easeOutCubic(value / 0.3) * 2.9;
+  result.coreOpacity = (1 - rangeStep(0.06, 0.34, value)) * 0.98;
+  result.fireballScale = 0.52 + easeOutCubic(value / 0.48) * 3.65;
+  result.fireballOpacity = fireFade * 0.68;
+  result.shockScale = 0.5 + easeOutCubic(value / 0.68) * 8.4;
+  result.shockOpacity = (1 - rangeStep(0.05, 0.62, value)) * 0.72;
+  result.smokeScale = 0.38 + easeOutCubic(value) * 4.6;
+  result.smokeOpacity = smokeRise * smokeFade * 0.36;
+  result.sparkOpacity = (1 - rangeStep(0.16, 0.82, value)) * 0.96;
+  result.lightIntensity = flash * 54 + fireFade * 13;
+  return result;
 };

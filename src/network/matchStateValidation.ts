@@ -71,9 +71,9 @@ const isNullableIdentifier = (value: unknown): boolean =>
 
 const isVec3 = (value: unknown): boolean => {
   if (!isRecord(value)) return false;
-  return [value.x, value.y, value.z].every(
-    (coordinate) => isFiniteNumber(coordinate) && Math.abs(coordinate) <= MAX_WORLD_COORDINATE,
-  );
+  return isFiniteNumber(value.x) && Math.abs(value.x) <= MAX_WORLD_COORDINATE
+    && isFiniteNumber(value.y) && Math.abs(value.y) <= MAX_WORLD_COORDINATE
+    && isFiniteNumber(value.z) && Math.abs(value.z) <= MAX_WORLD_COORDINATE;
 };
 
 const isPlayerMovementMemory = (value: unknown): boolean => {
@@ -99,6 +99,7 @@ const isWeaponState = (value: unknown): boolean => {
 
 const isPickupBlacklist = (value: unknown): boolean => {
   if (!Array.isArray(value) || value.length > 4) return false;
+  if (value.length === 0) return true;
   const pickupIds = new Set<string>();
   for (const entry of value) {
     if (!isRecord(entry) || !isIdentifier(entry.pickupId) || !isNonNegativeNumber(entry.retryAt)) return false;
@@ -129,7 +130,9 @@ const isBotMemory = (value: unknown): boolean => {
       && value.navigationGoalIndex === undefined
     ) return true;
     if (!Array.isArray(value.navigationRoute) || value.navigationRoute.length > 128) return false;
-    if (!value.navigationRoute.every((entry) => isSafeNonNegativeInteger(entry) && entry < 512)) return false;
+    for (const entry of value.navigationRoute) {
+      if (!isSafeNonNegativeInteger(entry) || entry >= 512) return false;
+    }
     if (!isSafeNonNegativeInteger(value.navigationCursor)) return false;
     if (
       (value.navigationRoute.length === 0 && value.navigationCursor !== 0)
@@ -165,19 +168,22 @@ const isPlayerState = (value: unknown, recordId: string): boolean => {
   if (!isEnumValue(PLAYER_KINDS, value.kind) || !isEnumValue(TEAMS, value.team)) return false;
   if (!isVec3(value.position) || !isVec3(value.velocity)) return false;
 
-  const finiteFields = [value.yaw, value.pitch, value.radius, value.height, value.lastDamageAt];
-  const nonNegativeFields = [
-    value.health,
-    value.shield,
-    value.maxShield,
-    value.overshieldDecayDelay,
-    value.respawnTimer,
-    value.spawnProtection,
-    value.meleeCooldown,
-    value.grenadeCooldown,
-    value.equipTimer,
-  ];
-  if (!finiteFields.every(isFiniteNumber) || !nonNegativeFields.every(isNonNegativeNumber)) return false;
+  if (
+    !isFiniteNumber(value.yaw)
+    || !isFiniteNumber(value.pitch)
+    || !isFiniteNumber(value.radius)
+    || !isFiniteNumber(value.height)
+    || !isFiniteNumber(value.lastDamageAt)
+    || !isNonNegativeNumber(value.health)
+    || !isNonNegativeNumber(value.shield)
+    || !isNonNegativeNumber(value.maxShield)
+    || !isNonNegativeNumber(value.overshieldDecayDelay)
+    || !isNonNegativeNumber(value.respawnTimer)
+    || !isNonNegativeNumber(value.spawnProtection)
+    || !isNonNegativeNumber(value.meleeCooldown)
+    || !isNonNegativeNumber(value.grenadeCooldown)
+    || !isNonNegativeNumber(value.equipTimer)
+  ) return false;
   if (
     Math.abs(value.yaw as number) > Math.PI + 0.001
     || Math.abs(value.pitch as number) > PLAYER_PITCH_LIMIT + 0.001
@@ -192,16 +198,23 @@ const isPlayerState = (value: unknown, recordId: string): boolean => {
   if (Math.abs((value.height as number) - expectedHeight) > 0.001) return false;
 
   if (!Array.isArray(value.inventory) || value.inventory.length === 0 || value.inventory.length > 2) return false;
-  const weaponIds = new Set<string>();
+  let firstWeaponId: string | undefined;
   for (const weapon of value.inventory) {
-    if (!isWeaponState(weapon) || !isRecord(weapon) || weaponIds.has(weapon.id as string)) return false;
-    weaponIds.add(weapon.id as string);
+    if (!isWeaponState(weapon) || !isRecord(weapon)) return false;
+    const weaponId = weapon.id as string;
+    if (weaponId === firstWeaponId) return false;
+    firstWeaponId ??= weaponId;
   }
   if (!isSafeNonNegativeInteger(value.activeWeapon) || value.activeWeapon >= value.inventory.length) return false;
 
-  const integerFields = [value.grenades, value.lastProcessedInput, value.kills, value.deaths, value.assists, value.score, value.streak];
   if (
-    !integerFields.every(isSafeNonNegativeInteger)
+    !isSafeNonNegativeInteger(value.grenades)
+    || !isSafeNonNegativeInteger(value.lastProcessedInput)
+    || !isSafeNonNegativeInteger(value.kills)
+    || !isSafeNonNegativeInteger(value.deaths)
+    || !isSafeNonNegativeInteger(value.assists)
+    || !isSafeNonNegativeInteger(value.score)
+    || !isSafeNonNegativeInteger(value.streak)
     || !isValidPlayerInput(value.input)
     || !isPlayerMovementMemory(value.movementMemory)
   ) return false;
@@ -302,17 +315,19 @@ const isGameEvent = (value: unknown, elapsed: number, eventSequence: number): va
   if (!(value.position === undefined || isVec3(value.position))) return false;
   if (!(value.sourcePosition === undefined || isVec3(value.sourcePosition))) return false;
   if (!(value.impact === undefined || typeof value.impact === 'boolean')) return false;
-  if (!(value.traces === undefined || (
-    Array.isArray(value.traces)
-    && value.traces.length > 0
-    && value.traces.length <= 12
-    && value.traces.every(isVec3)
-  ))) return false;
+  if (value.traces !== undefined) {
+    if (!Array.isArray(value.traces) || value.traces.length === 0 || value.traces.length > 12) return false;
+    for (const trace of value.traces) {
+      if (!isVec3(trace)) return false;
+    }
+  }
   if (!(value.message === undefined || (typeof value.message === 'string' && value.message.length <= 512))) return false;
   if (!(value.amount === undefined || isNonNegativeNumber(value.amount))) return false;
   if (!(value.shieldDamage === undefined || isNonNegativeNumber(value.shieldDamage))) return false;
   if (!(value.healthDamage === undefined || isNonNegativeNumber(value.healthDamage))) return false;
-  if (![value.headshot, value.fatal, value.backStrike].every((flag) => flag === undefined || typeof flag === 'boolean')) return false;
+  if (!(value.headshot === undefined || typeof value.headshot === 'boolean')) return false;
+  if (!(value.fatal === undefined || typeof value.fatal === 'boolean')) return false;
+  if (!(value.backStrike === undefined || typeof value.backStrike === 'boolean')) return false;
   if (!(value.explosionKind === undefined || value.explosionKind === 'rocket' || value.explosionKind === 'grenade')) return false;
   if (!(value.radius === undefined || isNonNegativeNumber(value.radius))) return false;
   if ((value.explosionKind !== undefined || value.radius !== undefined) && value.type !== 'explosion') return false;
@@ -328,6 +343,7 @@ const hasUniqueValidItems = (
   validator: (value: unknown) => boolean,
 ): boolean => {
   if (values.length > maxLength) return false;
+  if (values.length === 0) return true;
   const ids = new Set<string>();
   for (const value of values) {
     if (!validator(value) || !isRecord(value) || !isIdentifier(value.id) || ids.has(value.id)) return false;
@@ -343,10 +359,12 @@ const validateMatchState = (value: unknown): boolean => {
   if (!isSafeNonNegativeInteger(value.randomState) || value.randomState > 0xffff_ffff) return false;
 
   if (!isRecord(value.players)) return false;
-  const playerIds = Object.keys(value.players);
   const config = value.config as UnknownRecord;
-  if (playerIds.length > MAX_PLAYERS || playerIds.length > (config.playerCount as number)) return false;
-  for (const playerId of playerIds) {
+  let playerCount = 0;
+  for (const playerId in value.players) {
+    if (!Object.hasOwn(value.players, playerId)) continue;
+    playerCount += 1;
+    if (playerCount > MAX_PLAYERS || playerCount > (config.playerCount as number)) return false;
     if (!isIdentifier(playerId) || !isPlayerState(value.players[playerId], playerId)) return false;
   }
 
@@ -355,9 +373,17 @@ const validateMatchState = (value: unknown): boolean => {
 
   if (!Array.isArray(value.projectiles) || !hasUniqueValidItems(value.projectiles, MAX_PROJECTILES, isProjectile)) return false;
   if (!Array.isArray(value.pickups) || !hasUniqueValidItems(value.pickups, MAX_PICKUPS, isPickup)) return false;
-  if (!Array.isArray(value.flags) || value.flags.length !== 2 || !value.flags.every(isFlag)) return false;
-  const flagTeams = new Set(value.flags.map((flag) => (flag as UnknownRecord).team));
-  if (flagTeams.size !== 2 || !flagTeams.has('aurora') || !flagTeams.has('nova')) return false;
+  if (!Array.isArray(value.flags) || value.flags.length !== 2) return false;
+  const firstFlag = value.flags[0];
+  const secondFlag = value.flags[1];
+  if (!isFlag(firstFlag) || !isFlag(secondFlag)) return false;
+  const firstFlagTeam = (firstFlag as UnknownRecord).team;
+  const secondFlagTeam = (secondFlag as UnknownRecord).team;
+  if (
+    firstFlagTeam === secondFlagTeam
+    || (firstFlagTeam !== 'aurora' && secondFlagTeam !== 'aurora')
+    || (firstFlagTeam !== 'nova' && secondFlagTeam !== 'nova')
+  ) return false;
   for (const flag of value.flags as UnknownRecord[]) {
     if (flag.carrierId !== null && value.players[flag.carrierId as string] === undefined) return false;
   }

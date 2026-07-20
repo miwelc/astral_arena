@@ -57,4 +57,23 @@ describe('visual presentation helpers', () => {
     expect(evaluateExplosionVisual(-3)).toEqual(evaluateExplosionVisual(0));
     expect(evaluateExplosionVisual(4)).toEqual(evaluateExplosionVisual(1));
   });
+
+  it('can reuse an explosion profile without changing the evaluated curve', () => {
+    const expected = evaluateExplosionVisual(0.38);
+    const out = {
+      coreScale: -1,
+      coreOpacity: -1,
+      fireballScale: -1,
+      fireballOpacity: -1,
+      shockScale: -1,
+      shockOpacity: -1,
+      smokeScale: -1,
+      smokeOpacity: -1,
+      sparkOpacity: -1,
+      lightIntensity: -1,
+    };
+
+    expect(evaluateExplosionVisual(0.38, out)).toBe(out);
+    expect(out).toEqual(expected);
+  });
 });

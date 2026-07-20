@@ -136,3 +136,29 @@ describe('P2PNetwork broadcast encoding', () => {
     }
   });
 });
+
+describe('P2PNetwork event dispatch', () => {
+  it('reuses stable listener snapshots without changing in-flight mutation semantics', () => {
+    const network = new P2PNetwork();
+    const calls: string[] = [];
+    const third = (): void => { calls.push('third'); };
+    let offSecond = (): void => undefined;
+    network.on('error', () => {
+      calls.push('first');
+      offSecond();
+      network.on('error', third);
+    });
+    offSecond = network.on('error', () => { calls.push('second'); });
+    const emit = (network as unknown as {
+      emit: (type: 'error', event: P2PErrorEvent) => void;
+    }).emit.bind(network);
+    const event = { error: new P2PNetworkError('CONNECTION_FAILED', 'test') };
+
+    emit('error', event);
+    expect(calls).toEqual(['first', 'second']);
+
+    calls.length = 0;
+    emit('error', event);
+    expect(calls).toEqual(['first', 'third']);
+  });
+});

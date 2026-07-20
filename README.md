@@ -21,7 +21,7 @@ El repositorio contiene una **primera vertical jugable completa**, no una versi�
 - animación procedural compartida entre primera y tercera persona: locomoción ligada a la distancia recorrida y diferenciada por dirección, respiración, salto, caída, aterrizaje, muerte/reaparición, retroceso, recarga, cambio de arma, cuerpo a cuerpo y lanzamiento de granada, con rodillas, pies, manos y piezas de arma móviles;
 - menús con formato canónico por modo, lobby manual P2P, HUD contextual para armas y torreta, radar de movimiento de 25 m, IFF aliado/enemigo, avisos contextuales, voz de objetivos, audio y pantalla de resultado integrados;
 - transporte WebRTC P2P nativo con señalización manual, mensajes tipados y un host con hasta siete invitados;
-- 366 pruebas automatizadas para combate, daño de precisión, ráfagas y balística, drops con munición, dispersión y retículas, transiciones de input P2P, agachado, movimiento, auto-step y deslizamiento por paredes, hitboxes, perfiles y objetivos de bots, radar, regeneración, snapshots P2P, navegación vertical, recorrido físico de rutas, relieve y arquitectura de ambos mapas, pads de salto, torreta, puntuación, determinismo, audio, animación, materiales y modelos de armamento externos.
+- 435 pruebas automatizadas para combate, daño de precisión, ráfagas y balística, drops con munición, dispersión y retículas, transiciones de input P2P, agachado, movimiento, auto-step y deslizamiento por paredes, hitboxes, perfiles y objetivos de bots, radar, regeneración, snapshots P2P, navegación vertical, recorrido físico de rutas, relieve y arquitectura de ambos mapas, pads de salto, torreta, puntuación, determinismo, audio, animación, materiales y modelos de armamento externos.
 
 El proyecto pasa `typecheck`, tests y build de producción. Aun así, el flujo WebRTC debe probarse con varios navegadores y redes reales antes de declarar soporte público 4v4; tampoco hay matchmaking, persistencia, cuentas, backend, migración de host ni anti-cheat.
 
@@ -47,6 +47,7 @@ La versión pública se despliega automáticamente únicamente desde la rama `de
 | `npm run dev` | Inicia Vite en `0.0.0.0:4173` para desarrollo. |
 | `npm run typecheck` | Comprueba TypeScript estricto sin emitir archivos. |
 | `npm test` | Ejecuta una vez la suite de Vitest. La cobertura aún es incompleta. |
+| `npm run bench` | Mide los hot paths de simulación, colisión, visibilidad y raycast. |
 | `npm run test:watch` | Ejecuta Vitest en modo interactivo. |
 | `npm run build` | Ejecuta TypeScript y genera el sitio estático en `dist/`. |
 | `npm run preview` | Sirve localmente el contenido construido en el puerto `4173`. |

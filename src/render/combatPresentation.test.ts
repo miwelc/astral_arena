@@ -69,5 +69,17 @@ describe('combat presentation', () => {
       yaw: simulation.state.tower.turretYaw,
       pitch: simulation.state.tower.turretPitch,
     });
+
+    const out = { yaw: Number.NaN, pitch: Number.NaN };
+    expect(presentedTowerAim(simulation.state, operator.id, out)).toBe(out);
+    expect(out).toEqual({
+      yaw: operator.yaw,
+      pitch: TOWER_TURRET_LAYOUT.minPitch,
+    });
+    expect(presentedTowerAim(simulation.state, 'observer', out)).toBe(out);
+    expect(out).toEqual({
+      yaw: simulation.state.tower.turretYaw,
+      pitch: simulation.state.tower.turretPitch,
+    });
   });
 });

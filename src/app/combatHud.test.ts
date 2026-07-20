@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
-import { directionalDamagePresentation, selectCombatWarning } from './combatHud';
+import type { GameEvent } from '../game/types';
+import { directionalDamagePresentation, latestDamageEventAfter, selectCombatWarning } from './combatHud';
 
 describe('combat HUD warnings', () => {
   it('prioritizes an empty weapon over secondary inventory warnings', () => {
@@ -41,5 +42,28 @@ describe('directional damage presentation', () => {
   it('uses cyan for shield-only impacts and red as soon as health is damaged', () => {
     expect(directionalDamagePresentation({ shieldDamage: 18, healthDamage: 0 }, target).tone).toBe('shield');
     expect(directionalDamagePresentation({ shieldDamage: 4, healthDamage: 9 }, target).tone).toBe('health');
+  });
+});
+
+describe('incremental damage event scan', () => {
+  it('returns only the newest unseen local hit as the cursor advances', () => {
+    const events: GameEvent[] = [
+      { id: 1, time: 1, type: 'hit', targetId: 'local', amount: 5 },
+      { id: 2, time: 2, type: 'hit', targetId: 'other', amount: 7 },
+      { id: 3, time: 3, type: 'shot', actorId: 'other' },
+      { id: 4, time: 4, type: 'hit', targetId: 'local', amount: 11 },
+    ];
+
+    let cursor = 0;
+    expect(latestDamageEventAfter(events, 'local', cursor)?.id).toBe(4);
+    cursor = events.at(-1)!.id;
+    expect(latestDamageEventAfter(events, 'local', cursor)).toBeUndefined();
+
+    events.push({ id: 5, time: 5, type: 'score', actorId: 'other' });
+    expect(latestDamageEventAfter(events, 'local', cursor)).toBeUndefined();
+    cursor = events.at(-1)!.id;
+
+    events.push({ id: 6, time: 6, type: 'hit', targetId: 'local', amount: 13 });
+    expect(latestDamageEventAfter(events, 'local', cursor)?.id).toBe(6);
   });
 });

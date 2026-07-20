@@ -163,6 +163,15 @@ describe('animation curve primitives', () => {
 });
 
 describe('action pose evaluators', () => {
+  it.each(Object.entries(evaluators))('%s reuses an output object without changing its values', (_name, evaluate) => {
+    const expected = evaluate(0.43);
+    const out: ActionPoseWeights = { lower: -1, twist: -1, part: -1, hand: -1 };
+    const result = evaluate(0.43, out);
+
+    expect(result).toBe(out);
+    expect(result).toEqual(expected);
+  });
+
   it.each(Object.entries(evaluators))('%s has neutral endpoints and finite bounded output', (_name, evaluate) => {
     for (const progress of [-1, 0, 0.125, 0.33, 0.5, 0.75, 1, 2, Number.NaN]) {
       for (const weight of values(evaluate(progress))) {
@@ -244,6 +253,28 @@ describe('weapon-specific reload animation', () => {
     expect(rifle.action).toEqual(generic);
     expect(rifle.magazineOffsetY).toBeCloseTo(-generic.part * 0.38, 8);
     expect(rifle.slideOffsetZ).toBe(0);
+  });
+
+  it('reuses both reload output levels without retaining values from the previous weapon', () => {
+    const out = {
+      action: { lower: -1, twist: -1, part: -1, hand: -1 },
+      magazineOffsetX: -1,
+      magazineOffsetY: -1,
+      magazineOffsetZ: -1,
+      magazineRoll: -1,
+      slideOffsetZ: -1,
+    };
+    const action = out.action;
+    const expectedSidearm = evaluateWeaponReload(0.8, 'sidearm');
+
+    expect(evaluateWeaponReload(0.8, 'sidearm', out)).toBe(out);
+    expect(out.action).toBe(action);
+    expect(out).toEqual(expectedSidearm);
+
+    const expectedRifle = evaluateWeaponReload(0.49, 'battle-rifle');
+    expect(evaluateWeaponReload(0.49, 'battle-rifle', out)).toBe(out);
+    expect(out.action).toBe(action);
+    expect(out).toEqual(expectedRifle);
   });
 });
 

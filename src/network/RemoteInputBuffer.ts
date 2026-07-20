@@ -20,9 +20,13 @@ export class RemoteInputBuffer {
     // guard alone intentionally favors the newest continuous control state.
     if (previous && snapshot.sequence <= previous.sequence) return;
     this.latest.set(peerId, snapshot);
-    const digitalChanged = previous
-      ? DIGITAL_INPUT_KEYS.some((key) => previous[key] !== snapshot[key])
-      : DIGITAL_INPUT_KEYS.some((key) => snapshot[key] === true);
+    let digitalChanged = false;
+    for (const key of DIGITAL_INPUT_KEYS) {
+      if (previous ? previous[key] !== snapshot[key] : snapshot[key] === true) {
+        digitalChanged = true;
+        break;
+      }
+    }
     if (!digitalChanged) return;
     const queue = this.transitions.get(peerId) ?? [];
     queue.push(snapshot);

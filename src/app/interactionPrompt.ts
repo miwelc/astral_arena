@@ -39,19 +39,29 @@ export const interactionPromptFor = (
     };
   }
 
-  const pickup = state.pickups
-    .filter((candidate) => {
-      if (!canUseWeaponPickup(player, candidate) || !candidate.weaponId) return false;
-      const existing = player.inventory.find((weapon) => weapon.id === candidate.weaponId);
-      if (!existing) return true;
+  // This runs from the HUD loop. A single minimum scan keeps the exact nearest
+  // usable-pickup semantics without allocating and sorting a temporary list.
+  let pickup: MatchState['pickups'][number] | undefined;
+  let nearestDistanceSquared = Number.POSITIVE_INFINITY;
+  for (const candidate of state.pickups) {
+    if (!canUseWeaponPickup(player, candidate) || !candidate.weaponId) continue;
+    const existing = player.inventory.find((weapon) => weapon.id === candidate.weaponId);
+    if (existing) {
       const definition = WEAPONS[existing.id];
       const capacity = definition.maxReserve - existing.reserve;
       const offered = candidate.weaponState
         ? candidate.weaponState.magazine + candidate.weaponState.reserve
         : definition.magazineSize;
-      return capacity > 0 && offered > 0;
-    })
-    .sort((left, right) => distanceSquared(player.position, left.position) - distanceSquared(player.position, right.position))[0];
+      if (capacity <= 0 || offered <= 0) continue;
+    }
+    const candidateDistanceSquared = distanceSquared(player.position, candidate.position);
+    // `sort` is stable, so retaining the first candidate on a tie preserves the
+    // previous selection order.
+    if (candidateDistanceSquared < nearestDistanceSquared) {
+      pickup = candidate;
+      nearestDistanceSquared = candidateDistanceSquared;
+    }
+  }
   if (!pickup?.weaponId) return null;
 
   const definition = WEAPONS[pickup.weaponId];

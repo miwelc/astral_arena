@@ -12,7 +12,183 @@ const overlapsVertical = (feetY: number, height: number, obstacle: AabbObstacle)
 
 const CONTACT_EPSILON = 0.0001;
 const MAX_AUTO_STEP_HEIGHT = 0.42;
+const OBSTACLE_BVH_LEAF_SIZE = 3;
 type HorizontalAxis = 'x' | 'z';
+
+interface ObstacleBvhNode {
+  minX: number;
+  minY: number;
+  minZ: number;
+  maxX: number;
+  maxY: number;
+  maxZ: number;
+  left: ObstacleBvhNode | null;
+  right: ObstacleBvhNode | null;
+  obstacleIndexes: readonly number[] | null;
+}
+
+interface ObstacleBvhCacheEntry {
+  obstacleCount: number;
+  firstObstacle: AabbObstacle | undefined;
+  lastObstacle: AabbObstacle | undefined;
+  root: ObstacleBvhNode | null;
+}
+
+const OBSTACLE_BVH_CACHE = new WeakMap<MapDefinition, ObstacleBvhCacheEntry>();
+
+// Map geometry is authored once and treated as immutable during a match. The
+// cache still rebuilds for supported dynamic fixtures that add/remove boxes;
+// callers that mutate an existing obstacle's min/max object in place must use
+// a fresh MapDefinition because silently polling all bounds per ray would
+// restore the O(obstacles) cost this index removes.
+
+const buildObstacleBvhNode = (
+  obstacles: readonly AabbObstacle[],
+  obstacleIndexes: number[],
+): ObstacleBvhNode => {
+  let minX = Number.POSITIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let minZ = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  let maxZ = Number.NEGATIVE_INFINITY;
+  let minCenterX = Number.POSITIVE_INFINITY;
+  let minCenterY = Number.POSITIVE_INFINITY;
+  let minCenterZ = Number.POSITIVE_INFINITY;
+  let maxCenterX = Number.NEGATIVE_INFINITY;
+  let maxCenterY = Number.NEGATIVE_INFINITY;
+  let maxCenterZ = Number.NEGATIVE_INFINITY;
+
+  for (const index of obstacleIndexes) {
+    const obstacle = obstacles[index]!;
+    if (obstacle.min.x < minX) minX = obstacle.min.x;
+    if (obstacle.min.y < minY) minY = obstacle.min.y;
+    if (obstacle.min.z < minZ) minZ = obstacle.min.z;
+    if (obstacle.max.x > maxX) maxX = obstacle.max.x;
+    if (obstacle.max.y > maxY) maxY = obstacle.max.y;
+    if (obstacle.max.z > maxZ) maxZ = obstacle.max.z;
+    const centerX = obstacle.min.x + obstacle.max.x;
+    const centerY = obstacle.min.y + obstacle.max.y;
+    const centerZ = obstacle.min.z + obstacle.max.z;
+    if (centerX < minCenterX) minCenterX = centerX;
+    if (centerY < minCenterY) minCenterY = centerY;
+    if (centerZ < minCenterZ) minCenterZ = centerZ;
+    if (centerX > maxCenterX) maxCenterX = centerX;
+    if (centerY > maxCenterY) maxCenterY = centerY;
+    if (centerZ > maxCenterZ) maxCenterZ = centerZ;
+  }
+
+  const node: ObstacleBvhNode = {
+    minX,
+    minY,
+    minZ,
+    maxX,
+    maxY,
+    maxZ,
+    left: null,
+    right: null,
+    obstacleIndexes: null,
+  };
+  if (obstacleIndexes.length <= OBSTACLE_BVH_LEAF_SIZE) {
+    // Original-order leaves make tie behaviour deterministic and match the
+    // previous linear scan when two authored boxes share an entry surface.
+    obstacleIndexes.sort((left, right) => left - right);
+    node.obstacleIndexes = obstacleIndexes;
+    return node;
+  }
+
+  const spanX = maxCenterX - minCenterX;
+  const spanY = maxCenterY - minCenterY;
+  const spanZ = maxCenterZ - minCenterZ;
+  const axis = spanX >= spanY && spanX >= spanZ
+    ? 'x'
+    : spanY >= spanZ
+      ? 'y'
+      : 'z';
+  obstacleIndexes.sort((left, right) => {
+    const leftObstacle = obstacles[left]!;
+    const rightObstacle = obstacles[right]!;
+    const centerDifference = (
+      leftObstacle.min[axis] + leftObstacle.max[axis]
+    ) - (
+      rightObstacle.min[axis] + rightObstacle.max[axis]
+    );
+    return centerDifference || left - right;
+  });
+  const midpoint = obstacleIndexes.length >>> 1;
+  node.left = buildObstacleBvhNode(obstacles, obstacleIndexes.slice(0, midpoint));
+  node.right = buildObstacleBvhNode(obstacles, obstacleIndexes.slice(midpoint));
+  return node;
+};
+
+const obstacleBvhRoot = (map: MapDefinition): ObstacleBvhNode | null => {
+  const obstacles = map.obstacles;
+  const cached = OBSTACLE_BVH_CACHE.get(map);
+  if (
+    cached
+    && cached.obstacleCount === obstacles.length
+    && cached.firstObstacle === obstacles[0]
+    && cached.lastObstacle === obstacles[obstacles.length - 1]
+  ) {
+    return cached.root;
+  }
+
+  const obstacleIndexes = Array.from({ length: obstacles.length }, (_, index) => index);
+  const root = obstacleIndexes.length > 0
+    ? buildObstacleBvhNode(obstacles, obstacleIndexes)
+    : null;
+  OBSTACLE_BVH_CACHE.set(map, {
+    obstacleCount: obstacles.length,
+    firstObstacle: obstacles[0],
+    lastObstacle: obstacles[obstacles.length - 1],
+    root,
+  });
+  return root;
+};
+
+const obstaclesOverlappingBounds = (
+  map: MapDefinition,
+  minX: number,
+  minY: number,
+  minZ: number,
+  maxX: number,
+  maxY: number,
+  maxZ: number,
+): readonly AabbObstacle[] => {
+  if (map.obstacles.length <= OBSTACLE_BVH_LEAF_SIZE * 2) return map.obstacles;
+  const root = obstacleBvhRoot(map);
+  if (!root) return [];
+  const stack = [root];
+  const obstacleIndexes: number[] = [];
+  while (stack.length > 0) {
+    const node = stack.pop()!;
+    if (
+      node.maxX < minX || node.minX > maxX
+      || node.maxY < minY || node.minY > maxY
+      || node.maxZ < minZ || node.minZ > maxZ
+    ) {
+      continue;
+    }
+    if (node.obstacleIndexes) {
+      for (const obstacleIndex of node.obstacleIndexes) {
+        const obstacle = map.obstacles[obstacleIndex];
+        if (
+          obstacle
+          && obstacle.max.x >= minX && obstacle.min.x <= maxX
+          && obstacle.max.y >= minY && obstacle.min.y <= maxY
+          && obstacle.max.z >= minZ && obstacle.min.z <= maxZ
+        ) {
+          obstacleIndexes.push(obstacleIndex);
+        }
+      }
+      continue;
+    }
+    if (node.left) stack.push(node.left);
+    if (node.right) stack.push(node.right);
+  }
+  obstacleIndexes.sort((left, right) => left - right);
+  return obstacleIndexes.map((index) => map.obstacles[index]!);
+};
 
 /**
  * Checks whether a capsule can occupy a stance at its current feet position.
@@ -26,7 +202,16 @@ export const canOccupyCapsule = (
 ): boolean => {
   if (height <= 0 || position.y < map.bounds.floorY - CONTACT_EPSILON) return false;
   if (position.y + height > map.bounds.ceilingY - CONTACT_EPSILON) return false;
-  return !map.obstacles.some((obstacle) =>
+  const obstacles = obstaclesOverlappingBounds(
+    map,
+    position.x - radius,
+    position.y,
+    position.z - radius,
+    position.x + radius,
+    position.y + height,
+    position.z + radius,
+  );
+  return !obstacles.some((obstacle) =>
     overlapsVertical(position.y, height, obstacle)
     && insideHorizontal(position, obstacle, radius),
   );
@@ -83,9 +268,10 @@ const hasAutoStepHeadroom = (
   player: Pick<PlayerState, 'height' | 'radius'>,
   map: MapDefinition,
   supportId: string,
+  obstacles: readonly AabbObstacle[],
 ): boolean => {
   if (feetY + player.height > map.bounds.ceilingY - CONTACT_EPSILON) return false;
-  for (const obstacle of map.obstacles) {
+  for (const obstacle of obstacles) {
     if (obstacle.id === supportId || !overlapsVertical(feetY, player.height, obstacle)) continue;
     if (segmentIntersectsExpandedFootprint(start, target, obstacle, player.radius)) return false;
   }
@@ -108,6 +294,7 @@ const autoStepHeight = (
   player: Pick<PlayerState, 'height' | 'radius' | 'grounded'>,
   map: MapDefinition,
   dt: number,
+  obstacles: readonly AabbObstacle[],
 ): AutoStepResult | null => {
   if (!player.grounded && velocity.y > 0) return null;
   const target = {
@@ -118,14 +305,14 @@ const autoStepHeight = (
   if (Math.hypot(target.x - position.x, target.z - position.z) < EPSILON) return null;
 
   let best: AabbObstacle | null = null;
-  for (const obstacle of map.obstacles) {
+  for (const obstacle of obstacles) {
     if (obstacle.kind !== 'platform') continue;
     const step = obstacle.max.y - position.y;
     if (step <= 0.02 || step > MAX_AUTO_STEP_HEIGHT + CONTACT_EPSILON) continue;
     if (!overlapsVertical(position.y, player.height, obstacle)) continue;
     if (!insideHorizontal(target, obstacle, player.radius)) continue;
     if (!segmentIntersectsExpandedFootprint(position, target, obstacle, player.radius)) continue;
-    if (!hasAutoStepHeadroom(position, target, obstacle.max.y, player, map, obstacle.id)) continue;
+    if (!hasAutoStepHeadroom(position, target, obstacle.max.y, player, map, obstacle.id, obstacles)) continue;
     if (!best || obstacle.max.y > best.max.y) best = obstacle;
   }
   return best ? { height: best.max.y, supportId: best.id } : null;
@@ -143,6 +330,7 @@ const sweepHorizontalAxis = (
   map: MapDefinition,
   dt: number,
   axis: HorizontalAxis,
+  obstacles: readonly AabbObstacle[],
 ): boolean => {
   const otherAxis: HorizontalAxis = axis === 'x' ? 'z' : 'x';
   const start = position[axis];
@@ -153,7 +341,7 @@ const sweepHorizontalAxis = (
   let resolved = target;
   let collided = false;
 
-  for (const obstacle of map.obstacles) {
+  for (const obstacle of obstacles) {
     if (
       !overlapsVertical(position.y, player.height, obstacle)
       || !overlapsExpandedAxis(position[otherAxis], obstacle, otherAxis, player.radius)
@@ -215,11 +403,32 @@ export const moveCapsule = (
   const velocity = { ...player.velocity };
   let hitWall = false;
 
-  const autoStep = autoStepHeight(position, velocity, player, map, dt);
+  const intendedX = clamp(
+    position.x + velocity.x * dt,
+    map.bounds.minX + player.radius,
+    map.bounds.maxX - player.radius,
+  );
+  const intendedZ = clamp(
+    position.z + velocity.z * dt,
+    map.bounds.minZ + player.radius,
+    map.bounds.maxZ - player.radius,
+  );
+  const intendedY = position.y + velocity.y * dt;
+  const movementObstacles = obstaclesOverlappingBounds(
+    map,
+    Math.min(position.x, intendedX) - player.radius,
+    Math.min(position.y, intendedY) - 0.08,
+    Math.min(position.z, intendedZ) - player.radius,
+    Math.max(position.x, intendedX) + player.radius,
+    Math.max(position.y + player.height + MAX_AUTO_STEP_HEIGHT, intendedY + player.height) + 0.08,
+    Math.max(position.z, intendedZ) + player.radius,
+  );
+
+  const autoStep = autoStepHeight(position, velocity, player, map, dt, movementObstacles);
   if (autoStep) position.y = autoStep.height;
 
-  hitWall = sweepHorizontalAxis(position, velocity, player, map, dt, 'x') || hitWall;
-  hitWall = sweepHorizontalAxis(position, velocity, player, map, dt, 'z') || hitWall;
+  hitWall = sweepHorizontalAxis(position, velocity, player, map, dt, 'x', movementObstacles) || hitWall;
+  hitWall = sweepHorizontalAxis(position, velocity, player, map, dt, 'z', movementObstacles) || hitWall;
 
   const verticalStartY = position.y;
   const nextY = position.y + velocity.y * dt;
@@ -228,7 +437,7 @@ export const moveCapsule = (
 
   if (velocity.y <= 0) {
     let floor = map.bounds.floorY;
-    for (const obstacle of map.obstacles) {
+    for (const obstacle of movementObstacles) {
       const supportMargin = obstacle.id === autoStep?.supportId
         ? player.radius
         : Math.max(0, player.radius - 0.08);
@@ -242,7 +451,7 @@ export const moveCapsule = (
       grounded = true;
     }
   } else {
-    for (const obstacle of map.obstacles) {
+    for (const obstacle of movementObstacles) {
       if (!insideHorizontal(position, obstacle, player.radius * 0.75)) continue;
       const previousHead = verticalStartY + player.height;
       const nextHead = nextY + player.height;
@@ -308,43 +517,48 @@ const rayEllipsoidAt = (
   return far >= 0 ? far : null;
 };
 
-const rayAabbComponents = (
+const rayBoundsComponents = (
   originX: number,
   originY: number,
   originZ: number,
   directionX: number,
   directionY: number,
   directionZ: number,
-  obstacle: AabbObstacle,
+  minX: number,
+  minY: number,
+  minZ: number,
+  maxX: number,
+  maxY: number,
+  maxZ: number,
 ): number | null => {
   let near = -Infinity;
   let far = Infinity;
 
   if (Math.abs(directionX) < EPSILON) {
-    if (originX < obstacle.min.x || originX > obstacle.max.x) return null;
+    if (originX < minX || originX > maxX) return null;
   } else {
-    const first = (obstacle.min.x - originX) / directionX;
-    const second = (obstacle.max.x - originX) / directionX;
+    const first = (minX - originX) / directionX;
+    const second = (maxX - originX) / directionX;
     near = Math.max(near, Math.min(first, second));
     far = Math.min(far, Math.max(first, second));
     if (near > far) return null;
   }
 
   if (Math.abs(directionY) < EPSILON) {
-    if (originY < obstacle.min.y || originY > obstacle.max.y) return null;
+    if (originY < minY || originY > maxY) return null;
   } else {
-    const first = (obstacle.min.y - originY) / directionY;
-    const second = (obstacle.max.y - originY) / directionY;
+    const first = (minY - originY) / directionY;
+    const second = (maxY - originY) / directionY;
     near = Math.max(near, Math.min(first, second));
     far = Math.min(far, Math.max(first, second));
     if (near > far) return null;
   }
 
   if (Math.abs(directionZ) < EPSILON) {
-    if (originZ < obstacle.min.z || originZ > obstacle.max.z) return null;
+    if (originZ < minZ || originZ > maxZ) return null;
   } else {
-    const first = (obstacle.min.z - originZ) / directionZ;
-    const second = (obstacle.max.z - originZ) / directionZ;
+    const first = (minZ - originZ) / directionZ;
+    const second = (maxZ - originZ) / directionZ;
     near = Math.max(near, Math.min(first, second));
     far = Math.min(far, Math.max(first, second));
     if (near > far) return null;
@@ -352,6 +566,155 @@ const rayAabbComponents = (
 
   if (far < 0) return null;
   return Math.max(0, near);
+};
+
+const rayObstacleAt = (
+  originX: number,
+  originY: number,
+  originZ: number,
+  directionX: number,
+  directionY: number,
+  directionZ: number,
+  obstacle: AabbObstacle,
+): number | null => rayBoundsComponents(
+  originX,
+  originY,
+  originZ,
+  directionX,
+  directionY,
+  directionZ,
+  obstacle.min.x,
+  obstacle.min.y,
+  obstacle.min.z,
+  obstacle.max.x,
+  obstacle.max.y,
+  obstacle.max.z,
+);
+
+interface ObstacleRayHit {
+  distance: number;
+  obstacleId: string;
+}
+
+const nearestObstacleRayHit = (
+  origin: Vec3,
+  direction: Vec3,
+  maxDistance: number,
+  map: MapDefinition,
+): ObstacleRayHit | null => {
+  const root = obstacleBvhRoot(map);
+  if (!root) return null;
+  const stack = [root];
+  let nearestDistance = Number.POSITIVE_INFINITY;
+  let nearestIndex = Number.POSITIVE_INFINITY;
+
+  while (stack.length > 0) {
+    const node = stack.pop()!;
+    const nodeDistance = rayBoundsComponents(
+      origin.x,
+      origin.y,
+      origin.z,
+      direction.x,
+      direction.y,
+      direction.z,
+      node.minX,
+      node.minY,
+      node.minZ,
+      node.maxX,
+      node.maxY,
+      node.maxZ,
+    );
+    if (nodeDistance === null || nodeDistance > maxDistance || nodeDistance > nearestDistance) continue;
+
+    if (node.obstacleIndexes) {
+      for (const obstacleIndex of node.obstacleIndexes) {
+        const obstacle = map.obstacles[obstacleIndex];
+        if (!obstacle) continue;
+        const distance = rayObstacleAt(
+          origin.x,
+          origin.y,
+          origin.z,
+          direction.x,
+          direction.y,
+          direction.z,
+          obstacle,
+        );
+        if (
+          distance !== null
+          && distance <= maxDistance
+          && (distance < nearestDistance || (distance === nearestDistance && obstacleIndex < nearestIndex))
+        ) {
+          nearestDistance = distance;
+          nearestIndex = obstacleIndex;
+        }
+      }
+      continue;
+    }
+
+    if (node.left) stack.push(node.left);
+    if (node.right) stack.push(node.right);
+  }
+
+  const obstacle = map.obstacles[nearestIndex];
+  return obstacle
+    ? { distance: nearestDistance, obstacleId: obstacle.id }
+    : null;
+};
+
+const rayIsBlockedByObstacle = (
+  originX: number,
+  originY: number,
+  originZ: number,
+  directionX: number,
+  directionY: number,
+  directionZ: number,
+  distanceLimit: number,
+  map: MapDefinition,
+): boolean => {
+  const root = obstacleBvhRoot(map);
+  if (!root) return false;
+  const stack = [root];
+
+  while (stack.length > 0) {
+    const node = stack.pop()!;
+    const nodeDistance = rayBoundsComponents(
+      originX,
+      originY,
+      originZ,
+      directionX,
+      directionY,
+      directionZ,
+      node.minX,
+      node.minY,
+      node.minZ,
+      node.maxX,
+      node.maxY,
+      node.maxZ,
+    );
+    if (nodeDistance === null || nodeDistance >= distanceLimit) continue;
+
+    if (node.obstacleIndexes) {
+      for (const obstacleIndex of node.obstacleIndexes) {
+        const obstacle = map.obstacles[obstacleIndex];
+        if (!obstacle) continue;
+        const hit = rayObstacleAt(
+          originX,
+          originY,
+          originZ,
+          directionX,
+          directionY,
+          directionZ,
+          obstacle,
+        );
+        if (hit !== null && hit < distanceLimit) return true;
+      }
+      continue;
+    }
+
+    if (node.left) stack.push(node.left);
+    if (node.right) stack.push(node.right);
+  }
+  return false;
 };
 
 export const raycastWorld = (
@@ -363,33 +726,16 @@ export const raycastWorld = (
   ignoredPlayerId?: string,
 ): RayHit | null => {
   let result: RayHit | null = null;
-  let nearestObstacleDistance = Number.POSITIVE_INFINITY;
-  let nearestObstacleId: string | undefined;
-
-  for (const obstacle of map.obstacles) {
-    const distance = rayAabbComponents(
-      origin.x,
-      origin.y,
-      origin.z,
-      direction.x,
-      direction.y,
-      direction.z,
-      obstacle,
-    );
-    if (distance !== null && distance <= maxDistance && distance < nearestObstacleDistance) {
-      nearestObstacleDistance = distance;
-      nearestObstacleId = obstacle.id;
-    }
-  }
-  if (nearestObstacleId !== undefined) {
+  const obstacleHit = nearestObstacleRayHit(origin, direction, maxDistance, map);
+  if (obstacleHit) {
     result = {
-      distance: nearestObstacleDistance,
+      distance: obstacleHit.distance,
       point: {
-        x: origin.x + direction.x * nearestObstacleDistance,
-        y: origin.y + direction.y * nearestObstacleDistance,
-        z: origin.z + direction.z * nearestObstacleDistance,
+        x: origin.x + direction.x * obstacleHit.distance,
+        y: origin.y + direction.y * obstacleHit.distance,
+        z: origin.z + direction.z * obstacleHit.distance,
       },
-      obstacleId: nearestObstacleId,
+      obstacleId: obstacleHit.obstacleId,
     };
   }
 
@@ -464,19 +810,16 @@ export const hasLineOfSight = (from: Vec3, to: Vec3, map: MapDefinition): boolea
   const directionX = deltaX * inverseDistance;
   const directionY = deltaY * inverseDistance;
   const directionZ = deltaZ * inverseDistance;
-  for (const obstacle of map.obstacles) {
-    const hit = rayAabbComponents(
-      from.x,
-      from.y,
-      from.z,
-      directionX,
-      directionY,
-      directionZ,
-      obstacle,
-    );
-    if (hit !== null && hit < distance - 0.08) return false;
-  }
-  return true;
+  return !rayIsBlockedByObstacle(
+    from.x,
+    from.y,
+    from.z,
+    directionX,
+    directionY,
+    directionZ,
+    distance - 0.08,
+    map,
+  );
 };
 
 export const pointInsideObstacle = (position: Vec3, map: MapDefinition): boolean =>

@@ -158,6 +158,7 @@ export class P2PNetwork<TMessage = JsonValue> {
     ['message', new Set<UntypedListener>()],
     ['error', new Set<UntypedListener>()],
   ]);
+  private readonly listenerSnapshots = new Map<keyof P2PEventMap<TMessage>, readonly UntypedListener[]>();
 
   private currentRole: P2PRole | null = null;
   private assignedGuestId: string | null = null;
@@ -219,7 +220,11 @@ export class P2PNetwork<TMessage = JsonValue> {
       throw new P2PNetworkError('INVALID_STATE', `Unknown event type: ${String(type)}`);
     }
 
-    listeners.add(listener as UntypedListener);
+    const untypedListener = listener as UntypedListener;
+    if (!listeners.has(untypedListener)) {
+      listeners.add(untypedListener);
+      this.listenerSnapshots.delete(type);
+    }
     return () => this.off(type, listener);
   }
 
@@ -227,7 +232,9 @@ export class P2PNetwork<TMessage = JsonValue> {
     type: K,
     listener: P2PEventListener<P2PEventMap<TMessage>[K]>,
   ): void {
-    this.listeners.get(type)?.delete(listener as UntypedListener);
+    if (this.listeners.get(type)?.delete(listener as UntypedListener)) {
+      this.listenerSnapshots.delete(type);
+    }
   }
 
   /**
@@ -693,7 +700,15 @@ export class P2PNetwork<TMessage = JsonValue> {
       return;
     }
 
-    for (const listener of [...listeners]) {
+    // Listener sets change rarely while message events can arrive every tick.
+    // Cache the snapshot while preserving the previous dispatch semantics when
+    // callbacks add or remove listeners during an active emission.
+    let snapshot = this.listenerSnapshots.get(type);
+    if (!snapshot) {
+      snapshot = [...listeners];
+      this.listenerSnapshots.set(type, snapshot);
+    }
+    for (const listener of snapshot) {
       (listener as (value: P2PEventMap<TMessage>[K]) => void)(event);
     }
   }

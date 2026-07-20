@@ -3,6 +3,11 @@ import type { MatchState } from '../game/types';
 
 export const HIP_FIRE_FOV = 74;
 
+export interface PresentedTowerAim {
+  yaw: number;
+  pitch: number;
+}
+
 /**
  * Uses locally predicted look angles for the player currently manning the
  * turret, while every observer still presents the authoritative tower state.
@@ -10,20 +15,23 @@ export const HIP_FIRE_FOV = 74;
 export const presentedTowerAim = (
   state: MatchState,
   localPlayerId: string | null,
-): { yaw: number; pitch: number } => {
+  out?: PresentedTowerAim,
+): PresentedTowerAim => {
+  const result = out ?? { yaw: 0, pitch: 0 };
   const localOperator = localPlayerId && state.tower.turretOwnerId === localPlayerId
     ? state.players[localPlayerId]
     : null;
   if (localOperator?.alive) {
-    return {
-      yaw: localOperator.yaw,
-      pitch: Math.min(
-        TOWER_TURRET_LAYOUT.maxPitch,
-        Math.max(TOWER_TURRET_LAYOUT.minPitch, localOperator.pitch),
-      ),
-    };
+    result.yaw = localOperator.yaw;
+    result.pitch = Math.min(
+      TOWER_TURRET_LAYOUT.maxPitch,
+      Math.max(TOWER_TURRET_LAYOUT.minPitch, localOperator.pitch),
+    );
+    return result;
   }
-  return { yaw: state.tower.turretYaw, pitch: state.tower.turretPitch };
+  result.yaw = state.tower.turretYaw;
+  result.pitch = state.tower.turretPitch;
+  return result;
 };
 
 /**
