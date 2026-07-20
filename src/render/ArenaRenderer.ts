@@ -1933,12 +1933,12 @@ export class ArenaRenderer {
     // forest silhouette without creating invisible gameplay blockers.
     const environment = createFacilityEnvironment({
       seed: 0xa57a1,
-      quality: 'medium',
+      quality: 'high',
       bounds: {
-        minX: playableBounds.minX - 20,
-        maxX: playableBounds.maxX + 20,
-        minZ: playableBounds.minZ - 20,
-        maxZ: playableBounds.maxZ + 20,
+        minX: playableBounds.minX - 28,
+        maxX: playableBounds.maxX + 28,
+        minZ: playableBounds.minZ - 28,
+        maxZ: playableBounds.maxZ + 28,
       },
       heightAt: () => floorY - 0.08,
       exclusions: [{ ...playableBounds, padding: 1.25 }],
@@ -1946,7 +1946,7 @@ export class ArenaRenderer {
         const distanceX = Math.max(0, playableBounds.minX - x, x - playableBounds.maxX);
         const distanceZ = Math.max(0, playableBounds.minZ - z, z - playableBounds.maxZ);
         const perimeter = Math.max(distanceX, distanceZ);
-        return THREE.MathUtils.clamp(0.5 + perimeter * 0.055, 0.5, 1);
+        return THREE.MathUtils.clamp(0.72 + perimeter * 0.035, 0.72, 1);
       },
       blocks: [
         {
@@ -2031,12 +2031,12 @@ export class ArenaRenderer {
       {
         minX: playableBounds.minX,
         maxX: playableBounds.maxX,
-        minZ: centerZ - 3.8,
-        maxZ: centerZ + 3.8,
+        minZ: centerZ - 2.9,
+        maxZ: centerZ + 2.9,
       },
       {
-        minX: centerX - 3.6,
-        maxX: centerX + 3.6,
+        minX: centerX - 2.8,
+        maxX: centerX + 2.8,
         minZ: playableBounds.minZ,
         maxZ: playableBounds.maxZ,
       },
@@ -2061,11 +2061,11 @@ export class ArenaRenderer {
           maxX: obstacle.max.x,
           minZ: obstacle.min.z,
           maxZ: obstacle.max.z,
-          padding: 0.85,
+          padding: 0.58,
         })),
-      ...this.map.spawns.map((spawn) => ({ x: spawn.position.x, z: spawn.position.z, radius: 2.35 })),
-      ...this.map.waypoints.map((waypoint) => ({ x: waypoint.x, z: waypoint.z, radius: 1.7 })),
-      ...this.map.pickups.map((pickup) => ({ x: pickup.position.x, z: pickup.position.z, radius: 1.75 })),
+      ...this.map.spawns.map((spawn) => ({ x: spawn.position.x, z: spawn.position.z, radius: 2 })),
+      ...this.map.waypoints.map((waypoint) => ({ x: waypoint.x, z: waypoint.z, radius: 1.3 })),
+      ...this.map.pickups.map((pickup) => ({ x: pickup.position.x, z: pickup.position.z, radius: 1.45 })),
       { x: this.map.flagBases.aurora.x, z: this.map.flagBases.aurora.z, radius: 2.5 },
       { x: this.map.flagBases.nova.x, z: this.map.flagBases.nova.z, radius: 2.5 },
     ];
@@ -2073,10 +2073,10 @@ export class ArenaRenderer {
       seed: 0xf0e57,
       bounds: playableBounds,
       materials: environment.materials,
-      fernCount: Math.min(470, Math.round(arenaArea * 0.047)),
+      fernCount: Math.min(1_050, Math.round(arenaArea * 0.12)),
       // One instanced draw call can afford a genuinely lawn-like density in
       // the earth pockets while paths, objectives and interiors stay clear.
-      grassCount: Math.min(5600, Math.round(arenaArea * 0.61)),
+      grassCount: Math.min(16_000, Math.round(arenaArea * 1.85)),
       heightAt: (x, z) => floorY - 0.035 + sampleGroundRelief(this.map, x, z) + 0.006,
       exclusions,
       castShadow: false,
@@ -2086,7 +2086,7 @@ export class ArenaRenderer {
           Math.abs(z - centerZ) / Math.max(1, halfDepth),
         );
         const islands = Math.sin(x * 0.43 + z * 0.17) * Math.cos(z * 0.36 - x * 0.12) * 0.5 + 0.5;
-        return THREE.MathUtils.clamp(0.3 + edge * 0.42 + islands * 0.3, 0.24, 0.94);
+        return THREE.MathUtils.clamp(0.56 + edge * 0.26 + islands * 0.28, 0.5, 0.98);
       },
     });
     const raisedEarthworks = this.map.obstacles.filter((obstacle) =>
@@ -2106,8 +2106,8 @@ export class ArenaRenderer {
       seed: 0xe47a1,
       bounds: playableBounds,
       materials: environment.materials,
-      fernCount: 84,
-      grassCount: 1_600,
+      fernCount: 170,
+      grassCount: 3_200,
       heightAt: (x, z) => raisedEarthworkAt(x, z)?.max.y ?? Number.NaN,
       densityAt: (x, z) => {
         const obstacle = raisedEarthworkAt(x, z);

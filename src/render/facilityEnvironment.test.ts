@@ -60,6 +60,7 @@ describe('facility environment geometry', () => {
     expect(field.userData.fernCrownCount).toBe(0);
     expect(field.userData.fernFrondCount).toBe(0);
     expect(field.userData.grassCount).toBe(0);
+    expect(field.userData.grassCarpetCount).toBe(0);
   });
 
   it('keeps dense grass at lawn height instead of producing repeated metre-high spikes', () => {
@@ -73,6 +74,7 @@ describe('facility environment geometry', () => {
     const grass = field.getObjectByName('grass-tufts') as THREE.InstancedMesh | undefined;
 
     expect(grass).toBeInstanceOf(THREE.InstancedMesh);
+    expect(field.getObjectByName('grass-meadow-carpet')).toBeInstanceOf(THREE.InstancedMesh);
     grass!.geometry.computeBoundingBox();
     expect(grass!.geometry.boundingBox?.max.y).toBeLessThan(0.65);
     expect(new Set(instanceMatrices(field, 'grass-tufts').map((value) => value.toFixed(3))).size)

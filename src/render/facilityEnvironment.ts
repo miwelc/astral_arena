@@ -769,16 +769,13 @@ export const createUnderstoryField = (options: UnderstoryFieldOptions): THREE.Gr
     setInstanceColor(ferns, index, (random() - 0.48) * 0.13);
   });
 
-  const grasses = new THREE.InstancedMesh(
-    createGrassTuftGeometry(),
-    options.materials.grass,
-    grassPoints.length,
-  );
+  const grassGeometry = createGrassTuftGeometry();
+  const grasses = new THREE.InstancedMesh(grassGeometry, options.materials.grass, grassPoints.length);
   grasses.name = 'grass-tufts';
   grasses.castShadow = castShadow;
   grasses.receiveShadow = true;
   grassPoints.forEach((point, index) => {
-    const size = 0.48 + random() * 0.62;
+    const size = 0.56 + random() * 0.7;
     grasses.setMatrixAt(
       index,
       composeMatrix(
@@ -790,7 +787,38 @@ export const createUnderstoryField = (options: UnderstoryFieldOptions): THREE.Gr
     setInstanceColor(grasses, index, (random() - 0.45) * 0.16);
   });
 
-  for (const mesh of [ferns, grasses]) {
+  // A low, broad second layer closes the exposed soil between taller tufts in
+  // the same way Titan's meadow carpet does. It reuses both geometry and
+  // material, so the denser read costs only one additional instanced draw.
+  const carpetCount = Math.ceil(grassPoints.length * 0.7);
+  const grassCarpet = new THREE.InstancedMesh(
+    grassGeometry,
+    options.materials.grass,
+    carpetCount,
+  );
+  grassCarpet.name = 'grass-meadow-carpet';
+  grassCarpet.castShadow = false;
+  grassCarpet.receiveShadow = true;
+  for (let index = 0; index < carpetCount; index += 1) {
+    const point = grassPoints[(index * 7) % grassPoints.length]!;
+    const angle = random() * TAU;
+    const size = 0.52 + random() * 0.46;
+    grassCarpet.setMatrixAt(
+      index,
+      composeMatrix(
+        new THREE.Vector3(
+          point.x + Math.cos(angle) * 0.2,
+          point.y + 0.008,
+          point.z + Math.sin(angle) * 0.2,
+        ),
+        new THREE.Euler(0, angle, 0),
+        new THREE.Vector3(size * 1.38, size * 0.48, size * 1.38),
+      ),
+    );
+    setInstanceColor(grassCarpet, index, (random() - 0.4) * 0.12);
+  }
+
+  for (const mesh of [ferns, grasses, grassCarpet]) {
     mesh.instanceMatrix.setUsage(THREE.StaticDrawUsage);
     if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
     mesh.computeBoundingBox();
@@ -801,6 +829,7 @@ export const createUnderstoryField = (options: UnderstoryFieldOptions): THREE.Gr
   field.userData.fernCrownCount = fernCenters.length;
   field.userData.fernFrondCount = fernRecords.length;
   field.userData.grassCount = grassPoints.length;
+  field.userData.grassCarpetCount = carpetCount;
   return field;
 };
 
