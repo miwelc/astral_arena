@@ -101,8 +101,14 @@ import { applyFallbackWeaponNormalDetail } from './weaponSurfaceDetail';
 import { getMapVisualProfile, type MapVisualProfile } from './mapVisualProfile';
 import {
   createTitanForestWorld,
+  type TitanForestModelSet,
   type TitanForestWorldBundle,
 } from './forestWorld';
+import {
+  getTitanEnvironmentAssets,
+  type TitanEnvironmentAssets,
+  type TitanNamedMeshAsset,
+} from './titanEnvironmentAssets';
 
 const UP = new THREE.Vector3(0, 1, 0);
 const DOWN = new THREE.Vector3(0, -1, 0);
@@ -112,6 +118,20 @@ const ASTRONAUT_WAIST_HEIGHT = 1.05;
 const GROUND_TEXTURE_TILE_SIZE = 16;
 const FACILITY_PANEL_REPEAT = { x: 4, y: 1 } as const;
 const EMPTY_FLAGS: readonly FlagState[] = Object.freeze([]);
+
+const titanModelSet = (
+  assets: readonly TitanNamedMeshAsset[],
+  label: string,
+): TitanForestModelSet => {
+  const material = assets[0]?.material;
+  if (!(material instanceof THREE.MeshStandardMaterial)) {
+    throw new Error(`Titan ${label} requires a MeshStandardMaterial source.`);
+  }
+  return {
+    geometries: assets.map((asset) => asset.geometry),
+    material,
+  };
+};
 
 const TEAM_COLORS: Record<Team, { armor: number; accent: number; glow: number }> = {
   // Team modes use a readable full-suit tint, reinforced by bright IFF trim.
@@ -454,6 +474,7 @@ export class ArenaRenderer {
   private readonly container: HTMLElement;
   private readonly map: MapDefinition;
   private readonly visualProfile: MapVisualProfile;
+  private readonly titanEnvironmentAssets: TitanEnvironmentAssets | null;
   private readonly scene = new THREE.Scene();
   private readonly renderer: THREE.WebGLRenderer;
   private readonly composer: EffectComposer;
@@ -556,9 +577,9 @@ export class ArenaRenderer {
   private facilityEnvironment: FacilityEnvironmentBundle | null = null;
   private baseArchitecture: BaseArchitectureBundle | null = null;
   private titanForestWorld: TitanForestWorldBundle | null = null;
-  private groundTexture: THREE.CanvasTexture | null = null;
-  private groundNormalTexture: THREE.CanvasTexture | null = null;
-  private groundRoughnessTexture: THREE.CanvasTexture | null = null;
+  private groundTexture: THREE.Texture | null = null;
+  private groundNormalTexture: THREE.Texture | null = null;
+  private groundRoughnessTexture: THREE.Texture | null = null;
   private facilityPanelTexture: THREE.CanvasTexture | null = null;
   private technicalNormalTexture: THREE.CanvasTexture | null = null;
   private technicalRoughnessTexture: THREE.CanvasTexture | null = null;
@@ -627,6 +648,9 @@ export class ArenaRenderer {
     this.container = container;
     this.map = map;
     this.visualProfile = getMapVisualProfile(map.id);
+    this.titanEnvironmentAssets = this.visualProfile.environmentKind === 'alpine-forest'
+      ? getTitanEnvironmentAssets()
+      : null;
     if (this.visualProfile.environmentKind === 'alpine-forest') {
       // Titan's terrain and mountain rim span more than twice Crater's width.
       // Preserve the tighter depth precision of the existing maps while keeping
@@ -672,12 +696,19 @@ export class ArenaRenderer {
 
     this.createEnvironmentMap();
     this.viewScene.environment = this.scene.environment;
-    this.viewScene.environmentIntensity = Math.max(0.92, this.visualProfile.environmentIntensity + 0.16);
+    const alpineViewLighting = this.visualProfile.environmentKind === 'alpine-forest';
+    this.viewScene.environmentIntensity = alpineViewLighting
+      ? 0.72
+      : Math.max(0.92, this.visualProfile.environmentIntensity + 0.16);
     this.viewScene.add(this.viewCamera);
-    const viewHemisphere = new THREE.HemisphereLight(0xd8ebe6, 0x071011, 0.56);
-    const viewKey = new THREE.DirectionalLight(0xffedcd, 3.25);
+    const viewHemisphere = new THREE.HemisphereLight(
+      0xd8ebe6,
+      0x071011,
+      alpineViewLighting ? 0.34 : 0.56,
+    );
+    const viewKey = new THREE.DirectionalLight(0xffedcd, alpineViewLighting ? 2.3 : 3.25);
     viewKey.position.set(-2.2, 3.4, 2.6);
-    const viewRim = new THREE.PointLight(0x56eddb, 5.4, 4.5, 2);
+    const viewRim = new THREE.PointLight(0x56eddb, alpineViewLighting ? 3.2 : 5.4, 4.5, 2);
     viewRim.position.set(1.4, 0.8, -0.4);
     this.viewScene.add(viewHemisphere, viewKey, viewRim);
 
@@ -713,6 +744,7 @@ export class ArenaRenderer {
         uShadowTint: { value: new THREE.Color(this.visualProfile.atmospherePalette.shadowTint) },
         uHighlightTint: { value: new THREE.Color(this.visualProfile.atmospherePalette.highlightTint) },
         uOrbital: { value: this.visualProfile.environmentKind === 'orbital-station' ? 1 : 0 },
+        uAlpine: { value: this.visualProfile.environmentKind === 'alpine-forest' ? 1 : 0 },
       },
       vertexShader: /* glsl */ `
         varying vec2 vUv;
@@ -730,6 +762,7 @@ export class ArenaRenderer {
         uniform vec3 uShadowTint;
         uniform vec3 uHighlightTint;
         uniform float uOrbital;
+        uniform float uAlpine;
 
         float hash(vec2 p) {
           return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
@@ -760,16 +793,26 @@ export class ArenaRenderer {
             color = mix(color, radialBlur, impactBlur);
           }
           float luminance = dot(color, vec3(0.2126, 0.7152, 0.0722));
-          color = mix(vec3(luminance), color, mix(1.09, 1.13, uOrbital));
-          color = (color - 0.5) * mix(1.055, 1.085, uOrbital) + 0.5;
+          float saturation = mix(mix(1.09, 1.13, uOrbital), 1.11, uAlpine);
+          color = mix(vec3(luminance), color, saturation);
+          // Titan is graded in linear HDR before OutputPass/AgX. A contrast
+          // pivot at 0.5 subtracted 0.0275 from every shaded channel and
+          // irreversibly clipped natural rock and foliage to black. Preserve
+          // the toe and build contrast upward from zero for the outdoor map.
+          vec3 pivotContrast = (color - 0.5) * mix(1.055, 1.085, uOrbital) + 0.5;
+          color = mix(pivotContrast, max(color, vec3(0.0)) * 1.025, uAlpine);
+          luminance = dot(color, vec3(0.2126, 0.7152, 0.0722));
           float shadows = 1.0 - smoothstep(0.04, 0.42, luminance);
           float highlights = smoothstep(0.58, 1.15, luminance);
-          color = mix(color, color * (uShadowTint * 1.75 + 0.12), shadows * mix(0.085, 0.09, uOrbital));
+          float shadowTintAmount = mix(mix(0.085, 0.09, uOrbital), 0.022, uAlpine);
+          color = mix(color, color * (uShadowTint * 1.75 + 0.12), shadows * shadowTintAmount);
+          float alpineLift = uAlpine * (1.0 - smoothstep(0.025, 0.34, luminance));
+          color += vec3(0.014, 0.020, 0.019) * alpineLift;
           color += highlights * uHighlightTint * mix(0.024, 0.032, uOrbital);
           float edge = smoothstep(0.34, 1.02, length((vUv - 0.5) * vec2(1.15, 1.0)) * 1.42);
-          color *= 1.0 - edge * (0.125 + uDamage * 0.065);
+          color *= 1.0 - edge * (mix(0.125, 0.072, uAlpine) + uDamage * 0.065);
           float grain = hash(vUv * vec2(1493.0, 877.0) + floor(uTime * 24.0)) - 0.5;
-          color += grain * 0.0045;
+          color += grain * mix(0.0045, 0.0028, uAlpine);
           color = mix(color, color * mix(vec3(0.985, 1.008, 1.0), vec3(0.965, 0.99, 1.045), uOrbital), 0.18);
           gl_FragColor = vec4(color, source.a);
         }
@@ -1007,7 +1050,8 @@ export class ArenaRenderer {
   }
 
   private createEnvironmentMap(): void {
-    let environment: THREE.CanvasTexture;
+    let environment: THREE.Texture;
+    let ownsEnvironment = true;
     switch (this.visualProfile.environmentKind) {
       case 'alien-forest':
         environment = createColdEnvironmentTexture(768, 384);
@@ -1016,9 +1060,15 @@ export class ArenaRenderer {
         environment = createOrbitalEnvironmentTexture(768, 384);
         break;
       case 'alpine-forest':
-        // Titan shares the daylight PMREM family but has its own geometry,
-        // sky, atmosphere and profile strategy rather than falling through to Crater.
-        environment = createColdEnvironmentTexture(768, 384);
+        // The visible sky alone cannot illuminate PBR materials. Schachen's
+        // overcast forest HDRI contributes directionally coherent sky and
+        // ground bounce, lifting shaded stone without flattening the sun.
+        if (this.titanEnvironmentAssets) {
+          environment = this.titanEnvironmentAssets.environmentEquirect;
+          ownsEnvironment = false;
+        } else {
+          environment = createColdEnvironmentTexture(768, 384);
+        }
         break;
     }
     const generator = new THREE.PMREMGenerator(this.renderer);
@@ -1026,7 +1076,7 @@ export class ArenaRenderer {
     this.environmentTarget = generator.fromEquirectangular(environment);
     this.scene.environment = this.environmentTarget.texture;
     generator.dispose();
-    environment.dispose();
+    if (ownsEnvironment) environment.dispose();
   }
 
   private createSky(): THREE.ShaderMaterial {
@@ -1196,16 +1246,30 @@ export class ArenaRenderer {
                    mix(titanHash(i + vec2(0.0, 1.0)), titanHash(i + vec2(1.0, 1.0)), f.x), f.y);
       }
 
+      float titanFbm(vec2 p) {
+        float value = 0.0;
+        float amplitude = 0.54;
+        for (int octave = 0; octave < 4; octave++) {
+          value += titanNoise(p) * amplitude;
+          p = p * 2.03 + vec2(13.7, -8.4);
+          amplitude *= 0.48;
+        }
+        return value;
+      }
+
       void main() {
         vec3 direction = normalize(vDirection);
         float h = clamp(direction.y * 0.5 + 0.5, 0.0, 1.0);
         vec3 horizon = vec3(0.28, 0.57, 0.68);
         vec3 zenith = vec3(0.055, 0.27, 0.5);
         vec3 color = mix(horizon, zenith, smoothstep(0.42, 0.96, h));
-        float cloud = titanNoise(direction.xz * 5.2 + vec2(direction.y * 2.4 + uTime * 0.0017, 0.0));
-        float cloudBand = smoothstep(0.48, 0.7, cloud)
+        vec2 cloudUv = direction.xz * 4.7 + vec2(direction.y * 2.4 + uTime * 0.0017, 0.0);
+        float cloud = titanFbm(cloudUv);
+        float cloudBand = smoothstep(0.43, 0.72, cloud)
           * smoothstep(0.37, 0.55, h) * (1.0 - smoothstep(0.82, 0.96, h));
-        color = mix(color, vec3(0.58, 0.73, 0.76), cloudBand * 0.34);
+        float cloudVeil = smoothstep(0.32, 0.68, titanFbm(cloudUv * 0.46 + 9.1));
+        color = mix(color, vec3(0.5, 0.67, 0.72), cloudBand * 0.5);
+        color = mix(color, vec3(0.36, 0.56, 0.64), cloudVeil * 0.1);
         vec3 sunDir = normalize(vec3(-0.48, 0.61, -0.63));
         float sun = max(dot(direction, sunDir), 0.0);
         color += vec3(1.0, 0.76, 0.43) * pow(sun, 38.0) * 0.38;
@@ -1377,11 +1441,22 @@ export class ArenaRenderer {
     const centerX = (this.map.bounds.minX + this.map.bounds.maxX) * 0.5;
     const centerZ = (this.map.bounds.minZ + this.map.bounds.maxZ) * 0.5;
     const orbital = this.visualProfile.environmentKind === 'orbital-station';
+    const alpine = this.visualProfile.environmentKind === 'alpine-forest';
+    const cloneOwnedTexture = (source: THREE.Texture): THREE.Texture => {
+      const clone = source.clone();
+      clone.needsUpdate = true;
+      this.ownedTextures.add(clone);
+      return clone;
+    };
     if (orbital) {
       const stationDeck = createTechnicalSurfaceTextures(512);
       this.groundTexture = createStylizedGroundTexture(512);
       this.groundNormalTexture = stationDeck.normal;
       this.groundRoughnessTexture = stationDeck.roughness;
+    } else if (alpine && this.titanEnvironmentAssets) {
+      this.groundTexture = cloneOwnedTexture(this.titanEnvironmentAssets.ground.albedo);
+      this.groundNormalTexture = cloneOwnedTexture(this.titanEnvironmentAssets.ground.normal);
+      this.groundRoughnessTexture = cloneOwnedTexture(this.titanEnvironmentAssets.ground.roughness);
     } else {
       const forestGround = createForestGroundTextures(512);
       this.groundTexture = forestGround.albedo;
@@ -1414,7 +1489,31 @@ export class ArenaRenderer {
       this.createOrbitalLandscape(width, depth, centerX, centerZ);
       return;
     }
-    if (this.visualProfile.environmentKind === 'alpine-forest') {
+    if (alpine) {
+      const environmentAssets = this.titanEnvironmentAssets;
+      const treeTextures = environmentAssets
+        ? {
+            barkAlbedo: cloneOwnedTexture(environmentAssets.textures.barkAlbedo),
+            barkNormal: cloneOwnedTexture(environmentAssets.textures.barkNormal),
+            barkRoughness: cloneOwnedTexture(environmentAssets.textures.barkRoughness),
+            leafAlbedo: cloneOwnedTexture(environmentAssets.textures.leafAlbedo),
+            leafNormal: cloneOwnedTexture(environmentAssets.textures.leafNormal),
+            leafOpacity: cloneOwnedTexture(environmentAssets.textures.leafOpacity),
+            leafRoughness: cloneOwnedTexture(environmentAssets.textures.leafRoughness),
+          }
+        : {};
+      if (treeTextures.barkAlbedo) {
+        treeTextures.barkAlbedo.repeat.set(1.25, 6);
+        treeTextures.barkNormal?.repeat.copy(treeTextures.barkAlbedo.repeat);
+        treeTextures.barkRoughness?.repeat.copy(treeTextures.barkAlbedo.repeat);
+      }
+      const models = environmentAssets
+        ? {
+            fern: titanModelSet([...environmentAssets.ferns.values()], 'fern'),
+            rock: titanModelSet([...environmentAssets.rocks.values()], 'rock'),
+            cliff: titanModelSet([environmentAssets.cliff], 'cliff'),
+          }
+        : undefined;
       this.titanForestWorld = createTitanForestWorld({
         map: this.map,
         creekCenterZ: titanCreekCenterZ,
@@ -1424,7 +1523,9 @@ export class ArenaRenderer {
           albedo: this.groundTexture,
           normal: this.groundNormalTexture,
           roughness: this.groundRoughnessTexture,
+          ...treeTextures,
         },
+        models,
       });
       this.scene.add(this.titanForestWorld.group);
       return;
@@ -3142,34 +3243,36 @@ export class ArenaRenderer {
   }
 
   private createTitanMapGeometry(): void {
-    const palette = this.visualProfile.surfacePalette;
     const earthMaterial = new THREE.MeshStandardMaterial({
       name: 'titan-collidable-grove-earth',
-      color: palette.earthwork,
-      emissive: 0x244528,
-      emissiveIntensity: 0.3,
+      color: 0x8ea480,
+      emissive: 0x263d23,
+      emissiveIntensity: 0.09,
       map: this.groundTexture,
       normalMap: this.groundNormalTexture,
-      normalScale: new THREE.Vector2(0.78, 0.78),
+      normalScale: new THREE.Vector2(0.68, 0.68),
       roughnessMap: this.groundRoughnessTexture,
       roughness: 0.93,
       metalness: 0,
-      vertexColors: true,
+      vertexColors: false,
     });
-    const rockMaterial = new THREE.MeshStandardMaterial({
-      name: 'titan-collidable-natural-rock',
-      color: palette.outcrop,
-      emissive: 0x26372e,
-      emissiveIntensity: 0.34,
-      map: this.groundTexture,
-      normalMap: this.groundNormalTexture,
-      normalScale: new THREE.Vector2(0.92, 0.92),
-      roughnessMap: this.groundRoughnessTexture,
-      roughness: 0.77,
-      metalness: 0.025,
-      vertexColors: true,
-      flatShading: true,
-    });
+    const scannedRockAssets = this.titanEnvironmentAssets
+      ? [...this.titanEnvironmentAssets.rocks.values()]
+      : [];
+    const scannedRockSource = scannedRockAssets[0]?.material;
+    const rockMaterial = scannedRockSource instanceof THREE.MeshStandardMaterial
+      ? scannedRockSource.clone()
+      : new THREE.MeshStandardMaterial({ color: 0x8f9b94, roughness: 0.84, metalness: 0 });
+    rockMaterial.name = 'titan-collidable-natural-rock';
+    rockMaterial.color.set(0xffffff);
+    rockMaterial.emissive.setHex(0x1b211e);
+    rockMaterial.emissiveIntensity = 0.025;
+    rockMaterial.roughness = Math.max(0.74, rockMaterial.roughness);
+    rockMaterial.metalness = 0;
+    rockMaterial.vertexColors = false;
+    rockMaterial.flatShading = false;
+    if (rockMaterial.normalMap) rockMaterial.normalScale.set(0.68, 0.68);
+    rockMaterial.needsUpdate = true;
     const groveGeometries: THREE.BufferGeometry[] = [];
     const rockGeometries: THREE.BufferGeometry[] = [];
     const groveNames: string[] = [];
@@ -3190,13 +3293,31 @@ export class ArenaRenderer {
       const grove = obstacle.id.includes('grove');
       const natural = grove || /outcrop|ridge|rock|cliff|berm|bank/.test(obstacle.id);
       if (!natural) continue;
-      const geometry = createOrganicObstacleGeometry(size, hashString(obstacle.id), !grove);
-      applyGeometrySurfaceTint(geometry, hashString(`${obstacle.id}-titan-tint`));
-      geometry.applyMatrix4(new THREE.Matrix4().makeTranslation(center.x, center.y, center.z));
       if (grove) {
+        const geometry = createOrganicObstacleGeometry(size, hashString(obstacle.id), false);
+        geometry.applyMatrix4(new THREE.Matrix4().makeTranslation(center.x, center.y, center.z));
         groveGeometries.push(geometry);
         groveNames.push(obstacle.id);
       } else {
+        const source = scannedRockAssets[rockGeometries.length % scannedRockAssets.length];
+        const geometry = source
+          ? source.geometry.clone()
+          : createOrganicObstacleGeometry(size, hashString(obstacle.id), true);
+        if (source) {
+          geometry.computeBoundingBox();
+          const bounds = geometry.boundingBox!;
+          const sourceSize = bounds.getSize(new THREE.Vector3());
+          const targetScale = new THREE.Vector3(
+            size.x / Math.max(sourceSize.x, 0.001),
+            size.y / Math.max(sourceSize.y, 0.001),
+            size.z / Math.max(sourceSize.z, 0.001),
+          );
+          geometry.scale(targetScale.x * 1.015, targetScale.y * 1.03, targetScale.z * 1.015);
+          if ((hashString(obstacle.id) & 1) === 1) geometry.rotateY(Math.PI);
+          geometry.translate(center.x, obstacle.min.y - size.y * 0.015, center.z);
+        } else {
+          geometry.applyMatrix4(new THREE.Matrix4().makeTranslation(center.x, center.y, center.z));
+        }
         rockGeometries.push(geometry);
         rockNames.push(obstacle.id);
       }

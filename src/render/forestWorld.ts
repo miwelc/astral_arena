@@ -12,6 +12,25 @@ export interface TitanForestTextures {
   albedo?: THREE.Texture | null;
   normal?: THREE.Texture | null;
   roughness?: THREE.Texture | null;
+  barkAlbedo?: THREE.Texture | null;
+  barkNormal?: THREE.Texture | null;
+  barkRoughness?: THREE.Texture | null;
+  leafAlbedo?: THREE.Texture | null;
+  leafNormal?: THREE.Texture | null;
+  leafOpacity?: THREE.Texture | null;
+  leafRoughness?: THREE.Texture | null;
+}
+
+export interface TitanForestModelSet {
+  readonly geometries: readonly THREE.BufferGeometry[];
+  readonly material: THREE.MeshStandardMaterial;
+}
+
+export interface TitanForestModels {
+  readonly grass?: TitanForestModelSet;
+  readonly fern?: TitanForestModelSet;
+  readonly rock?: TitanForestModelSet;
+  readonly cliff?: TitanForestModelSet;
 }
 
 export interface TitanForestWorldOptions {
@@ -19,6 +38,7 @@ export interface TitanForestWorldOptions {
   /** Must match the authored creek depression in the map height sampler. */
   creekCenterZ: (x: number) => number;
   textures?: TitanForestTextures;
+  models?: TitanForestModels;
   quality?: 'low' | 'high';
   seed?: number;
 }
@@ -159,9 +179,12 @@ const createTerrainChunkGeometry = (
   const mapDepth = map.bounds.maxZ - map.bounds.minZ;
   const normal = new THREE.Vector3();
   const color = new THREE.Color();
-  const lowland = new THREE.Color(0x5b7e49);
-  const highland = new THREE.Color(0x879f66);
-  const rock = new THREE.Color(0x596d62);
+  // Vertex colour is a broad environmental tint, not a second dark albedo.
+  // Keeping it near neutral lets the PBR forest-floor scan retain its real
+  // luminance and detail in indirect light.
+  const lowland = new THREE.Color(0x9fba7f);
+  const highland = new THREE.Color(0xb8ca91);
+  const rock = new THREE.Color(0xa5aea1);
   const sampleStep = Math.max(0.7, Math.min((x1 - x0) / segmentsX, (z1 - z0) / segmentsZ));
 
   let vertex = 0;
@@ -292,7 +315,9 @@ const createSlenderTrunkGeometry = (): THREE.BufferGeometry => {
       const b = ring * radialSegments + next;
       const c = (ring + 1) * radialSegments + segment;
       const d = (ring + 1) * radialSegments + next;
-      indices.push(a, b, d, a, d, c);
+      // Counter-clockwise when viewed from outside. Inward tube normals made
+      // shaded trunks collapse to black despite the global diffuse lights.
+      indices.push(a, d, b, a, c, d);
     }
   }
   const geometry = new THREE.BufferGeometry();
@@ -336,7 +361,7 @@ const createUmbrellaCrownGeometry = (): THREE.BufferGeometry => {
       const b = ring * radialSegments + next;
       const c = (ring + 1) * radialSegments + segment;
       const d = (ring + 1) * radialSegments + next;
-      indices.push(a, b, d, a, d, c);
+      indices.push(a, d, b, a, c, d);
     }
   }
   const geometry = new THREE.BufferGeometry();
@@ -348,15 +373,83 @@ const createUmbrellaCrownGeometry = (): THREE.BufferGeometry => {
   return geometry;
 };
 
+/**
+ * A compact spray of crossed leaf cards. Cards select individual photographs
+ * from the nine-leaf atlas, replacing the solid low-poly umbrella silhouette
+ * with a genuinely porous, layered canopy.
+ */
+const createLeafClusterGeometry = (): THREE.BufferGeometry => {
+  const positions: number[] = [];
+  const normals: number[] = [];
+  const uvs: number[] = [];
+  const indices: number[] = [];
+  const random = seededRandom(0x1eaf024);
+  const cardCount = 88;
+  const right = new THREE.Vector3();
+  const up = new THREE.Vector3();
+  const normal = new THREE.Vector3();
+
+  for (let card = 0; card < cardCount; card += 1) {
+    const angle = card * 2.399963229728653 + (random() - 0.5) * 0.42;
+    const radial = Math.sqrt(random()) * 0.86;
+    const centerX = Math.cos(angle) * radial;
+    const centerZ = Math.sin(angle) * radial * (0.82 + random() * 0.2);
+    const centerY = -0.1 + random() * 0.92 - radial * 0.08;
+    const yaw = angle + Math.PI * 0.5 + (random() - 0.5) * 1.25;
+    const tilt = -0.34 + random() * 0.68;
+    const halfWidth = 0.12 + random() * 0.07;
+    const halfHeight = 0.14 + random() * 0.08;
+    right.set(Math.cos(yaw), 0, Math.sin(yaw)).multiplyScalar(halfWidth);
+    up.set(
+      -Math.sin(yaw) * Math.sin(tilt),
+      Math.cos(tilt),
+      Math.cos(yaw) * Math.sin(tilt),
+    ).multiplyScalar(halfHeight);
+    normal.crossVectors(right, up).normalize();
+    const offset = positions.length / 3;
+    const atlasColumn = Math.floor(random() * 3);
+    const atlasRow = Math.floor(random() * 3);
+    const atlasPadding = 0.018;
+    const u0 = (atlasColumn + atlasPadding) / 3;
+    const u1 = (atlasColumn + 1 - atlasPadding) / 3;
+    const v0 = (atlasRow + atlasPadding) / 3;
+    const v1 = (atlasRow + 1 - atlasPadding) / 3;
+    for (const [horizontal, vertical, u, v] of [
+      [-1, -1, u0, v0],
+      [1, -1, u1, v0],
+      [1, 1, u1, v1],
+      [-1, 1, u0, v1],
+    ] as const) {
+      positions.push(
+        centerX + right.x * horizontal + up.x * vertical,
+        centerY + right.y * horizontal + up.y * vertical,
+        centerZ + right.z * horizontal + up.z * vertical,
+      );
+      normals.push(normal.x, normal.y, normal.z);
+      uvs.push(u, v);
+    }
+    indices.push(offset, offset + 1, offset + 2, offset, offset + 2, offset + 3);
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
+  geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  geometry.setIndex(indices);
+  geometry.computeBoundingBox();
+  geometry.computeBoundingSphere();
+  return geometry;
+};
+
 const createGrassTuftGeometry = (): THREE.BufferGeometry => {
   const positions: number[] = [];
   const indices: number[] = [];
-  const blades = 7;
+  const blades = 11;
   for (let blade = 0; blade < blades; blade += 1) {
     const angle = blade / blades * TAU + Math.sin(blade * 3.71) * 0.18;
-    const width = 0.037 + (blade % 3) * 0.007;
-    const height = 0.72 + (blade % 4) * 0.095;
-    const bend = 0.11 + (blade % 3) * 0.035;
+    const width = 0.024 + (blade % 4) * 0.0045;
+    const height = 0.58 + (blade % 5) * 0.082;
+    const bend = 0.085 + (blade % 4) * 0.026;
     const rightX = Math.cos(angle) * width;
     const rightZ = Math.sin(angle) * width;
     const bendX = Math.sin(angle) * bend;
@@ -484,11 +577,11 @@ const createScatterRecords = (
     const scale = options.kind === 'tree'
       ? 0.8 + options.random() * 0.48
       : options.kind === 'grass'
-        ? 0.44 + options.random() * 0.7
-        : 0.62 + options.random() * 0.72;
+        ? 0.42 + options.random() * 0.48
+        : 0.38 + options.random() * 0.42;
     const green = options.kind === 'grass'
-      ? new THREE.Color(0x789861).lerp(new THREE.Color(0xa4b875), options.random() * 0.42)
-      : new THREE.Color(0x527758).lerp(new THREE.Color(0x87a76c), options.random() * 0.44);
+      ? new THREE.Color(0xa8c57a).lerp(new THREE.Color(0xdce69c), 0.2 + options.random() * 0.52)
+      : new THREE.Color(0x8ca483).lerp(new THREE.Color(0xb8ca98), options.random() * 0.44);
     records.push({
       x,
       y: height,
@@ -514,7 +607,7 @@ const createTreeTile = (
   if (records.length === 0) return group;
   const trunks = new THREE.InstancedMesh(trunkGeometry, trunkMaterial, records.length);
   trunks.name = 'titan-slender-tree-trunks';
-  const crowns = new THREE.InstancedMesh(crownGeometry, crownMaterial, records.length * 2);
+  const crowns = new THREE.InstancedMesh(crownGeometry, crownMaterial, records.length * 4);
   crowns.name = 'titan-umbrella-tree-crowns';
   trunks.castShadow = castShadow;
   crowns.castShadow = castShadow;
@@ -539,18 +632,32 @@ const createTreeTile = (
     setInstanceColor(crowns, crownIndex, tree.color);
     crownIndex += 1;
 
-    const satelliteAngle = tree.rotation + 1.25 + (index % 3) * 0.64;
-    transform.position.set(
-      tree.x + Math.cos(satelliteAngle) * crownWidth * 0.28,
-      tree.y + tree.height * 0.9,
-      tree.z + Math.sin(satelliteAngle) * crownWidth * 0.28,
-    );
-    transform.rotation.set(0, satelliteAngle, 0);
-    transform.scale.set(crownWidth * 0.68, crownWidth * 0.31, crownWidth * 0.61);
-    transform.updateMatrix();
-    crowns.setMatrixAt(crownIndex, transform.matrix);
-    setInstanceColor(crowns, crownIndex, new THREE.Color(tree.color).offsetHSL(0.01, -0.03, 0.035).getHex());
-    crownIndex += 1;
+    for (let satellite = 0; satellite < 3; satellite += 1) {
+      const satelliteAngle = tree.rotation
+        + 0.84
+        + satellite * 2.13
+        + (index % 3) * 0.21;
+      const satelliteRadius = crownWidth * (0.22 + satellite * 0.035);
+      transform.position.set(
+        tree.x + Math.cos(satelliteAngle) * satelliteRadius,
+        tree.y + tree.height * (0.8 + satellite * 0.055),
+        tree.z + Math.sin(satelliteAngle) * satelliteRadius,
+      );
+      transform.rotation.set(0, satelliteAngle, 0);
+      transform.scale.set(
+        crownWidth * (0.58 + satellite * 0.055),
+        crownWidth * (0.27 + satellite * 0.018),
+        crownWidth * (0.53 + satellite * 0.04),
+      );
+      transform.updateMatrix();
+      crowns.setMatrixAt(crownIndex, transform.matrix);
+      setInstanceColor(
+        crowns,
+        crownIndex,
+        new THREE.Color(tree.color).offsetHSL(0.008 * satellite, -0.03, 0.025 + satellite * 0.012).getHex(),
+      );
+      crownIndex += 1;
+    }
   });
   finishInstances(trunks);
   finishInstances(crowns);
@@ -714,10 +821,11 @@ const createWetRockField = (
   material: THREE.MeshStandardMaterial,
   seed: number,
   quality: 'low' | 'high',
+  scannedGeometry?: THREE.BufferGeometry,
 ): THREE.InstancedMesh => {
   const random = seededRandom(seed);
   const count = quality === 'high' ? 170 : 96;
-  const geometry = new THREE.DodecahedronGeometry(1, 1);
+  const geometry = scannedGeometry ?? new THREE.DodecahedronGeometry(1, 1);
   const rocks = new THREE.InstancedMesh(geometry, material, count);
   rocks.name = 'titan-wet-rocks';
   rocks.castShadow = false;
@@ -730,7 +838,13 @@ const createWetRockField = (
     const z = creekCenterZ(x) + bankSide * (4.2 + random() * 7.5);
     if (pointNearMapFeature(map, x, z, 0.5)) continue;
     const radius = 0.22 + random() * random() * 1.25;
-    transform.position.set(x, visualHeightAt(x, z) + radius * 0.28, z);
+    // Scanned assets are normalised with their lowest vertex at y=0, whereas
+    // the procedural dodecahedron is centred around its local origin.
+    transform.position.set(
+      x,
+      visualHeightAt(x, z) + (scannedGeometry ? 0.015 : radius * 0.28),
+      z,
+    );
     transform.rotation.set(random() * 0.45, random() * TAU, random() * 0.38);
     transform.scale.set(
       radius * (0.72 + random() * 0.58),
@@ -739,7 +853,13 @@ const createWetRockField = (
     );
     transform.updateMatrix();
     rocks.setMatrixAt(accepted, transform.matrix);
-    setInstanceColor(rocks, accepted, random() > 0.68 ? 0x6d8272 : 0x465e56);
+    setInstanceColor(
+      rocks,
+      accepted,
+      scannedGeometry
+        ? (random() > 0.68 ? 0xe1e7dc : 0xc7d1c4)
+        : (random() > 0.68 ? 0x6d8272 : 0x465e56),
+    );
     accepted += 1;
   }
   rocks.count = accepted;
@@ -757,6 +877,7 @@ const createCraggyMountainGeometry = (): THREE.BufferGeometry => {
     { y: 0.88, radius: 0.3, offsetX: -0.02, offsetZ: -0.04 },
   ] as const;
   const positions: number[] = [];
+  const uvs: number[] = [];
   const indices: number[] = [];
   rings.forEach((ring, ringIndex) => {
     for (let segment = 0; segment < radialSegments; segment += 1) {
@@ -770,6 +891,7 @@ const createCraggyMountainGeometry = (): THREE.BufferGeometry => {
         ring.y + ledge,
         ring.offsetZ + Math.sin(angle) * ring.radius * irregularity,
       );
+      uvs.push(segment / radialSegments, ringIndex / (rings.length - 1));
     }
   });
   for (let ring = 0; ring < rings.length - 1; ring += 1) {
@@ -779,17 +901,21 @@ const createCraggyMountainGeometry = (): THREE.BufferGeometry => {
       const b = ring * radialSegments + next;
       const c = (ring + 1) * radialSegments + segment;
       const d = (ring + 1) * radialSegments + next;
-      indices.push(a, b, d, a, d, c);
+      // Counter-clockwise when viewed from outside. The former winding made
+      // the visible shell sample the dark underside of the environment map.
+      indices.push(a, d, b, a, c, d);
     }
   }
   const summit = positions.length / 3;
   positions.push(0.015, 0.955, -0.025);
+  uvs.push(0.5, 1);
   const summitRing = (rings.length - 1) * radialSegments;
   for (let segment = 0; segment < radialSegments; segment += 1) {
-    indices.push(summitRing + segment, summitRing + (segment + 1) % radialSegments, summit);
+    indices.push(summitRing + segment, summit, summitRing + (segment + 1) % radialSegments);
   }
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
   geometry.setIndex(indices);
   geometry.computeVertexNormals();
   geometry.computeBoundingBox();
@@ -806,6 +932,8 @@ const createPerimeterMountains = (
   const random = seededRandom(seed);
   const count = 34;
   const geometry = createCraggyMountainGeometry();
+  geometry.computeBoundingBox();
+  const sourceSize = geometry.boundingBox?.getSize(new THREE.Vector3()) ?? new THREE.Vector3(2, 1, 2);
   const mountains = new THREE.InstancedMesh(geometry, material, count);
   mountains.name = 'titan-natural-cliff-perimeter';
   mountains.castShadow = false;
@@ -822,9 +950,17 @@ const createPerimeterMountains = (
       : THREE.MathUtils.lerp(map.bounds.minZ - 27, map.bounds.maxZ + 27, random());
     const height = 17 + random() * 22;
     const radius = 8 + random() * 10;
-    transform.position.set(x, visualHeightAt(x, z) + height * 0.42, z);
+    // The local mesh starts at y=0. Anchor that base in the extended terrain
+    // instead of floating the entire massif almost halfway up its height.
+    transform.position.set(x, visualHeightAt(x, z) - height * 0.18, z);
     transform.rotation.set((random() - 0.5) * 0.08, random() * TAU, (random() - 0.5) * 0.08);
-    transform.scale.set(radius * (0.72 + random() * 0.48), height, radius * (0.72 + random() * 0.52));
+    const width = radius * (1.48 + random() * 0.72);
+    const depth = radius * (1.02 + random() * 0.56);
+    transform.scale.set(
+      width / Math.max(sourceSize.x, 0.001),
+      height / Math.max(sourceSize.y, 0.001),
+      depth / Math.max(sourceSize.z, 0.001),
+    );
     transform.updateMatrix();
     mountains.setMatrixAt(index, transform.matrix);
     setInstanceColor(mountains, index, index % 4 === 0 ? 0x607067 : 0x425750);
@@ -832,6 +968,48 @@ const createPerimeterMountains = (
   finishInstances(mountains);
   return mountains;
 };
+
+const cloneScannedMaterial = (
+  source: THREE.MeshStandardMaterial,
+  name: string,
+  options: {
+    emissive: number;
+    emissiveIntensity: number;
+    roughness: number;
+    doubleSided?: boolean;
+  },
+): THREE.MeshStandardMaterial => {
+  const material = source.clone();
+  material.name = name;
+  material.color.set(0xffffff);
+  material.emissive.setHex(options.emissive);
+  material.emissiveIntensity = options.emissiveIntensity;
+  material.roughness = options.roughness;
+  material.metalness = 0;
+  // Photogrammetry albedo is already fully authored. Multiplying it by an
+  // additional green instance tint crushed shadowed leaves and stones toward
+  // black; procedural fallbacks still retain vertex-colour variation.
+  material.vertexColors = false;
+  material.flatShading = false;
+  material.transparent = false;
+  material.depthWrite = true;
+  if (options.doubleSided) material.side = THREE.DoubleSide;
+  material.aoMapIntensity = options.doubleSided ? 0.38 : 0.72;
+  if (material.normalMap) material.normalScale.set(0.62, 0.62);
+  material.needsUpdate = true;
+  return material;
+};
+
+const usableModelSet = (
+  modelSet: TitanForestModelSet | undefined,
+): TitanForestModelSet | undefined => modelSet && modelSet.geometries.length > 0
+  ? modelSet
+  : undefined;
+
+const cycleGeometry = (
+  geometries: readonly THREE.BufferGeometry[],
+  cycleIndex: number,
+): THREE.BufferGeometry => geometries[(cycleIndex >>> 0) % geometries.length]!;
 
 /** Creates Titan's complete deterministic natural world presentation. */
 export const createTitanForestWorld = (
@@ -854,34 +1032,48 @@ export const createTitanForestWorld = (
   const vegetationTiles: VegetationTile[] = [];
   const visualHeightAt = (x: number, z: number): number =>
     sampleTitanForestVisualHeight(options.map, x, z, seed);
+  const grassModel = usableModelSet(options.models?.grass);
+  const fernModel = usableModelSet(options.models?.fern);
+  const rockModel = usableModelSet(options.models?.rock);
+  const cliffModel = usableModelSet(options.models?.cliff);
 
   const terrainMaterial = new THREE.MeshStandardMaterial({
     name: 'titan-sculpted-terrain',
     color: 0xffffff,
-    emissive: 0x294d1d,
-    emissiveIntensity: 0.29,
+    emissive: 0x21301c,
+    emissiveIntensity: 0.08,
     map: options.textures?.albedo ?? null,
     normalMap: options.textures?.normal ?? null,
     normalScale: new THREE.Vector2(0.74, 0.74),
     roughnessMap: options.textures?.roughness ?? null,
     roughness: 0.92,
     metalness: 0,
-    envMapIntensity: 0.42,
     vertexColors: true,
   });
-  const cliffMaterial = new THREE.MeshStandardMaterial({
-    name: 'titan-perimeter-cliff-stone',
-    color: 0xffffff,
-    roughness: 0.9,
-    metalness: 0.015,
-    flatShading: true,
-    vertexColors: true,
-  });
+  const cliffMaterial = cliffModel
+    ? cloneScannedMaterial(cliffModel.material, 'titan-perimeter-cliff-stone', {
+        emissive: 0x20251f,
+        emissiveIntensity: 0.025,
+        roughness: 0.86,
+        doubleSided: true,
+      })
+    : new THREE.MeshStandardMaterial({
+        name: 'titan-perimeter-cliff-stone',
+        color: 0xffffff,
+        roughness: 0.9,
+        metalness: 0.015,
+        flatShading: true,
+        vertexColors: true,
+      });
   const trunkMaterial = new THREE.MeshStandardMaterial({
     name: 'titan-pale-tree-bark',
     color: 0xffffff,
-    emissive: 0x25322b,
-    emissiveIntensity: 0.14,
+    emissive: 0x1d211c,
+    emissiveIntensity: 0.045,
+    map: options.textures?.barkAlbedo ?? null,
+    normalMap: options.textures?.barkNormal ?? null,
+    normalScale: new THREE.Vector2(0.58, 0.58),
+    roughnessMap: options.textures?.barkRoughness ?? null,
     roughness: 0.94,
     metalness: 0,
     vertexColors: true,
@@ -889,42 +1081,67 @@ export const createTitanForestWorld = (
   const crownMaterial = new THREE.MeshStandardMaterial({
     name: 'titan-umbrella-canopy',
     color: 0xffffff,
-    emissive: 0x254f2b,
-    emissiveIntensity: 0.46,
+    emissive: 0x21391f,
+    emissiveIntensity: 0.075,
+    map: options.textures?.leafAlbedo ?? null,
+    alphaMap: options.textures?.leafOpacity ?? null,
+    alphaTest: options.textures?.leafOpacity ? 0.43 : 0,
+    normalMap: options.textures?.leafNormal ?? null,
+    normalScale: new THREE.Vector2(0.52, 0.52),
+    roughnessMap: options.textures?.leafRoughness ?? null,
     roughness: 0.82,
     metalness: 0,
     side: THREE.DoubleSide,
-    vertexColors: true,
+    vertexColors: !options.textures?.leafAlbedo,
   });
-  const grassMaterial = new THREE.MeshStandardMaterial({
-    name: 'titan-wind-grass',
-    color: 0xffffff,
-    emissive: 0x315f20,
-    emissiveIntensity: 0.34,
-    roughness: 0.91,
-    metalness: 0,
-    side: THREE.DoubleSide,
-    vertexColors: true,
-  });
-  const fernMaterial = new THREE.MeshStandardMaterial({
-    name: 'titan-wind-ferns',
-    color: 0xffffff,
-    emissive: 0x2c5d31,
-    emissiveIntensity: 0.34,
-    roughness: 0.86,
-    metalness: 0,
-    side: THREE.DoubleSide,
-    vertexColors: true,
-  });
-  const rockMaterial = new THREE.MeshStandardMaterial({
-    name: 'titan-creek-wet-rock',
-    color: 0xffffff,
-    roughness: 0.46,
-    metalness: 0.025,
-    envMapIntensity: 0.86,
-    vertexColors: true,
-    flatShading: true,
-  });
+  const grassMaterial = grassModel
+    ? cloneScannedMaterial(grassModel.material, 'titan-wind-grass', {
+        emissive: 0x4c7135,
+        emissiveIntensity: 0.2,
+        roughness: 0.9,
+        doubleSided: true,
+      })
+    : new THREE.MeshStandardMaterial({
+        name: 'titan-wind-grass',
+        color: 0xffffff,
+        emissive: 0x3f6127,
+        emissiveIntensity: 0.34,
+        roughness: 0.91,
+        metalness: 0,
+        side: THREE.DoubleSide,
+        vertexColors: true,
+      });
+  const fernMaterial = fernModel
+    ? cloneScannedMaterial(fernModel.material, 'titan-wind-ferns', {
+        emissive: 0x356c31,
+        emissiveIntensity: 0.2,
+        roughness: 0.86,
+        doubleSided: true,
+      })
+    : new THREE.MeshStandardMaterial({
+        name: 'titan-wind-ferns',
+        color: 0xffffff,
+        emissive: 0x203a25,
+        emissiveIntensity: 0.13,
+        roughness: 0.86,
+        metalness: 0,
+        side: THREE.DoubleSide,
+        vertexColors: true,
+      });
+  const rockMaterial = rockModel
+    ? cloneScannedMaterial(rockModel.material, 'titan-creek-wet-rock', {
+        emissive: 0x1d2420,
+        emissiveIntensity: 0.035,
+        roughness: 0.62,
+      })
+    : new THREE.MeshStandardMaterial({
+        name: 'titan-creek-wet-rock',
+        color: 0xffffff,
+        roughness: 0.46,
+        metalness: 0.025,
+        vertexColors: true,
+        flatShading: true,
+      });
   for (const material of [
     terrainMaterial,
     cliffMaterial,
@@ -977,18 +1194,27 @@ export const createTitanForestWorld = (
   }
   group.add(terrain);
 
-  const mountains = createPerimeterMountains(options.map, visualHeightAt, cliffMaterial, seed ^ 0x9c31);
+  const mountains = createPerimeterMountains(
+    options.map,
+    visualHeightAt,
+    cliffMaterial,
+    seed ^ 0x9c31,
+  );
   group.add(mountains);
   geometries.add(mountains.geometry);
 
   const trunkGeometry = createSlenderTrunkGeometry();
-  const crownGeometry = createUmbrellaCrownGeometry();
-  const grassGeometry = createGrassTuftGeometry();
-  const fernGeometry = createFernCrownGeometry();
+  const crownGeometry = options.textures?.leafAlbedo && options.textures.leafOpacity
+    ? createLeafClusterGeometry()
+    : createUmbrellaCrownGeometry();
+  const proceduralGrassGeometry = grassModel ? null : createGrassTuftGeometry();
+  const proceduralFernGeometry = fernModel ? null : createFernCrownGeometry();
+  const grassGeometries = grassModel?.geometries ?? [proceduralGrassGeometry!];
+  const fernGeometries = fernModel?.geometries ?? [proceduralFernGeometry!];
   geometries.add(trunkGeometry);
   geometries.add(crownGeometry);
-  geometries.add(grassGeometry);
-  geometries.add(fernGeometry);
+  if (proceduralGrassGeometry) geometries.add(proceduralGrassGeometry);
+  if (proceduralFernGeometry) geometries.add(proceduralFernGeometry);
   let treeInstances = 0;
   let crownInstances = 0;
   let grassInstances = 0;
@@ -1005,8 +1231,8 @@ export const createTitanForestWorld = (
       const random = seededRandom(seed + tileIndex * 0x9e37 + 17);
       const area = (x1 - x0) * (z1 - z0);
       const treeTarget = Math.max(2, Math.round(area * (quality === 'high' ? 0.005 : 0.0027)));
-      const grassTarget = Math.max(24, Math.round(area * (quality === 'high' ? 0.62 : 0.12)));
-      const fernTarget = Math.max(8, Math.round(area * (quality === 'high' ? 0.04 : 0.017)));
+      const grassTarget = Math.max(24, Math.round(area * (quality === 'high' ? 1.04 : 0.18)));
+      const fernTarget = Math.max(8, Math.round(area * (quality === 'high' ? 0.055 : 0.02)));
       const treeScatter = createScatterRecords({
         count: treeTarget,
         random,
@@ -1023,8 +1249,8 @@ export const createTitanForestWorld = (
         ...record,
         height: (16 + random() * 13) * record.scale,
         radius: 0.58 + random() * 0.5,
-        color: new THREE.Color(0x496f50)
-          .lerp(new THREE.Color(0x82a060), 0.25 + random() * 0.55)
+        color: new THREE.Color(0x91aa7d)
+          .lerp(new THREE.Color(0xc0cf91), 0.25 + random() * 0.55)
           .offsetHSL((index % 5) * 0.004, 0, 0)
           .getHex(),
       }));
@@ -1065,8 +1291,8 @@ export const createTitanForestWorld = (
       const understoryGroup = createUnderstoryTile(
         grass,
         ferns,
-        grassGeometry,
-        fernGeometry,
+        cycleGeometry(grassGeometries, tileIndex),
+        cycleGeometry(fernGeometries, tileIndex),
         grassMaterial,
         fernMaterial,
       );
@@ -1076,13 +1302,16 @@ export const createTitanForestWorld = (
       group.add(tile);
       vegetationTiles.push({ center: tileCenter, trees: treeGroup, understory: understoryGroup });
       treeInstances += trees.length;
-      crownInstances += trees.length * 2;
+      crownInstances += trees.length * 4;
       grassInstances += grass.length;
       fernInstances += ferns.length;
       tileIndex += 1;
     }
   }
 
+  const wetRockGeometry = rockModel
+    ? cycleGeometry(rockModel.geometries, seed ^ 0x771c)
+    : undefined;
   const wetRocks = createWetRockField(
     options.map,
     options.creekCenterZ,
@@ -1090,9 +1319,12 @@ export const createTitanForestWorld = (
     rockMaterial,
     seed ^ 0x771c,
     quality,
+    wetRockGeometry,
   );
   group.add(wetRocks);
-  geometries.add(wetRocks.geometry);
+  // Asset-library geometry is process-wide and intentionally shared. Only
+  // the procedural fallback belongs to this world bundle's disposal set.
+  if (!wetRockGeometry) geometries.add(wetRocks.geometry);
 
   const creekMaterial = createCreekMaterial();
   const creekGeometry = createCreekGeometry(options.map, options.creekCenterZ);

@@ -372,21 +372,21 @@ const MAP_VISUAL_PROFILES = deepFreeze({
     mapId: 'titan-expanse',
     environmentKind: 'alpine-forest',
     backgroundColor: 0x75a7af,
-    fog: { color: 0x89aba9, density: 0.0046 },
-    exposure: 0.98,
-    environmentIntensity: 1.08,
+    fog: { color: 0x89aba9, density: 0.0037 },
+    exposure: 0.89,
+    environmentIntensity: 1.14,
     lighting: {
-      ambient: { color: 0x8eaaa2, intensity: 0.95 },
-      hemisphere: { skyColor: 0xc8e2e3, groundColor: 0x456b4d, intensity: 1.5 },
+      ambient: { color: 0x9fb8b2, intensity: 0.4 },
+      hemisphere: { skyColor: 0xc8e2e3, groundColor: 0x55745b, intensity: 0.92 },
       sun: {
         color: 0xffd39a,
         direction: [-0.48, 0.61, -0.63],
-        intensity: 2.85,
+        intensity: 2.15,
       },
       fill: {
         color: 0x83c7d0,
         direction: [0.66, 0.36, 0.58],
-        intensity: 1.12,
+        intensity: 0.68,
       },
       centralTower: { color: 0x9fe8d4, intensity: 12, distance: 18, decay: 2 },
       teamBases: {

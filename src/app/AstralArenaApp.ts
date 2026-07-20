@@ -35,6 +35,7 @@ import { LocalPlayerPrediction } from '../network/LocalPlayerPrediction';
 import { RemoteInputBuffer } from '../network/RemoteInputBuffer';
 import type { ArenaRenderer } from '../render/ArenaRenderer';
 import type { ExternalWeaponLoadReport } from '../render/externalWeaponModels';
+import type { TitanEnvironmentAssets } from '../render/titanEnvironmentAssets';
 import { directionalDamagePresentation, latestDamageEventAfter, selectCombatWarning } from './combatHud';
 import { presentGameEvents, selectAnnouncementCandidate, type EventPresentation } from './eventPresentation';
 import { interactionPromptFor } from './interactionPrompt';
@@ -144,6 +145,7 @@ export class AstralArenaApp {
   private interactionPromptDetail = '';
   private displayedTimeSeconds = -1;
   private externalWeaponPreload: Promise<ExternalWeaponLoadReport> | null = null;
+  private titanEnvironmentPreload: Promise<TitanEnvironmentAssets> | null = null;
   private sessionGeneration = 0;
 
   public constructor(private readonly root: HTMLElement) {
@@ -172,6 +174,18 @@ export class AstralArenaApp {
       });
     }
     return this.externalWeaponPreload;
+  }
+
+  private prepareTitanEnvironmentAssets(): Promise<TitanEnvironmentAssets> {
+    if (!this.titanEnvironmentPreload) {
+      const request = import('../render/titanEnvironmentAssets')
+        .then(({ preloadTitanEnvironmentAssets }) => preloadTitanEnvironmentAssets());
+      this.titanEnvironmentPreload = request.catch((error: unknown) => {
+        this.titanEnvironmentPreload = null;
+        throw error;
+      });
+    }
+    return this.titanEnvironmentPreload;
   }
 
   private renderMenu(): void {
@@ -313,6 +327,13 @@ export class AstralArenaApp {
       this.setText('#map-code', presentation.code);
       this.setText('#map-name', map.name);
       this.setText('#map-description', presentation.description);
+      if (mapId === 'titan-expanse') {
+        void this.prepareTitanEnvironmentAssets().catch((error: unknown) => {
+          // A failed menu prefetch is retried when the match starts. The
+          // procedural renderer remains a resilience path for corrupt files.
+          console.warn('No se pudo precargar el entorno Titán desde el menú:', error);
+        });
+      }
     };
     mapSelect.addEventListener('change', updateMapPresentation);
     updateModePresentation();
@@ -620,11 +641,22 @@ export class AstralArenaApp {
     this.interactionPromptDetail = '';
     const loadingIndicator = this.root.querySelector<HTMLElement>('.status-light');
     if (loadingIndicator) loadingIndicator.textContent = 'PREPARANDO EQUIPO';
-    let prepared: [typeof import('../render/ArenaRenderer'), ExternalWeaponLoadReport];
+    const titanEnvironment = state.config.mapId === 'titan-expanse'
+      ? this.prepareTitanEnvironmentAssets().catch((error: unknown) => {
+          console.warn('Assets PBR de Titán no disponibles; se usará la presentación de resiliencia:', error);
+          return null;
+        })
+      : Promise.resolve(null);
+    let prepared: [
+      typeof import('../render/ArenaRenderer'),
+      ExternalWeaponLoadReport,
+      TitanEnvironmentAssets | null,
+    ];
     try {
       prepared = await Promise.all([
         import('../render/ArenaRenderer'),
         this.prepareExternalWeaponModels(),
+        titanEnvironment,
       ]);
     } catch (error) {
       if (viewGeneration !== this.sessionGeneration) return;

@@ -5,6 +5,8 @@ import { TITAN_EXPANSE } from '../game/map';
 import { titanCreekCenterZ } from '../game/maps/titanExpanse';
 import {
   createTitanForestWorld,
+  sampleTitanForestVisualHeight,
+  type TitanForestModels,
   type TitanForestWorldBundle,
 } from './forestWorld';
 
@@ -90,6 +92,36 @@ describe('Titan forest world', () => {
     }
   });
 
+  it('keeps perimeter mountain normals facing out and their bases buried in terrain', () => {
+    const seed = 0x71a9e;
+    const bundle = createBundle('low', seed);
+    const cliffs = bundle.group.getObjectByName('titan-natural-cliff-perimeter') as THREE.InstancedMesh;
+    const positions = cliffs.geometry.getAttribute('position');
+    const normals = cliffs.geometry.getAttribute('normal');
+    let outward = 0;
+    let radialVertices = 0;
+    for (let index = 0; index < positions.count; index += 1) {
+      const x = positions.getX(index);
+      const z = positions.getZ(index);
+      if (Math.hypot(x, z) < 0.14) continue;
+      radialVertices += 1;
+      if (x * normals.getX(index) + z * normals.getZ(index) > 0) outward += 1;
+    }
+    expect(outward / radialVertices).toBeGreaterThan(0.92);
+
+    const matrix = new THREE.Matrix4();
+    const position = new THREE.Vector3();
+    const rotation = new THREE.Quaternion();
+    const scale = new THREE.Vector3();
+    for (let index = 0; index < cliffs.count; index += 1) {
+      cliffs.getMatrixAt(index, matrix);
+      matrix.decompose(position, rotation, scale);
+      const ground = sampleTitanForestVisualHeight(TITAN_EXPANSE, position.x, position.z, seed);
+      expect(position.y).toBeLessThanOrEqual(ground + 0.01);
+      expect(position.y).toBeGreaterThan(ground - 7.2);
+    }
+  });
+
   it('updates wind/water without moving static chunks and disposes idempotently', () => {
     const bundle = createBundle('low');
     const terrain = bundle.group.getObjectByName('titan-chunked-heightfield');
@@ -99,5 +131,60 @@ describe('Titan forest world', () => {
     expect(() => bundle.dispose()).not.toThrow();
     expect(bundle.group.children).toHaveLength(0);
     expect(() => bundle.dispose()).not.toThrow();
+  });
+
+  it('cycles scanned understory variants without disposing shared asset-library resources', () => {
+    const namedGeometry = (name: string): THREE.BufferGeometry => {
+      const geometry = new THREE.BoxGeometry(0.5, 1, 0.5);
+      geometry.name = name;
+      return geometry;
+    };
+    const grassGeometries = [namedGeometry('grass-a'), namedGeometry('grass-b'), namedGeometry('grass-c')];
+    const fernGeometries = [namedGeometry('fern-a'), namedGeometry('fern-b')];
+    const rockGeometries = [namedGeometry('rock-a'), namedGeometry('rock-b'), namedGeometry('rock-c')];
+    const sourceMaterial = new THREE.MeshStandardMaterial({ color: 0xffffff });
+    const models: TitanForestModels = {
+      grass: { geometries: grassGeometries, material: sourceMaterial },
+      fern: { geometries: fernGeometries, material: sourceMaterial },
+      rock: { geometries: rockGeometries, material: sourceMaterial },
+    };
+    const disposedGeometries = new Set<THREE.BufferGeometry>();
+    for (const geometry of [...grassGeometries, ...fernGeometries, ...rockGeometries]) {
+      geometry.addEventListener('dispose', () => disposedGeometries.add(geometry));
+    }
+    let sourceMaterialDisposed = false;
+    sourceMaterial.addEventListener('dispose', () => { sourceMaterialDisposed = true; });
+
+    const seed = 771;
+    const bundle = createTitanForestWorld({
+      map: TITAN_EXPANSE,
+      creekCenterZ: titanCreekCenterZ,
+      quality: 'low',
+      seed,
+      models,
+    });
+    bundles.push(bundle);
+    const grassMeshes: THREE.InstancedMesh[] = [];
+    const fernMeshes: THREE.InstancedMesh[] = [];
+    bundle.group.traverse((object) => {
+      if (!(object instanceof THREE.InstancedMesh)) return;
+      if (object.name === 'titan-dense-grass') grassMeshes.push(object);
+      if (object.name === 'titan-natural-ferns') fernMeshes.push(object);
+    });
+
+    expect(grassMeshes.length).toBeGreaterThan(grassGeometries.length);
+    expect(fernMeshes.length).toBeGreaterThan(fernGeometries.length);
+    grassMeshes.forEach((mesh, index) => {
+      expect(mesh.geometry).toBe(grassGeometries[index % grassGeometries.length]);
+    });
+    fernMeshes.forEach((mesh, index) => {
+      expect(mesh.geometry).toBe(fernGeometries[index % fernGeometries.length]);
+    });
+    const wetRocks = bundle.group.getObjectByName('titan-wet-rocks') as THREE.InstancedMesh;
+    expect(wetRocks.geometry).toBe(rockGeometries[((seed ^ 0x771c) >>> 0) % rockGeometries.length]);
+
+    bundle.dispose();
+    expect(disposedGeometries.size).toBe(0);
+    expect(sourceMaterialDisposed).toBe(false);
   });
 });
