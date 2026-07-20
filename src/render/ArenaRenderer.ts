@@ -793,21 +793,26 @@ export class ArenaRenderer {
             color = mix(color, radialBlur, impactBlur);
           }
           float luminance = dot(color, vec3(0.2126, 0.7152, 0.0722));
-          float saturation = mix(mix(1.09, 1.13, uOrbital), 1.11, uAlpine);
+          float saturation = mix(mix(1.09, 1.13, uOrbital), 1.29, uAlpine);
           color = mix(vec3(luminance), color, saturation);
           // Titan is graded in linear HDR before OutputPass/AgX. A contrast
           // pivot at 0.5 subtracted 0.0275 from every shaded channel and
           // irreversibly clipped natural rock and foliage to black. Preserve
           // the toe and build contrast upward from zero for the outdoor map.
           vec3 pivotContrast = (color - 0.5) * mix(1.055, 1.085, uOrbital) + 0.5;
-          color = mix(pivotContrast, max(color, vec3(0.0)) * 1.025, uAlpine);
+          vec3 alpineColor = max(color, vec3(0.0));
+          // Outdoor grading needs a shaped tonal curve, not a blanket lift.
+          // This deepens midtones while letting HDR sun glints and emissive
+          // landmarks retain their separation through AgX.
+          alpineColor *= 0.94 + min(alpineColor, vec3(1.6)) * 0.2;
+          color = mix(pivotContrast, alpineColor, uAlpine);
           luminance = dot(color, vec3(0.2126, 0.7152, 0.0722));
           float shadows = 1.0 - smoothstep(0.04, 0.42, luminance);
           float highlights = smoothstep(0.58, 1.15, luminance);
-          float shadowTintAmount = mix(mix(0.085, 0.09, uOrbital), 0.022, uAlpine);
+          float shadowTintAmount = mix(mix(0.085, 0.09, uOrbital), 0.055, uAlpine);
           color = mix(color, color * (uShadowTint * 1.75 + 0.12), shadows * shadowTintAmount);
           float alpineLift = uAlpine * (1.0 - smoothstep(0.025, 0.34, luminance));
-          color += vec3(0.014, 0.020, 0.019) * alpineLift;
+          color += vec3(0.008, 0.014, 0.015) * alpineLift;
           color += highlights * uHighlightTint * mix(0.024, 0.032, uOrbital);
           float edge = smoothstep(0.34, 1.02, length((vUv - 0.5) * vec2(1.15, 1.0)) * 1.42);
           color *= 1.0 - edge * (mix(0.125, 0.072, uAlpine) + uDamage * 0.065);
@@ -973,7 +978,10 @@ export class ArenaRenderer {
     this.depthFocusPass.aperture = firstPerson
       ? THREE.MathUtils.lerp(0.92, 0.58, this.viewAimBlend)
       : 1.08;
-    this.depthFocusPass.maxBlurPixels = firstPerson ? 1.65 : 2.15;
+    const alpineFocus = this.visualProfile.environmentKind === 'alpine-forest';
+    this.depthFocusPass.maxBlurPixels = firstPerson
+      ? (alpineFocus ? 0.58 : 1.65)
+      : (alpineFocus ? 1.2 : 2.15);
     this.renderer.toneMappingExposure = this.visualProfile.exposure - this.damagePulse * 0.11;
     this.skyMaterial.uniforms.uTime!.value = worldTime;
     this.gradePass.uniforms.uTime!.value = worldTime;
@@ -1509,7 +1517,6 @@ export class ArenaRenderer {
       }
       const models = environmentAssets
         ? {
-            fern: titanModelSet([...environmentAssets.ferns.values()], 'fern'),
             rock: titanModelSet([...environmentAssets.rocks.values()], 'rock'),
             cliff: titanModelSet([environmentAssets.cliff], 'cliff'),
           }
@@ -2344,7 +2351,7 @@ export class ArenaRenderer {
       color: this.visualProfile.atmospherePalette.haze,
       map: fogTexture,
       transparent: true,
-      opacity: 0.065,
+      opacity: 0.085,
       depthWrite: false,
       side: THREE.DoubleSide,
       fog: true,
@@ -2373,7 +2380,7 @@ export class ArenaRenderer {
       color: 0xffdfad,
       map: fogTexture,
       transparent: true,
-      opacity: 0.055,
+      opacity: 0.072,
       blending: THREE.AdditiveBlending,
       depthWrite: false,
       side: THREE.DoubleSide,
@@ -2411,7 +2418,7 @@ export class ArenaRenderer {
       size: 0.085,
       sizeAttenuation: true,
       transparent: true,
-      opacity: 0.31,
+      opacity: 0.38,
       blending: THREE.AdditiveBlending,
       depthWrite: false,
       fog: true,
@@ -3293,33 +3300,36 @@ export class ArenaRenderer {
       const grove = obstacle.id.includes('grove');
       const natural = grove || /outcrop|ridge|rock|cliff|berm|bank/.test(obstacle.id);
       if (!natural) continue;
-      if (grove) {
-        const geometry = createOrganicObstacleGeometry(size, hashString(obstacle.id), false);
-        geometry.applyMatrix4(new THREE.Matrix4().makeTranslation(center.x, center.y, center.z));
-        groveGeometries.push(geometry);
-        groveNames.push(obstacle.id);
+      const source = scannedRockAssets[
+        (rockGeometries.length + groveGeometries.length) % scannedRockAssets.length
+      ];
+      const geometry = source
+        ? source.geometry.clone()
+        : createOrganicObstacleGeometry(size, hashString(obstacle.id), true);
+      if (source) {
+        geometry.computeBoundingBox();
+        const bounds = geometry.boundingBox!;
+        const sourceSize = bounds.getSize(new THREE.Vector3());
+        const targetScale = new THREE.Vector3(
+          size.x / Math.max(sourceSize.x, 0.001),
+          size.y / Math.max(sourceSize.y, 0.001),
+          size.z / Math.max(sourceSize.z, 0.001),
+        );
+        geometry.scale(targetScale.x * 1.015, targetScale.y * 1.03, targetScale.z * 1.015);
+        if ((hashString(obstacle.id) & 1) === 1) geometry.rotateY(Math.PI);
+        geometry.translate(center.x, obstacle.min.y - size.y * 0.015, center.z);
       } else {
-        const source = scannedRockAssets[rockGeometries.length % scannedRockAssets.length];
-        const geometry = source
-          ? source.geometry.clone()
-          : createOrganicObstacleGeometry(size, hashString(obstacle.id), true);
-        if (source) {
-          geometry.computeBoundingBox();
-          const bounds = geometry.boundingBox!;
-          const sourceSize = bounds.getSize(new THREE.Vector3());
-          const targetScale = new THREE.Vector3(
-            size.x / Math.max(sourceSize.x, 0.001),
-            size.y / Math.max(sourceSize.y, 0.001),
-            size.z / Math.max(sourceSize.z, 0.001),
-          );
-          geometry.scale(targetScale.x * 1.015, targetScale.y * 1.03, targetScale.z * 1.015);
-          if ((hashString(obstacle.id) & 1) === 1) geometry.rotateY(Math.PI);
-          geometry.translate(center.x, obstacle.min.y - size.y * 0.015, center.z);
-        } else {
-          geometry.applyMatrix4(new THREE.Matrix4().makeTranslation(center.x, center.y, center.z));
-        }
+        geometry.applyMatrix4(new THREE.Matrix4().makeTranslation(center.x, center.y, center.z));
+      }
+      // The former grove mounds were smooth green capsules.  Treat every
+      // gameplay cover volume as a mossy scanned outcrop; foliage scattered
+      // around its foot now supplies the grove identity without fake terrain.
+      if (source || !grove) {
         rockGeometries.push(geometry);
         rockNames.push(obstacle.id);
+      } else {
+        groveGeometries.push(geometry);
+        groveNames.push(obstacle.id);
       }
     }
     const addNaturalBatch = (

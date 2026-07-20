@@ -165,13 +165,13 @@ const createMaterials = (id: WeaponId): WeaponMaterials => {
     envMapIntensity: 1.22,
   });
   const ceramic = new THREE.MeshPhysicalMaterial({
-    name: `${id}-pale-ceramic-panel`,
-    color: 0xcbd6d3,
-    roughness: 0.29,
-    metalness: 0.02,
-    clearcoat: 0.58,
-    clearcoatRoughness: 0.18,
-    envMapIntensity: 1.12,
+    name: `${id}-graphite-ceramic-panel`,
+    color: 0x34464b,
+    roughness: 0.34,
+    metalness: 0.22,
+    clearcoat: 0.38,
+    clearcoatRoughness: 0.2,
+    envMapIntensity: 1.28,
   });
   const polymer = new THREE.MeshStandardMaterial({
     name: `${id}-dark-polymer`,

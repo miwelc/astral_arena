@@ -186,7 +186,7 @@ describe('ExternalWeaponModelLibrary', () => {
     expect(after.z - before.z).toBeCloseTo(0, 8);
   });
 
-  it('remaps imported paint to pale ceramic while keeping dark functional parts', async () => {
+  it('remaps imported paint to graphite ceramic while keeping dark functional parts', async () => {
     const library = new ExternalWeaponModelLibrary(new SyntheticLoader());
     await library.load('sidearm');
     const model = library.create('sidearm');
@@ -204,7 +204,7 @@ describe('ExternalWeaponModelLibrary', () => {
     expect(surfaces.some((material) => material.userData.externalWeaponSurface === 'ceramic')).toBe(true);
     expect(surfaces.some((material) => material.userData.externalWeaponSurface === 'functional-dark')).toBe(true);
     const ceramic = surfaces.find((material) => material.userData.externalWeaponSurface === 'ceramic');
-    expect(ceramic?.color.getHex()).toBe(0xf5f1e8);
+    expect(ceramic?.color.getHex()).toBe(0x34464b);
     expect(ceramic?.map).toBeInstanceOf(THREE.DataTexture);
     expect(ceramic?.userData.ceramicAlbedoRemap).toBe(true);
     expect(ceramic?.customProgramCacheKey()).toContain('ceramic-albedo-ceramic');

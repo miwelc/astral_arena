@@ -182,9 +182,12 @@ const createTerrainChunkGeometry = (
   // Vertex colour is a broad environmental tint, not a second dark albedo.
   // Keeping it near neutral lets the PBR forest-floor scan retain its real
   // luminance and detail in indirect light.
-  const lowland = new THREE.Color(0x9fba7f);
-  const highland = new THREE.Color(0xb8ca91);
-  const rock = new THREE.Color(0xa5aea1);
+  // The scan is intentionally neutral and quite bright.  Saturated macro
+  // tints restore the damp, blue-green forest floor of the art target while
+  // slope tinting keeps stone shoulders readable at a distance.
+  const lowland = new THREE.Color(0x668b50);
+  const highland = new THREE.Color(0x829c5d);
+  const rock = new THREE.Color(0x788477);
   const sampleStep = Math.max(0.7, Math.min((x1 - x0) / segmentsX, (z1 - z0) / segmentsZ));
 
   let vertex = 0;
@@ -199,7 +202,7 @@ const createTerrainChunkGeometry = (
       const slope = smooth01((1 - normal.y - 0.045) / 0.34);
       const heightMix = smooth01((y - map.bounds.floorY) / 15);
       color.copy(lowland).lerp(highland, heightMix * 0.74).lerp(rock, slope * 0.86);
-      const variation = 0.92 + terrainNoise(x * 2.1, z * 2.1, 0x5a21) * 0.055;
+      const variation = 0.86 + terrainNoise(x * 2.1, z * 2.1, 0x5a21) * 0.12;
       color.multiplyScalar(variation);
 
       const positionOffset = vertex * 3;
@@ -384,21 +387,21 @@ const createLeafClusterGeometry = (): THREE.BufferGeometry => {
   const uvs: number[] = [];
   const indices: number[] = [];
   const random = seededRandom(0x1eaf024);
-  const cardCount = 88;
+  const cardCount = 256;
   const right = new THREE.Vector3();
   const up = new THREE.Vector3();
   const normal = new THREE.Vector3();
 
   for (let card = 0; card < cardCount; card += 1) {
     const angle = card * 2.399963229728653 + (random() - 0.5) * 0.42;
-    const radial = Math.sqrt(random()) * 0.86;
+    const radial = Math.sqrt(random()) * 0.98;
     const centerX = Math.cos(angle) * radial;
     const centerZ = Math.sin(angle) * radial * (0.82 + random() * 0.2);
-    const centerY = -0.1 + random() * 0.92 - radial * 0.08;
+    const centerY = -0.18 + random() * 1.08 - radial * 0.08;
     const yaw = angle + Math.PI * 0.5 + (random() - 0.5) * 1.25;
     const tilt = -0.34 + random() * 0.68;
-    const halfWidth = 0.12 + random() * 0.07;
-    const halfHeight = 0.14 + random() * 0.08;
+    const halfWidth = 0.072 + random() * 0.048;
+    const halfHeight = 0.082 + random() * 0.052;
     right.set(Math.cos(yaw), 0, Math.sin(yaw)).multiplyScalar(halfWidth);
     up.set(
       -Math.sin(yaw) * Math.sin(tilt),
@@ -444,22 +447,27 @@ const createLeafClusterGeometry = (): THREE.BufferGeometry => {
 const createGrassTuftGeometry = (): THREE.BufferGeometry => {
   const positions: number[] = [];
   const indices: number[] = [];
-  const blades = 11;
+  const random = seededRandom(0x6a551a);
+  const blades = 44;
   for (let blade = 0; blade < blades; blade += 1) {
-    const angle = blade / blades * TAU + Math.sin(blade * 3.71) * 0.18;
-    const width = 0.024 + (blade % 4) * 0.0045;
-    const height = 0.58 + (blade % 5) * 0.082;
-    const bend = 0.085 + (blade % 4) * 0.026;
-    const rightX = Math.cos(angle) * width;
-    const rightZ = Math.sin(angle) * width;
-    const bendX = Math.sin(angle) * bend;
-    const bendZ = -Math.cos(angle) * bend;
+    const angle = random() * TAU;
+    const patchRadius = Math.sqrt(random()) * 0.5;
+    const baseX = Math.cos(angle) * patchRadius;
+    const baseZ = Math.sin(angle) * patchRadius;
+    const facing = random() * TAU;
+    const width = 0.011 + random() * 0.013;
+    const height = 0.34 + random() * 0.48;
+    const bend = 0.045 + random() * 0.13;
+    const rightX = Math.cos(facing) * width;
+    const rightZ = Math.sin(facing) * width;
+    const bendX = Math.sin(facing) * bend;
+    const bendZ = -Math.cos(facing) * bend;
     const offset = positions.length / 3;
     positions.push(
-      -rightX, 0, -rightZ,
-      rightX, 0, rightZ,
-      rightX * 0.4 + bendX * 0.35, height * 0.58, rightZ * 0.4 + bendZ * 0.35,
-      bendX, height, bendZ,
+      baseX - rightX, 0, baseZ - rightZ,
+      baseX + rightX, 0, baseZ + rightZ,
+      baseX + rightX * 0.42 + bendX * 0.4, height * 0.58, baseZ + rightZ * 0.42 + bendZ * 0.4,
+      baseX + bendX, height, baseZ + bendZ,
     );
     indices.push(offset, offset + 1, offset + 2, offset, offset + 2, offset + 3);
   }
@@ -475,19 +483,19 @@ const createGrassTuftGeometry = (): THREE.BufferGeometry => {
 const createFernCrownGeometry = (): THREE.BufferGeometry => {
   const positions: number[] = [];
   const indices: number[] = [];
-  const fronds = 7;
-  const segments = 4;
+  const fronds = 10;
+  const segments = 7;
   for (let frond = 0; frond < fronds; frond += 1) {
-    const angle = frond / fronds * TAU;
-    const sideX = Math.cos(angle) * 0.055;
-    const sideZ = Math.sin(angle) * 0.055;
+    const angle = frond / fronds * TAU + Math.sin(frond * 2.7) * 0.08;
+    const sideX = Math.cos(angle);
+    const sideZ = Math.sin(angle);
     const forwardX = Math.sin(angle);
     const forwardZ = -Math.cos(angle);
     for (let segment = 0; segment <= segments; segment += 1) {
       const t = segment / segments;
-      const width = Math.sin(Math.PI * t) * 0.22 + 0.018;
-      const reach = t * (0.78 + (frond % 3) * 0.08);
-      const y = Math.sin(t * Math.PI * 0.72) * 0.34;
+      const width = Math.sin(Math.PI * t) * 0.19 * (1 - t * 0.22) + 0.012;
+      const reach = t * (0.72 + (frond % 4) * 0.075);
+      const y = Math.sin(t * Math.PI * 0.78) * 0.3 + t * 0.055;
       positions.push(
         forwardX * reach - sideX * width, y, forwardZ * reach - sideZ * width,
         forwardX * reach + sideX * width, y, forwardZ * reach + sideZ * width,
@@ -497,6 +505,35 @@ const createFernCrownGeometry = (): THREE.BufferGeometry => {
         indices.push(offset, offset + 2, offset + 3, offset, offset + 3, offset + 1);
       }
     }
+  }
+
+  // A second rosette of broad leaves gives the ground layer the multi-species
+  // silhouette visible in a real wet forest instead of repeating only narrow
+  // fern bands.  It shares the fern material and draw call.
+  const broadLeaves = 12;
+  for (let leaf = 0; leaf < broadLeaves; leaf += 1) {
+    const angle = leaf / broadLeaves * TAU + Math.sin(leaf * 1.91) * 0.13;
+    const forwardX = Math.sin(angle);
+    const forwardZ = -Math.cos(angle);
+    const sideX = Math.cos(angle);
+    const sideZ = Math.sin(angle);
+    const length = 0.46 + (leaf % 4) * 0.085;
+    const width = 0.095 + (leaf % 3) * 0.028;
+    const offset = positions.length / 3;
+    positions.push(
+      sideX * -width * 0.28, 0.025, sideZ * -width * 0.28,
+      forwardX * length * 0.5 - sideX * width, 0.16 + (leaf % 2) * 0.045,
+      forwardZ * length * 0.5 - sideZ * width,
+      forwardX * length, 0.075, forwardZ * length,
+      forwardX * length * 0.5 + sideX * width, 0.16 + (leaf % 2) * 0.045,
+      forwardZ * length * 0.5 + sideZ * width,
+      sideX * width * 0.28, 0.025, sideZ * width * 0.28,
+    );
+    indices.push(
+      offset, offset + 1, offset + 4,
+      offset + 1, offset + 3, offset + 4,
+      offset + 1, offset + 2, offset + 3,
+    );
   }
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
@@ -561,7 +598,8 @@ const createScatterRecords = (
     const riverDistance = Math.abs(z - options.creekCenterZ(x));
     if (riverDistance < (options.kind === 'tree' ? 8.2 : 3.4)) continue;
     const laneDistance = Math.min(Math.abs(x - centerX), Math.abs(z - centerZ));
-    if (inside && laneDistance < (options.kind === 'tree' ? 8.5 : 2.7)) continue;
+    const laneClearance = options.kind === 'tree' ? 8.5 : options.kind === 'fern' ? 1.1 : 0.3;
+    if (inside && laneDistance < laneClearance) continue;
 
     const height = options.visualHeightAt(x, z);
     const normal = sampleNormal(options.visualHeightAt, x, z, 0.9);
@@ -575,13 +613,13 @@ const createScatterRecords = (
     const probability = clamp01(0.52 + island * 0.24 + edge + riverBankBoost);
     if (options.random() > probability) continue;
     const scale = options.kind === 'tree'
-      ? 0.8 + options.random() * 0.48
+      ? 0.82 + options.random() * 0.44
       : options.kind === 'grass'
-        ? 0.42 + options.random() * 0.48
-        : 0.38 + options.random() * 0.42;
+        ? 0.46 + options.random() * 0.5
+        : 0.66 + options.random() * 0.68;
     const green = options.kind === 'grass'
-      ? new THREE.Color(0xa8c57a).lerp(new THREE.Color(0xdce69c), 0.2 + options.random() * 0.52)
-      : new THREE.Color(0x8ca483).lerp(new THREE.Color(0xb8ca98), options.random() * 0.44);
+      ? new THREE.Color(0x76a34c).lerp(new THREE.Color(0xc3da78), 0.2 + options.random() * 0.62)
+      : new THREE.Color(0x5b934d).lerp(new THREE.Color(0xa8cd72), options.random() * 0.58);
     records.push({
       x,
       y: height,
@@ -596,6 +634,7 @@ const createScatterRecords = (
 
 const createTreeTile = (
   records: readonly TreeRecord[],
+  shrubRecords: readonly ScatterRecord[],
   trunkGeometry: THREE.BufferGeometry,
   crownGeometry: THREE.BufferGeometry,
   trunkMaterial: THREE.MeshStandardMaterial,
@@ -605,59 +644,110 @@ const createTreeTile = (
   const group = new THREE.Group();
   group.name = 'titan-tree-tile';
   if (records.length === 0) return group;
-  const trunks = new THREE.InstancedMesh(trunkGeometry, trunkMaterial, records.length);
+  const crownClustersPerTree = 7;
+  const branchesPerTree = 5;
+  // Trunks and branches share one tapered geometry/material and therefore one
+  // draw call per tile.  The first instance in each tree block is the trunk;
+  // the remaining five form the visible upper branching structure.
+  const trunks = new THREE.InstancedMesh(
+    trunkGeometry,
+    trunkMaterial,
+    records.length * (branchesPerTree + 1),
+  );
   trunks.name = 'titan-slender-tree-trunks';
-  const crowns = new THREE.InstancedMesh(crownGeometry, crownMaterial, records.length * 4);
+  const crowns = new THREE.InstancedMesh(
+    crownGeometry,
+    crownMaterial,
+    records.length * crownClustersPerTree + shrubRecords.length,
+  );
   crowns.name = 'titan-umbrella-tree-crowns';
   trunks.castShadow = castShadow;
   crowns.castShadow = castShadow;
   trunks.receiveShadow = true;
   crowns.receiveShadow = true;
   const transform = new THREE.Object3D();
+  const branchStart = new THREE.Vector3();
+  const branchEnd = new THREE.Vector3();
+  const branchDirection = new THREE.Vector3();
+  const branchUp = new THREE.Vector3(0, 1, 0);
   let crownIndex = 0;
   records.forEach((tree, index) => {
+    const trunkIndex = index * (branchesPerTree + 1);
     transform.position.set(tree.x, tree.y, tree.z);
     transform.rotation.set(0, tree.rotation, (index % 2 ? -1 : 1) * 0.012);
     transform.scale.set(tree.radius, tree.height, tree.radius);
     transform.updateMatrix();
-    trunks.setMatrixAt(index, transform.matrix);
-    setInstanceColor(trunks, index, index % 3 === 0 ? 0xb4b7a5 : 0x8f9a86);
+    trunks.setMatrixAt(trunkIndex, transform.matrix);
+    setInstanceColor(trunks, trunkIndex, index % 3 === 0 ? 0x756b52 : 0x594f3e);
 
-    const crownWidth = tree.height * (0.24 + tree.radius * 0.025);
-    transform.position.set(tree.x, tree.y + tree.height * 0.82, tree.z);
+    const crownWidth = tree.height * (0.3 + tree.radius * 0.03);
+    transform.position.set(tree.x, tree.y + tree.height * 0.79, tree.z);
     transform.rotation.set(0, tree.rotation, 0);
-    transform.scale.set(crownWidth, crownWidth * 0.42, crownWidth * (0.82 + (index % 4) * 0.045));
+    transform.scale.set(crownWidth, crownWidth * 0.48, crownWidth * (0.82 + (index % 4) * 0.045));
     transform.updateMatrix();
     crowns.setMatrixAt(crownIndex, transform.matrix);
     setInstanceColor(crowns, crownIndex, tree.color);
     crownIndex += 1;
 
-    for (let satellite = 0; satellite < 3; satellite += 1) {
+    for (let satellite = 0; satellite < crownClustersPerTree - 1; satellite += 1) {
       const satelliteAngle = tree.rotation
-        + 0.84
-        + satellite * 2.13
+        + 0.64
+        + satellite * 2.399963229728653
         + (index % 3) * 0.21;
-      const satelliteRadius = crownWidth * (0.22 + satellite * 0.035);
+      const tier = satellite % 3;
+      const satelliteRadius = crownWidth * (0.26 + tier * 0.07);
       transform.position.set(
         tree.x + Math.cos(satelliteAngle) * satelliteRadius,
-        tree.y + tree.height * (0.8 + satellite * 0.055),
+        tree.y + tree.height * (0.72 + tier * 0.075),
         tree.z + Math.sin(satelliteAngle) * satelliteRadius,
       );
       transform.rotation.set(0, satelliteAngle, 0);
       transform.scale.set(
-        crownWidth * (0.58 + satellite * 0.055),
-        crownWidth * (0.27 + satellite * 0.018),
-        crownWidth * (0.53 + satellite * 0.04),
+        crownWidth * (0.54 + tier * 0.07),
+        crownWidth * (0.3 + tier * 0.025),
+        crownWidth * (0.5 + tier * 0.065),
       );
       transform.updateMatrix();
       crowns.setMatrixAt(crownIndex, transform.matrix);
       setInstanceColor(
         crowns,
         crownIndex,
-        new THREE.Color(tree.color).offsetHSL(0.008 * satellite, -0.03, 0.025 + satellite * 0.012).getHex(),
+        new THREE.Color(tree.color).offsetHSL(0.006 * tier, -0.02, 0.01 + tier * 0.018).getHex(),
       );
       crownIndex += 1;
+
+      if (satellite < branchesPerTree) {
+        branchStart.set(
+          tree.x,
+          tree.y + tree.height * (0.54 + tier * 0.045),
+          tree.z,
+        );
+        branchEnd.set(
+          tree.x + Math.cos(satelliteAngle) * satelliteRadius * 0.92,
+          tree.y + tree.height * (0.72 + tier * 0.072),
+          tree.z + Math.sin(satelliteAngle) * satelliteRadius * 0.92,
+        );
+        branchDirection.subVectors(branchEnd, branchStart);
+        const branchLength = branchDirection.length();
+        transform.position.copy(branchStart);
+        transform.quaternion.setFromUnitVectors(branchUp, branchDirection.normalize());
+        transform.scale.set(tree.radius * 0.42, branchLength, tree.radius * 0.42);
+        transform.updateMatrix();
+        const treeBranchIndex = trunkIndex + satellite + 1;
+        trunks.setMatrixAt(treeBranchIndex, transform.matrix);
+        setInstanceColor(trunks, treeBranchIndex, index % 2 === 0 ? 0x665b45 : 0x514737);
+      }
     }
+  });
+  shrubRecords.forEach((record, index) => {
+    const shrubScale = record.scale * (0.86 + (index % 4) * 0.08);
+    transform.position.set(record.x, record.y + 0.04, record.z);
+    transform.rotation.set(0, record.rotation, 0);
+    transform.scale.set(shrubScale * 1.3, shrubScale * 0.78, shrubScale * 1.3);
+    transform.updateMatrix();
+    crowns.setMatrixAt(crownIndex, transform.matrix);
+    setInstanceColor(crowns, crownIndex, record.color);
+    crownIndex += 1;
   });
   finishInstances(trunks);
   finishInstances(crowns);
@@ -672,6 +762,8 @@ const createUnderstoryTile = (
   fernGeometry: THREE.BufferGeometry,
   grassMaterial: THREE.MeshStandardMaterial,
   fernMaterial: THREE.MeshStandardMaterial,
+  carpetGeometry: THREE.BufferGeometry,
+  carpetMaterial: THREE.MeshStandardMaterial,
 ): THREE.Group => {
   const group = new THREE.Group();
   group.name = 'titan-understory-tile';
@@ -684,13 +776,35 @@ const createUnderstoryTile = (
     grassRecords.forEach((record, index) => {
       transform.position.set(record.x, record.y + 0.015, record.z);
       transform.rotation.set(0, record.rotation, 0);
-      transform.scale.set(record.scale * (0.8 + (index % 5) * 0.045), record.scale, record.scale);
+      transform.scale.set(record.scale * (0.86 + (index % 5) * 0.055), record.scale, record.scale);
       transform.updateMatrix();
       grass.setMatrixAt(index, transform.matrix);
       setInstanceColor(grass, index, record.color);
     });
     finishInstances(grass);
     group.add(grass);
+
+    const carpetCount = Math.ceil(grassRecords.length * 0.72);
+    const carpet = new THREE.InstancedMesh(carpetGeometry, carpetMaterial, carpetCount);
+    carpet.name = 'titan-meadow-grass-carpet';
+    carpet.castShadow = false;
+    carpet.receiveShadow = true;
+    for (let index = 0; index < carpetCount; index += 1) {
+      const record = grassRecords[(index * 7) % grassRecords.length]!;
+      const offsetAngle = record.rotation + index * 2.399963229728653;
+      transform.position.set(
+        record.x + Math.cos(offsetAngle) * 0.22,
+        record.y + 0.012,
+        record.z + Math.sin(offsetAngle) * 0.22,
+      );
+      transform.rotation.set(0, offsetAngle, 0);
+      transform.scale.setScalar(record.scale * (0.62 + (index % 5) * 0.045));
+      transform.updateMatrix();
+      carpet.setMatrixAt(index, transform.matrix);
+      setInstanceColor(carpet, index, record.color);
+    }
+    finishInstances(carpet);
+    group.add(carpet);
   }
   if (fernRecords.length > 0) {
     const ferns = new THREE.InstancedMesh(fernGeometry, fernMaterial, fernRecords.length);
@@ -948,14 +1062,14 @@ const createPerimeterMountains = (
     const z = horizontal
       ? (side < 0 ? map.bounds.minZ - 31 - random() * 15 : map.bounds.maxZ + 31 + random() * 15)
       : THREE.MathUtils.lerp(map.bounds.minZ - 27, map.bounds.maxZ + 27, random());
-    const height = 17 + random() * 22;
-    const radius = 8 + random() * 10;
+    const height = 13 + random() * 14;
+    const radius = 12 + random() * 14;
     // The local mesh starts at y=0. Anchor that base in the extended terrain
     // instead of floating the entire massif almost halfway up its height.
     transform.position.set(x, visualHeightAt(x, z) - height * 0.18, z);
     transform.rotation.set((random() - 0.5) * 0.08, random() * TAU, (random() - 0.5) * 0.08);
-    const width = radius * (1.48 + random() * 0.72);
-    const depth = radius * (1.02 + random() * 0.56);
+    const width = radius * (1.75 + random() * 0.68);
+    const depth = radius * (1.18 + random() * 0.5);
     transform.scale.set(
       width / Math.max(sourceSize.x, 0.001),
       height / Math.max(sourceSize.y, 0.001),
@@ -973,19 +1087,22 @@ const cloneScannedMaterial = (
   source: THREE.MeshStandardMaterial,
   name: string,
   options: {
+    color?: number;
     emissive: number;
     emissiveIntensity: number;
     roughness: number;
+    envMapIntensity?: number;
     doubleSided?: boolean;
   },
 ): THREE.MeshStandardMaterial => {
   const material = source.clone();
   material.name = name;
-  material.color.set(0xffffff);
+  material.color.set(options.color ?? 0xffffff);
   material.emissive.setHex(options.emissive);
   material.emissiveIntensity = options.emissiveIntensity;
   material.roughness = options.roughness;
   material.metalness = 0;
+  material.envMapIntensity = options.envMapIntensity ?? 0.86;
   // Photogrammetry albedo is already fully authored. Multiplying it by an
   // additional green instance tint crushed shadowed leaves and stones toward
   // black; procedural fallbacks still retain vertex-colour variation.
@@ -1040,11 +1157,11 @@ export const createTitanForestWorld = (
   const terrainMaterial = new THREE.MeshStandardMaterial({
     name: 'titan-sculpted-terrain',
     color: 0xffffff,
-    emissive: 0x21301c,
-    emissiveIntensity: 0.08,
+    emissive: 0x162919,
+    emissiveIntensity: 0.035,
     map: options.textures?.albedo ?? null,
     normalMap: options.textures?.normal ?? null,
-    normalScale: new THREE.Vector2(0.74, 0.74),
+    normalScale: new THREE.Vector2(1.08, 1.08),
     roughnessMap: options.textures?.roughness ?? null,
     roughness: 0.92,
     metalness: 0,
@@ -1052,9 +1169,11 @@ export const createTitanForestWorld = (
   });
   const cliffMaterial = cliffModel
     ? cloneScannedMaterial(cliffModel.material, 'titan-perimeter-cliff-stone', {
-        emissive: 0x20251f,
-        emissiveIntensity: 0.025,
-        roughness: 0.86,
+        color: 0x929e8d,
+        emissive: 0x17221b,
+        emissiveIntensity: 0.014,
+        roughness: 0.82,
+        envMapIntensity: 0.72,
         doubleSided: true,
       })
     : new THREE.MeshStandardMaterial({
@@ -1068,11 +1187,11 @@ export const createTitanForestWorld = (
   const trunkMaterial = new THREE.MeshStandardMaterial({
     name: 'titan-pale-tree-bark',
     color: 0xffffff,
-    emissive: 0x1d211c,
-    emissiveIntensity: 0.045,
+    emissive: 0x161b13,
+    emissiveIntensity: 0.018,
     map: options.textures?.barkAlbedo ?? null,
     normalMap: options.textures?.barkNormal ?? null,
-    normalScale: new THREE.Vector2(0.58, 0.58),
+    normalScale: new THREE.Vector2(0.82, 0.82),
     roughnessMap: options.textures?.barkRoughness ?? null,
     roughness: 0.94,
     metalness: 0,
@@ -1080,59 +1199,76 @@ export const createTitanForestWorld = (
   });
   const crownMaterial = new THREE.MeshStandardMaterial({
     name: 'titan-umbrella-canopy',
-    color: 0xffffff,
-    emissive: 0x21391f,
-    emissiveIntensity: 0.075,
+    color: 0x3e7b3e,
+    emissive: 0x244c2c,
+    emissiveIntensity: 0.12,
     map: options.textures?.leafAlbedo ?? null,
     alphaMap: options.textures?.leafOpacity ?? null,
     alphaTest: options.textures?.leafOpacity ? 0.43 : 0,
     normalMap: options.textures?.leafNormal ?? null,
-    normalScale: new THREE.Vector2(0.52, 0.52),
+    normalScale: new THREE.Vector2(0.18, 0.18),
     roughnessMap: options.textures?.leafRoughness ?? null,
-    roughness: 0.82,
+    roughness: 0.96,
     metalness: 0,
+    envMapIntensity: 0.36,
     side: THREE.DoubleSide,
     vertexColors: !options.textures?.leafAlbedo,
   });
   const grassMaterial = grassModel
     ? cloneScannedMaterial(grassModel.material, 'titan-wind-grass', {
-        emissive: 0x4c7135,
-        emissiveIntensity: 0.2,
-        roughness: 0.9,
+        color: 0xa0c477,
+        emissive: 0x244d22,
+        emissiveIntensity: 0.075,
+        roughness: 0.86,
+        envMapIntensity: 0.68,
         doubleSided: true,
       })
     : new THREE.MeshStandardMaterial({
         name: 'titan-wind-grass',
         color: 0xffffff,
-        emissive: 0x3f6127,
-        emissiveIntensity: 0.34,
-        roughness: 0.91,
+        emissive: 0x47762d,
+        emissiveIntensity: 0.3,
+        roughness: 0.9,
         metalness: 0,
         side: THREE.DoubleSide,
         vertexColors: true,
       });
   const fernMaterial = fernModel
     ? cloneScannedMaterial(fernModel.material, 'titan-wind-ferns', {
-        emissive: 0x356c31,
-        emissiveIntensity: 0.2,
-        roughness: 0.86,
+        color: 0x78a85f,
+        emissive: 0x18451f,
+        emissiveIntensity: 0.065,
+        roughness: 0.96,
+        envMapIntensity: 0.4,
         doubleSided: true,
       })
     : new THREE.MeshStandardMaterial({
         name: 'titan-wind-ferns',
         color: 0xffffff,
-        emissive: 0x203a25,
-        emissiveIntensity: 0.13,
-        roughness: 0.86,
+        emissive: 0x477638,
+        emissiveIntensity: 0.25,
+        roughness: 0.94,
         metalness: 0,
         side: THREE.DoubleSide,
         vertexColors: true,
       });
+  const carpetMaterial = new THREE.MeshStandardMaterial({
+    name: 'titan-meadow-grass-carpet',
+    color: 0xffffff,
+    emissive: 0x26481f,
+    emissiveIntensity: 0.28,
+    roughness: 0.88,
+    metalness: 0,
+    side: THREE.DoubleSide,
+    vertexColors: true,
+  });
   const rockMaterial = rockModel
     ? cloneScannedMaterial(rockModel.material, 'titan-creek-wet-rock', {
-        emissive: 0x1d2420,
-        emissiveIntensity: 0.035,
-        roughness: 0.62,
+        color: 0xb9c6b6,
+        emissive: 0x152019,
+        emissiveIntensity: 0.014,
+        roughness: 0.54,
+        envMapIntensity: 1.08,
       })
     : new THREE.MeshStandardMaterial({
         name: 'titan-creek-wet-rock',
@@ -1149,12 +1285,14 @@ export const createTitanForestWorld = (
     crownMaterial,
     grassMaterial,
     fernMaterial,
+    carpetMaterial,
     rockMaterial,
   ]) materials.add(material);
   windUniforms.push(
     addWindToMaterial(crownMaterial, 0.032, 0.7),
     addWindToMaterial(grassMaterial, 0.105, 1.15),
     addWindToMaterial(fernMaterial, 0.072, 0.82),
+    addWindToMaterial(carpetMaterial, 0.08, 1.04),
   );
 
   const terrain = new THREE.Group();
@@ -1207,13 +1345,13 @@ export const createTitanForestWorld = (
   const crownGeometry = options.textures?.leafAlbedo && options.textures.leafOpacity
     ? createLeafClusterGeometry()
     : createUmbrellaCrownGeometry();
-  const proceduralGrassGeometry = grassModel ? null : createGrassTuftGeometry();
+  const proceduralGrassGeometry = createGrassTuftGeometry();
   const proceduralFernGeometry = fernModel ? null : createFernCrownGeometry();
   const grassGeometries = grassModel?.geometries ?? [proceduralGrassGeometry!];
   const fernGeometries = fernModel?.geometries ?? [proceduralFernGeometry!];
   geometries.add(trunkGeometry);
   geometries.add(crownGeometry);
-  if (proceduralGrassGeometry) geometries.add(proceduralGrassGeometry);
+  geometries.add(proceduralGrassGeometry);
   if (proceduralFernGeometry) geometries.add(proceduralFernGeometry);
   let treeInstances = 0;
   let crownInstances = 0;
@@ -1230,9 +1368,9 @@ export const createTitanForestWorld = (
       const x1 = Math.min(x0 + VEGETATION_TILE_SIZE, vegetationMaxX);
       const random = seededRandom(seed + tileIndex * 0x9e37 + 17);
       const area = (x1 - x0) * (z1 - z0);
-      const treeTarget = Math.max(2, Math.round(area * (quality === 'high' ? 0.005 : 0.0027)));
-      const grassTarget = Math.max(24, Math.round(area * (quality === 'high' ? 1.04 : 0.18)));
-      const fernTarget = Math.max(8, Math.round(area * (quality === 'high' ? 0.055 : 0.02)));
+      const treeTarget = Math.max(2, Math.round(area * (quality === 'high' ? 0.0072 : 0.0032)));
+      const grassTarget = Math.max(24, Math.round(area * (quality === 'high' ? 2.2 : 0.28)));
+      const fernTarget = Math.max(8, Math.round(area * (quality === 'high' ? 0.11 : 0.032)));
       const treeScatter = createScatterRecords({
         count: treeTarget,
         random,
@@ -1247,10 +1385,10 @@ export const createTitanForestWorld = (
       });
       const trees: TreeRecord[] = treeScatter.map((record, index) => ({
         ...record,
-        height: (16 + random() * 13) * record.scale,
-        radius: 0.58 + random() * 0.5,
-        color: new THREE.Color(0x91aa7d)
-          .lerp(new THREE.Color(0xc0cf91), 0.25 + random() * 0.55)
+        height: (18 + random() * 12) * record.scale,
+        radius: 1.1 + random() * 0.9,
+        color: new THREE.Color(0x3f713d)
+          .lerp(new THREE.Color(0x75a954), 0.18 + random() * 0.58)
           .offsetHSL((index % 5) * 0.004, 0, 0)
           .getHex(),
       }));
@@ -1279,9 +1417,10 @@ export const createTitanForestWorld = (
         kind: 'fern',
       });
       const tileCenter = new THREE.Vector3((x0 + x1) * 0.5, 0, (z0 + z1) * 0.5);
-      const shadowTile = tileCenter.length() < 76 && tileIndex % 4 === 0;
+      const shadowTile = tileCenter.length() < 72 && tileIndex % 2 === 0;
       const treeGroup = createTreeTile(
         trees,
+        ferns,
         trunkGeometry,
         crownGeometry,
         trunkMaterial,
@@ -1295,6 +1434,8 @@ export const createTitanForestWorld = (
         cycleGeometry(fernGeometries, tileIndex),
         grassMaterial,
         fernMaterial,
+        proceduralGrassGeometry,
+        carpetMaterial,
       );
       const tile = new THREE.Group();
       tile.name = `titan-vegetation-tile-${tileIndex}`;
@@ -1302,7 +1443,7 @@ export const createTitanForestWorld = (
       group.add(tile);
       vegetationTiles.push({ center: tileCenter, trees: treeGroup, understory: understoryGroup });
       treeInstances += trees.length;
-      crownInstances += trees.length * 4;
+      crownInstances += trees.length * 7 + ferns.length;
       grassInstances += grass.length;
       fernInstances += ferns.length;
       tileIndex += 1;

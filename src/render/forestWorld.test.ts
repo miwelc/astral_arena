@@ -73,7 +73,7 @@ describe('Titan forest world', () => {
     expect(stats.grassInstances).toBeGreaterThan(7_000);
     expect(stats.fernInstances).toBeGreaterThan(700);
     expect(stats.rockInstances).toBeGreaterThan(120);
-    expect(stats.renderables).toBeLessThanOrEqual(170);
+    expect(stats.renderables).toBeLessThanOrEqual(200);
     expect(stats.shadowCasters).toBeLessThanOrEqual(14);
     expect(stats.transparentRenderables).toBe(1);
     expect(group.getObjectByName('titan-natural-cliff-perimeter')).toBeInstanceOf(THREE.InstancedMesh);

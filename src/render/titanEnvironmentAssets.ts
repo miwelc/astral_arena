@@ -54,6 +54,7 @@ export type TitanRockVariantName = typeof TITAN_ROCK_VARIANT_NAMES[number];
 export const TITAN_ENVIRONMENT_ASSET_PATHS = Object.freeze({
   grass: `${TITAN_ASSET_ROOT}/grass_bermuda_01/grass_bermuda_01_1k.gltf`,
   ferns: `${TITAN_ASSET_ROOT}/fern_02/fern_02_1k.gltf`,
+  fernAlpha: `${TITAN_ASSET_ROOT}/fern_02/textures/fern_02_alpha_1k.png`,
   rocks: `${TITAN_ASSET_ROOT}/rock_moss_set_02/rock_moss_set_02_1k.gltf`,
   cliff: `${TITAN_ASSET_ROOT}/rock_face_01/rock_face_01_1k.gltf`,
   environment: `${TITAN_ASSET_ROOT}/environment/schachen_forest_1k.hdr`,
@@ -305,6 +306,7 @@ export class TitanEnvironmentAssetLibrary {
     const request = Promise.all([
       this.loaders.gltf.loadAsync(url(TITAN_ENVIRONMENT_ASSET_PATHS.grass)),
       this.loaders.gltf.loadAsync(url(TITAN_ENVIRONMENT_ASSET_PATHS.ferns)),
+      this.loaders.texture.loadAsync(url(TITAN_ENVIRONMENT_ASSET_PATHS.fernAlpha)),
       this.loaders.gltf.loadAsync(url(TITAN_ENVIRONMENT_ASSET_PATHS.rocks)),
       this.loaders.gltf.loadAsync(url(TITAN_ENVIRONMENT_ASSET_PATHS.cliff)),
       this.loaders.hdri.loadAsync(url(TITAN_ENVIRONMENT_ASSET_PATHS.environment)),
@@ -321,6 +323,7 @@ export class TitanEnvironmentAssetLibrary {
     ]).then(([
       grassGltf,
       fernGltf,
+      fernAlpha,
       rockGltf,
       cliffGltf,
       environmentEquirect,
@@ -343,6 +346,25 @@ export class TitanEnvironmentAssetLibrary {
       environmentEquirect.name = 'titan-schachen-forest-environment';
       environmentEquirect.mapping = THREE.EquirectangularReflectionMapping;
       environmentEquirect.needsUpdate = true;
+
+      const fernAlphaMask = normalizedTexture(
+        fernAlpha,
+        'titan-fern-alpha-mask',
+        THREE.NoColorSpace,
+      );
+      fernGltf.scene.traverse((object) => {
+        if (!(object instanceof THREE.Mesh)) return;
+        const sourceMaterials = Array.isArray(object.material) ? object.material : [object.material];
+        for (const material of sourceMaterials) {
+          if (!(material instanceof THREE.MeshStandardMaterial)) continue;
+          material.alphaMap = fernAlphaMask;
+          material.alphaTest = 0.44;
+          material.transparent = false;
+          material.depthWrite = true;
+          material.side = THREE.DoubleSide;
+          material.needsUpdate = true;
+        }
+      });
 
       const assets: TitanEnvironmentAssets = Object.freeze({
         environmentEquirect,

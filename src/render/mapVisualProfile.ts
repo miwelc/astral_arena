@@ -371,22 +371,22 @@ const MAP_VISUAL_PROFILES = deepFreeze({
   'titan-expanse': {
     mapId: 'titan-expanse',
     environmentKind: 'alpine-forest',
-    backgroundColor: 0x75a7af,
-    fog: { color: 0x89aba9, density: 0.0037 },
-    exposure: 0.89,
-    environmentIntensity: 1.14,
+    backgroundColor: 0x4f91a8,
+    fog: { color: 0x4f838d, density: 0.0029 },
+    exposure: 1.08,
+    environmentIntensity: 0.65,
     lighting: {
-      ambient: { color: 0x9fb8b2, intensity: 0.4 },
-      hemisphere: { skyColor: 0xc8e2e3, groundColor: 0x55745b, intensity: 0.92 },
+      ambient: { color: 0x7d9e9c, intensity: 0.15 },
+      hemisphere: { skyColor: 0xb8dfe5, groundColor: 0x315b40, intensity: 0.82 },
       sun: {
-        color: 0xffd39a,
+        color: 0xffddb0,
         direction: [-0.48, 0.61, -0.63],
-        intensity: 2.15,
+        intensity: 2.3,
       },
       fill: {
-        color: 0x83c7d0,
+        color: 0x6eb5c3,
         direction: [0.66, 0.36, 0.58],
-        intensity: 0.68,
+        intensity: 0.42,
       },
       centralTower: { color: 0x9fe8d4, intensity: 12, distance: 18, decay: 2 },
       teamBases: {
@@ -394,7 +394,7 @@ const MAP_VISUAL_PROFILES = deepFreeze({
         nova: { color: 0xf58aa7, intensity: 9.5, distance: 13, decay: 2 },
       },
     },
-    bloom: { strength: 0.32, radius: 0.48, threshold: 0.96 },
+    bloom: { strength: 0.42, radius: 0.52, threshold: 0.88 },
     surfacePalette: {
       ground: 0x6f875c,
       outerGround: 0x455d4d,
@@ -411,11 +411,11 @@ const MAP_VISUAL_PROFILES = deepFreeze({
       novaAccent: 0xe47b96,
     },
     atmospherePalette: {
-      haze: 0xb7d0c8,
+      haze: 0x75aaa5,
       motes: 0xffe7b8,
       boundaryField: 0x8ac9bd,
       horizonGlow: 0xe0dbbd,
-      shadowTint: 0x1c3838,
+      shadowTint: 0x183d43,
       highlightTint: 0xffd7a4,
     },
     practicalLights: [

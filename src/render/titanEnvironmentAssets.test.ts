@@ -79,13 +79,15 @@ describe('Titan environment asset library', () => {
     expect(library.get()).toBe(first);
     expect(fixture.gltfLoad).toHaveBeenCalledTimes(4);
     expect(fixture.hdriLoad).toHaveBeenCalledTimes(1);
-    expect(fixture.textureLoad).toHaveBeenCalledTimes(10);
+    expect(fixture.textureLoad).toHaveBeenCalledTimes(11);
 
     expect(first.grass.size).toBe(TITAN_GRASS_VARIANT_NAMES.length);
     expect(first.ferns.size).toBe(TITAN_FERN_VARIANT_NAMES.length);
     expect(first.rocks.size).toBe(TITAN_ROCK_VARIANT_NAMES.length);
     expect(first.grass.get('grass_bermuda_01_medium_a')?.geometry).toBeInstanceOf(THREE.BufferGeometry);
     expect(first.ferns.get('fern_02_d')?.material).toBeInstanceOf(THREE.MeshStandardMaterial);
+    expect((first.ferns.get('fern_02_d')?.material as THREE.MeshStandardMaterial).alphaMap)
+      .toBeInstanceOf(THREE.Texture);
     expect(first.rocks.get('rock_moss_set_02_rock09')?.name).toBe('rock_moss_set_02_rock09');
     expect(first.cliff.name).toBe(TITAN_CLIFF_VARIANT_NAME);
 

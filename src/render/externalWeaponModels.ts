@@ -186,8 +186,8 @@ const externalSurfaceFor = (
 
 /**
  * Preserve the source texture's wear/value information while discarding its
- * hue. This lets normal maps and authored scratches survive, but turns green
- * paint and wood into the game's white ceramic composite language.
+ * hue. This lets normal maps and authored scratches survive while moving the
+ * imported paint into a dark graphite/ceramic sci-fi palette.
  */
 const installCeramicAlbedoRemap = (
   material: THREE.MeshPhysicalMaterial,
@@ -205,7 +205,7 @@ const installCeramicAlbedoRemap = (
             sampledDiffuseColor = sRGBTransferEOTF(sampledDiffuseColor);
           #endif
           float ceramicValue = dot(sampledDiffuseColor.rgb, vec3(0.2126, 0.7152, 0.0722));
-          ceramicValue = ${dark ? 'mix(0.34, 0.92, smoothstep(0.02, 0.96, ceramicValue))' : 'mix(0.72, 1.04, smoothstep(0.02, 0.96, ceramicValue))'};
+          ceramicValue = ${dark ? 'mix(0.38, 0.94, smoothstep(0.02, 0.96, ceramicValue))' : 'mix(0.62, 1.06, smoothstep(0.02, 0.96, ceramicValue))'};
           diffuseColor *= vec4(vec3(ceramicValue), sampledDiffuseColor.a);
         #endif
       `,
@@ -228,7 +228,7 @@ const tuneExternalMaterials = (root: THREE.Object3D, id: WeaponId): void => {
 
     const material = new THREE.MeshPhysicalMaterial({
       name: `${id}-external-${surface}-${source.name || 'surface'}`,
-      color: surface === 'ceramic' ? 0xf5f1e8 : 0x26333a,
+      color: surface === 'ceramic' ? 0x34464b : 0x101a20,
       map: source.map,
       normalMap: source.normalMap,
       normalScale: source.normalScale.clone().multiplyScalar(1.08),
@@ -243,11 +243,11 @@ const tuneExternalMaterials = (root: THREE.Object3D, id: WeaponId): void => {
       side: source.side,
       depthWrite: source.depthWrite,
       depthTest: source.depthTest,
-      roughness: surface === 'ceramic' ? 0.3 : 0.46,
-      metalness: surface === 'ceramic' ? 0.08 : 0.38,
-      clearcoat: surface === 'ceramic' ? 0.42 : 0.16,
-      clearcoatRoughness: surface === 'ceramic' ? 0.24 : 0.38,
-      envMapIntensity: surface === 'ceramic' ? 1.24 : 1.08,
+      roughness: surface === 'ceramic' ? 0.34 : 0.48,
+      metalness: surface === 'ceramic' ? 0.26 : 0.44,
+      clearcoat: surface === 'ceramic' ? 0.34 : 0.14,
+      clearcoatRoughness: surface === 'ceramic' ? 0.2 : 0.4,
+      envMapIntensity: surface === 'ceramic' ? 1.36 : 1.12,
     });
     material.userData.externalWeaponSurface = surface;
     material.userData.ceramicAlbedoRemap = Boolean(material.map);
@@ -536,7 +536,11 @@ export const preloadExternalWeaponModels = (
 ): Promise<ExternalWeaponLoadReport> => sharedExternalWeaponModels.preload(ids);
 
 export const createPreferredWeaponModel = (id: WeaponId): THREE.Group =>
-  sharedExternalWeaponModels.create(id);
+  // The authored pulse rifle has a substantially richer first-person
+  // silhouette (optic, vent banks, rails and articulated energy cell) than
+  // the low-poly source AR. Keep the imported library for the other weapons,
+  // but use the detailed native hero model for the weapon seen most often.
+  id === 'pulse-rifle' ? createWeaponModel(id) : sharedExternalWeaponModels.create(id);
 
 export const hasExternalWeaponModel = (id: WeaponId): boolean =>
   sharedExternalWeaponModels.has(id);
