@@ -45,6 +45,8 @@ const expectCompleteProfile = (profile: MapVisualProfile): void => {
   expect(profile.exposure).toBeGreaterThan(0);
   expect(profile.environmentIntensity).toBeGreaterThan(0);
 
+  expectColor(profile.lighting.ambient.color);
+  expect(profile.lighting.ambient.intensity).toBeGreaterThan(0);
   expectColor(profile.lighting.hemisphere.skyColor);
   expectColor(profile.lighting.hemisphere.groundColor);
   expect(profile.lighting.hemisphere.intensity).toBeGreaterThan(0);
@@ -100,6 +102,17 @@ describe('map visual profiles', () => {
     expect(crater.bloom).not.toEqual(umbra.bloom);
     expect(crater.surfacePalette).not.toEqual(umbra.surfacePalette);
     expect(crater.atmospherePalette).not.toEqual(umbra.atmospherePalette);
+  });
+
+  it('gives Umbra enough ambient fill to keep its night-side routes readable', () => {
+    const crater = getMapVisualProfile('crater-ridge');
+    const umbra = getMapVisualProfile('umbra-station');
+
+    expect(umbra.exposure).toBeGreaterThan(crater.exposure);
+    expect(umbra.lighting.ambient.intensity).toBeGreaterThan(
+      crater.lighting.ambient.intensity * 4,
+    );
+    expect(umbra.lighting.fill.intensity).toBeGreaterThan(crater.lighting.fill.intensity);
   });
 
   it('assigns practical lights to semantic landmarks instead of anonymous coordinates', () => {

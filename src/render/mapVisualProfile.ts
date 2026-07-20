@@ -22,6 +22,11 @@ export interface HemisphereLightVisualProfile {
   readonly intensity: number;
 }
 
+export interface AmbientLightVisualProfile {
+  readonly color: number;
+  readonly intensity: number;
+}
+
 export interface LocalLightVisualProfile {
   readonly color: number;
   readonly intensity: number;
@@ -30,6 +35,7 @@ export interface LocalLightVisualProfile {
 }
 
 export interface MapLightingProfile {
+  readonly ambient: AmbientLightVisualProfile;
   readonly hemisphere: HemisphereLightVisualProfile;
   readonly sun: DirectionalLightVisualProfile;
   readonly fill: DirectionalLightVisualProfile;
@@ -146,6 +152,7 @@ const MAP_VISUAL_PROFILES = deepFreeze({
     exposure: 1,
     environmentIntensity: 0.88,
     lighting: {
+      ambient: { color: 0x304a43, intensity: 0.1 },
       hemisphere: { skyColor: 0x91c6c2, groundColor: 0x07110e, intensity: 0.42 },
       sun: {
         color: 0xffd49a,
@@ -246,19 +253,20 @@ const MAP_VISUAL_PROFILES = deepFreeze({
     environmentKind: 'orbital-station',
     backgroundColor: 0x030712,
     fog: { color: 0x10192d, density: 0.0026 },
-    exposure: 1.02,
-    environmentIntensity: 0.84,
+    exposure: 1.08,
+    environmentIntensity: 0.9,
     lighting: {
-      hemisphere: { skyColor: 0x789bc4, groundColor: 0x030711, intensity: 0.34 },
+      ambient: { color: 0x6d86aa, intensity: 0.52 },
+      hemisphere: { skyColor: 0x88acd4, groundColor: 0x0c1425, intensity: 0.42 },
       sun: {
         color: 0xabcfff,
         direction: [-0.42, 0.7, -0.58],
-        intensity: 3.1,
+        intensity: 3.25,
       },
       fill: {
-        color: 0x7759b8,
+        color: 0x846cc4,
         direction: [0.64, 0.28, 0.72],
-        intensity: 0.42,
+        intensity: 0.52,
       },
       centralTower: { color: 0x63eaff, intensity: 23, distance: 17, decay: 2 },
       teamBases: {

@@ -1191,8 +1191,8 @@ export class ArenaRenderer {
     );
     this.scene.add(hemisphere);
     const ambient = new THREE.AmbientLight(
-      this.visualProfile.environmentKind === 'orbital-station' ? 0x58769d : 0x304a43,
-      this.visualProfile.environmentKind === 'orbital-station' ? 0.38 : 0.1,
+      lighting.ambient.color,
+      lighting.ambient.intensity,
     );
     ambient.name = `${this.map.id}-readability-ambient`;
     this.scene.add(ambient);
